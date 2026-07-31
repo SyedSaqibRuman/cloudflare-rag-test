@@ -1,0 +1,74 @@
+# --------------------------
+
+# 🔹 Node.js
+
+# --------------------------
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --------------------------
+
+# 🔹 Environment Files
+
+# --------------------------
+
+.env
+.env.*
+
+# --------------------------
+
+# 🔹 Logs
+
+# --------------------------
+
+logs/
+*.log
+
+# --------------------------
+
+# 🔹 Project Folders to Ignore
+
+# --------------------------
+
+content/
+ragBot/
+
+# --------------------------
+
+# 🔹 Archives / Zips
+
+# --------------------------
+
+*.zip
+ragBot.zip
+processed.json
+runtime-config.json
+questions*.json
+results*.csv
+results*.json
+
+
+# --------------------------
+
+# 🔹 OS / Editor Files
+
+# --------------------------
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --------------------------
+
+# 🔹 Build / Temp
+
+# --------------------------
+
+dist/
+build/
+tmp/
+temp/

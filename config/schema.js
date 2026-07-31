@@ -1,0 +1,135 @@
+// --------------------------
+// CONFIGURATION KEYS & SCHEMA
+// --------------------------
+
+const MODEL_KEYS = [
+  "EMBEDDING_MODEL",
+  "LLM_MODEL",
+  "SMALL_LLM",
+  "RERANKING_MODEL",
+];
+
+const DIMENSION_KEYS = ["EMBEDDING_DIMENSIONS"];
+
+const URL_KEYS = ["BASE_URL", "CONTACT_US_URL", "LOCATIONS_URL", "SERVICES_URL"];
+
+const STRING_KEYS = ["CONSULTANT_NAME", "COMPANY_NAME"];
+const PROMPT_KEYS = ["SYSTEM_PROMPT"];
+
+const RESOURCE_KEYS = ["VECTOR_INDEX", "R2_BUCKET_NAME"];
+
+/** Keys that belong to each company config (multi-company capable). */
+export const COMPANY_KEYS = [
+  ...MODEL_KEYS,
+  ...DIMENSION_KEYS,
+  ...URL_KEYS,
+  ...STRING_KEYS,
+  ...PROMPT_KEYS,
+  ...RESOURCE_KEYS,
+];
+
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS };
+
+/** Whitelist of allowed Cloudflare model IDs for each role. */
+export const ALLOWED_MODELS = {
+  EMBEDDING_MODEL: [
+    "@cf/baai/bge-base-en-v1.5",
+    "@cf/baai/bge-large-en-v1.5",
+    "@cf/baai/bge-small-en-v1.5",
+    "@cf/baai/bge-m3",
+    "@cf/llmware/bge-small-en-v1.5",
+    "@cloudflare/coding-gemma",
+  ],
+  LLM_MODEL: [
+    "@cf/meta/llama-3.1-8b-instruct-fp8",
+    "@cf/meta/llama-3.3-70b-instruct-fp8",
+    "@cf/meta/llama-3.2-3b-instruct",
+    "@cf/meta/llama-3.1-70b-instruct",
+    "@cf/meta/llama-3.1-8b-instruct",
+    "@cf/meta/llama-4-scout-17b-16e-instruct",
+  ],
+  SMALL_LLM: [
+    "@cf/meta/llama-3.2-3b-instruct",
+    "@cf/meta/llama-3.1-8b-instruct-fp8",
+    "@cf/meta/llama-3.2-1b-instruct",
+  ],
+  RERANKING_MODEL: [
+    "@cf/baai/bge-reranker-base",
+    "@cf/baai/bge-reranker-large",
+  ],
+};
+
+/** Maps embedding model IDs to their vector dimensions. */
+export const EMBEDDING_DIMENSIONS = {
+  "@cf/baai/bge-base-en-v1.5": 768,
+  "@cf/baai/bge-large-en-v1.5": 1024,
+  "@cf/baai/bge-small-en-v1.5": 384,
+  "@cf/baai/bge-m3": 1024,
+  "@cf/llmware/bge-small-en-v1.5": 384,
+};
+
+// --------------------------
+// DEFAULT COMPANY CONFIG
+// --------------------------
+export const DEFAULT_COMPANY = {
+  BASE_URL: "https://popularcert.com",
+  CONTACT_US_URL: "https://popularcert.com/contact-us/",
+  LOCATIONS_URL: "https://popularcert.com/locations/",
+  SERVICES_URL: "https://popularcert.com/services/",
+  CONSULTANT_NAME: "Sarah",
+  COMPANY_NAME: "Popularcert",
+  EMBEDDING_MODEL: "@cf/baai/bge-base-en-v1.5",
+  EMBEDDING_DIMENSIONS: 768,
+  LLM_MODEL: "@cf/meta/llama-3.1-8b-instruct-fp8",
+  SMALL_LLM: "@cf/meta/llama-3.2-3b-instruct",
+  RERANKING_MODEL: "@cf/baai/bge-reranker-base",
+  VECTOR_INDEX: "",
+  R2_BUCKET_NAME: "",
+  SYSTEM_PROMPT: `You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}. Do not deny being an AI if asked.
+
+## Rules
+- Answer only from available information. Never reveal your source.
+- Reply in the user's language; switch if asked.
+- Be concise, clear, and professional. No jokes, opinions, or assumptions.
+
+## Formatting
+- Markdown only. Use ## for multi-section headings, - for bullets, **bold** for key terms, numbered lists for steps only.
+- No raw HTML, code blocks, or underline headings (=== / ---).
+
+## Greetings & Introductions
+If the user greets you or introduces themselves, respond warmly, acknowledge them by name if given, and ask how you can help with their certification goals. Do NOT treat greetings or introductions as vague queries.
+
+## Clarification
+If a message is vague: acknowledge what you understood, then ask one focused question about the missing part. Never ask multiple questions at once.
+
+## Discovery
+If a user wants certification WITHOUT specifying a standard, ask these one at a time:
+1. Which standard? (ISO 9001, 14001, 27001, CE Mark, Halal, etc.)
+2. What industry/sector?
+3. Primary country/location?
+Do NOT outline steps or processes until the standard is confirmed.
+
+## Pricing
+If asked about cost:
+"Certification costs depend on your organization's size, number of employees, standards, and industry scope. We offer a **Free Cost Calculator** on our website. Would you like to share an email or phone number so a consultant can prepare a precise quote?"
+
+## Contact
+[Contact Us]({{CONTACT_US_URL}})
+
+## Locations
+[Our Locations]({{LOCATIONS_URL}})
+
+## Services
+[Our Services]({{SERVICES_URL}})
+
+## No Information Found
+"I'm not able to find relevant information regarding your query. Please contact our team directly."
+[Contact Us]({{CONTACT_US_URL}})`,
+};
+
+/**
+ * Build a fresh default company config clone.
+ */
+export function getDefaultCompanyConfig(overrides = {}) {
+  return { ...DEFAULT_COMPANY, ...overrides };
+}

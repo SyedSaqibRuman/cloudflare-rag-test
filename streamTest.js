@@ -1,0 +1,87 @@
+import { env } from "./env.js";
+
+/**
+ * Tests the Cloudflare AI Stream by piping results to stdout
+ * @param {string} prompt - The user query
+ * @returns {Promise<string|null>} The full concatenated response text
+ */
+export async function testStream(prompt = "Hello") {
+  try {
+    const MODEL = "@cf/meta/llama-3-8b-instruct";
+    const url = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${MODEL}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        stream: true,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    if (!response.body) {
+      throw new Error("No response body received from Cloudflare");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let fullText = "";
+    let buffer = ""; // Tracks partial lines across chunks
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // Decode current chunk and prepend any leftover buffer
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+
+      // Keep the last partial line in the buffer
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const cleaned = line.trim();
+
+        // Skip empty lines or the termination signal
+        if (!cleaned || cleaned === "data: [DONE]") {
+          continue;
+        }
+
+        if (cleaned.startsWith("data: ")) {
+          try {
+            // Remove 'data: ' prefix and parse
+            const parsed = JSON.parse(cleaned.slice(6));
+
+            if (parsed.response) {
+              process.stdout.write(parsed.response);
+              fullText += parsed.response;
+            }
+          } catch (e) {
+            // If parsing fails, the line might still be partial
+            // We prepend it back to the buffer for the next chunk
+            buffer = line + buffer;
+          }
+        }
+      }
+    }
+
+    console.log("\n\n✅ Stream completed");
+    return fullText;
+
+  } catch (err) {
+    console.error("❌ Stream error:", err.message);
+    return null;
+  }
+}
+
+
+// await testStream("Write a short poem about AI");
