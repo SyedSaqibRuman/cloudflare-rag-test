@@ -1,9 +1,8 @@
-import fs from "fs";
-import { env } from "../env.js";
 import { DEFAULT_COMPANY, getDefaultCompanyConfig, EMBEDDING_DIMENSIONS } from "./schema.js";
-import { runtimeConfig, saveConfig, CONFIG_FILE } from "./store.js";
+import { runtimeConfig, saveConfig } from "./store.js";
 import { validateConfigKey } from "./validation.js";
 import { resolvePromptVariables } from "./prompts.js";
+import { clearAllCompanyDbs } from "./sqlite.js";
 
 /**
  * Update one or more runtime config keys on a company.
@@ -68,20 +67,16 @@ export function resetCompanyConfig(companyName) {
 }
 
 /**
- * Reset entire runtime config to env defaults and remove persisted file.
+ * Reset entire runtime config to env defaults and remove all company databases.
  * Returns the default config.
  */
 export function resetConfig() {
-  const companyName = env.COMPANY_NAME || DEFAULT_COMPANY.COMPANY_NAME;
+  const companyName = DEFAULT_COMPANY.COMPANY_NAME;
   runtimeConfig.COMPANIES = { [companyName]: getDefaultCompanyConfig() };
 
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      fs.unlinkSync(CONFIG_FILE);
-      console.log("🗑  runtime-config.json removed — config reset to defaults");
-    }
-  } catch (err) {
-    console.error(`❌ Failed to remove runtime-config.json: ${err.message}`);
-  }
+  clearAllCompanyDbs();
+  saveConfig(runtimeConfig);
+
+  console.log("🗑  All company databases removed — config reset to defaults");
   return { ...runtimeConfig.COMPANIES[companyName] };
 }

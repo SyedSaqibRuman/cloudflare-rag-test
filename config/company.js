@@ -3,7 +3,7 @@ import {
   EMBEDDING_DIMENSIONS,
   getDefaultCompanyConfig,
 } from "./schema.js";
-import { runtimeConfig, saveConfig, getCompanyConfig } from "./store.js";
+import { runtimeConfig, saveConfig, getCompanyConfig, deleteCompanyDb } from "./store.js";
 import { validateConfigKey, validateCompanyName } from "./validation.js";
 
 /**
@@ -138,6 +138,7 @@ export function deleteCompany(name) {
   if (!runtimeConfig.COMPANIES[n]) return { error: `Company '${n}' not found.` };
 
   delete runtimeConfig.COMPANIES[n];
+  deleteCompanyDb(n);
   saveConfig(runtimeConfig);
 
   console.log(`🗑 Company '${n}' deleted`);

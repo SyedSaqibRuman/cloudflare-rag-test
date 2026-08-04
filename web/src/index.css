@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Light/dark theme via CSS variables remapped in @theme inline.
+ * Light = standard Tailwind slate on light surfaces; dark = default
+ * dark slate. Accent text shades are adjusted per theme for contrast.
+ */
+@theme inline {
+  --color-slate-50: var(--ui-slate-50);
+  --color-slate-100: var(--ui-slate-100);
+  --color-slate-200: var(--ui-slate-200);
+  --color-slate-300: var(--ui-slate-300);
+  --color-slate-400: var(--ui-slate-400);
+  --color-slate-500: var(--ui-slate-500);
+  --color-slate-600: var(--ui-slate-600);
+  --color-slate-700: var(--ui-slate-700);
+  --color-slate-800: var(--ui-slate-800);
+  --color-slate-900: var(--ui-slate-900);
+  --color-slate-950: var(--ui-slate-950);
+
+  --color-indigo-200: var(--ui-indigo-200);
+  --color-indigo-300: var(--ui-indigo-300);
+  --color-indigo-400: var(--ui-indigo-400);
+
+  --color-rose-200: var(--ui-rose-200);
+  --color-rose-300: var(--ui-rose-300);
+  --color-rose-400: var(--ui-rose-400);
+
+  --color-amber-300: var(--ui-amber-300);
+
+  --color-emerald-200: var(--ui-emerald-200);
+  --color-emerald-300: var(--ui-emerald-300);
+
+  --color-cyan-300: var(--ui-cyan-300);
+}
+
+:root {
+  color-scheme: light;
+
+  --ui-slate-50: #0f172a;
+  --ui-slate-100: #1e293b;
+  --ui-slate-200: #334155;
+  --ui-slate-300: #475569;
+  --ui-slate-400: #64748b;
+  --ui-slate-500: #94a3b8;
+  --ui-slate-600: #cbd5e1;
+  --ui-slate-700: #e2e8f0;
+  --ui-slate-800: #f1f5f9;
+  --ui-slate-900: #ffffff;
+  --ui-slate-950: #f8fafc;
+
+  --ui-indigo-200: #6366f1;
+  --ui-indigo-300: #4f46e5;
+  --ui-indigo-400: #6366f1;
+
+  --ui-rose-200: #e11d48;
+  --ui-rose-300: #e11d48;
+  --ui-rose-400: #be123c;
+
+  --ui-amber-300: #d97706;
+
+  --ui-emerald-200: #047857;
+  --ui-emerald-300: #059669;
+
+  --ui-cyan-300: #0e7490;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --ui-slate-50: #f8fafc;
+  --ui-slate-100: #f1f5f9;
+  --ui-slate-200: #e2e8f0;
+  --ui-slate-300: #cbd5e1;
+  --ui-slate-400: #94a3b8;
+  --ui-slate-500: #64748b;
+  --ui-slate-600: #475569;
+  --ui-slate-700: #334155;
+  --ui-slate-800: #1e293b;
+  --ui-slate-900: #0f172a;
+  --ui-slate-950: #020617;
+
+  --ui-indigo-200: #c7d2fe;
+  --ui-indigo-300: #a5b4fc;
+  --ui-indigo-400: #818cf8;
+
+  --ui-rose-200: #fecdd3;
+  --ui-rose-300: #fda4af;
+  --ui-rose-400: #fb7185;
+
+  --ui-amber-300: #fcd34d;
+
+  --ui-emerald-200: #a7f3d0;
+  --ui-emerald-300: #6ee7b7;
+
+  --ui-cyan-300: #67e8f9;
+}
+
+body {
+  background-color: var(--ui-slate-950);
+  color: var(--ui-slate-100);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-700 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-600;
+}

@@ -1,4 +1,6 @@
 import "dotenv/config";
+import path from "path";
+import fs from "fs";
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -13,6 +15,11 @@ import { env } from "./env.js";
 // --------------------------
 const app = express();
 const PORT = parseInt(env.PORT, 10);
+
+// Served admin UI (built with `npm run build` inside web/)
+const WEB_DIR = path.resolve(process.cwd(), "web", "dist");
+const WEB_INDEX = path.join(WEB_DIR, "index.html");
+const hasWeb = fs.existsSync(WEB_INDEX);
 
 const ALLOWED_ORIGINS = [
   "https://dev.popularcert.com",
@@ -123,8 +130,23 @@ app.use("/cloudflare", adminLimiter, cloudflareRoutes);
 
 // --------------------------
 // 🔹 HEALTH CHECK
+// Serves the admin portal for browsers (Accept: text/html) and JSON for API clients.
 // --------------------------
 app.get("/", (req, res) => {
+  const wantsHtml = (req.headers.accept || "").includes("text/html");
+  if (hasWeb && wantsHtml) {
+    return res.sendFile(WEB_INDEX);
+  }
+  res.json({
+    success: true,
+    status: "ok",
+    message: "PopularCert RAG API is active ",
+    uptime: process.uptime(),
+    timestamp: Date.now(),
+  });
+});
+
+app.get("/_health", (req, res) => {
   res.json({
     success: true,
     status: "ok",
@@ -298,6 +320,20 @@ app.post("/test", async (req, res) => {
     res.end();
   }
 });
+
+// --------------------------
+// 🔹 STATIC ADMIN PORTAL
+// Serves the built React admin UI from web/dist on the same server.
+// --------------------------
+if (hasWeb) {
+  app.use(express.static(WEB_DIR));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+    if (req.path.startsWith("/cloudflare") || req.path.startsWith("/ask") || req.path.startsWith("/_health")) return next();
+    if (!(req.headers.accept || "").includes("text/html")) return next();
+    res.sendFile(WEB_INDEX);
+  });
+}
 
 // --------------------------
 // 🔹 404 CATCH-ALL

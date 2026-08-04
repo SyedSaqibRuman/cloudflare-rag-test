@@ -1,54 +1,74 @@
 import fs from "fs";
 import path from "path";
-import { env } from "../env.js";
 import { DEFAULT_COMPANY, getDefaultCompanyConfig } from "./schema.js";
+import {
+  loadCompanyConfig,
+  saveCompanyConfig,
+  listCompanyDbs,
+  deleteCompanyDb,
+} from "./sqlite.js";
 
 // --------------------------
-// CONFIG FILE PATH
+// LEGACY JSON CONFIG FILE
+// Only used to migrate old flat/multi-company runtime-config.json into SQLite.
 // --------------------------
 const CONFIG_FILE = path.resolve(process.cwd(), "runtime-config.json");
 
-// --------------------------
-// LOAD PERSISTED CONFIG
-// --------------------------
-function loadConfig() {
+function migrateLegacyJson() {
   try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const raw = fs.readFileSync(CONFIG_FILE, "utf-8");
-      const saved = JSON.parse(raw);
+    if (!fs.existsSync(CONFIG_FILE)) return;
 
-      // Multi-company format: already has COMPANIES map
-      if (saved.COMPANIES && typeof saved.COMPANIES === "object") {
-        return { COMPANIES: saved.COMPANIES };
-      }
+    const raw = fs.readFileSync(CONFIG_FILE, "utf-8");
+    const saved = JSON.parse(raw);
 
-      // Legacy flat format → migrate to multi-company
-      const companyName = saved.COMPANY_NAME || DEFAULT_COMPANY.COMPANY_NAME;
-      const companyConfig = getDefaultCompanyConfig(saved);
-      companyConfig.COMPANY_NAME = companyName;
+    const companies =
+      saved.COMPANIES && typeof saved.COMPANIES === "object"
+        ? saved.COMPANIES
+        : {
+            [saved.COMPANY_NAME || DEFAULT_COMPANY.COMPANY_NAME]: getDefaultCompanyConfig(saved),
+          };
 
-      console.log(`🔄 Migrating flat config to company "${companyName}"`);
-      return { COMPANIES: { [companyName]: companyConfig } };
+    for (const [name, config] of Object.entries(companies)) {
+      saveCompanyConfig(name, config);
     }
-  } catch (err) {
-    console.warn(`⚠️  Failed to load runtime-config.json: ${err.message}`);
-  }
 
-  // No config file — seed from env defaults
-  const companyName = env.COMPANY_NAME || DEFAULT_COMPANY.COMPANY_NAME;
-  return {
-    COMPANIES: { [companyName]: getDefaultCompanyConfig() },
-  };
+    fs.unlinkSync(CONFIG_FILE);
+    console.log(`🔄 Migrated runtime-config.json (${Object.keys(companies).length} companies) to SQLite`);
+  } catch (err) {
+    console.warn(`⚠️  Failed to migrate runtime-config.json: ${err.message}`);
+  }
 }
 
 // --------------------------
-// PERSIST CONFIG TO DISK
+// LOAD RUNTIME CONFIG FROM SQLITE
+// --------------------------
+function loadConfig() {
+  migrateLegacyJson();
+
+  const companies = {};
+  for (const name of listCompanyDbs()) {
+    const config = loadCompanyConfig(name);
+    if (config) companies[name] = config;
+  }
+
+  if (Object.keys(companies).length === 0) {
+    const defaultName = DEFAULT_COMPANY.COMPANY_NAME;
+    const config = getDefaultCompanyConfig();
+    config.COMPANY_NAME = defaultName;
+    companies[defaultName] = config;
+    saveCompanyConfig(defaultName, config);
+    console.log(`🌱 Seeded default company '${defaultName}' in db/${defaultName}.db`);
+  }
+
+  return { COMPANIES: companies };
+}
+
+// --------------------------
+// PERSIST TO SQLITE (one database file per company)
 // --------------------------
 export function saveConfig(config) {
-  try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
-  } catch (err) {
-    console.error(`❌ Failed to save runtime-config.json: ${err.message}`);
+  for (const [name, companyConfig] of Object.entries(config.COMPANIES)) {
+    saveCompanyConfig(name, companyConfig);
   }
 }
 
@@ -68,6 +88,6 @@ export function getCompanyConfig(companyName) {
 }
 
 // --------------------------
-// CONFIG FILE PATH (for reset operations)
+// RE-EXPORTS for company deletion
 // --------------------------
-export { CONFIG_FILE };
+export { deleteCompanyDb };

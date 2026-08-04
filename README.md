@@ -8,11 +8,21 @@ A Retrieval-Augmented Generation (RAG) API powered by Cloudflare AI, Vectorize, 
 
 ```bash
 npm install
+
+# Build the admin portal UI (served by the API server)
+cd web
+npm install
+npm run build
+cd ..
+
+# Start the server (serves both the API and the admin UI)
 cp .env.example .env
 node app.js
 ```
 
-The server starts on `http://localhost:3000` by default.
+The server starts on `http://localhost:3000` by default. Browsers get the admin dashboard; API clients get JSON.
+
+For UI development with hot reload, run `cd web && npm run dev` and the Vite dev server (port 5173) proxies API requests to the backend.
 
 ---
 

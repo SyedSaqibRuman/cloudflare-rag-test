@@ -1,4 +1,5 @@
 import express from "express";
+import cron from "node-cron";
 import {
   startJob,
   stopJob,
@@ -8,8 +9,110 @@ import {
   getRunningJobs,
   getStatus,
 } from "../cron/index.js";
+import {
+  listPresets,
+  createPreset,
+  updatePreset,
+  deletePreset,
+} from "../config/presets.js";
 
 const router = express.Router();
+
+// ============================================================
+// 0. SCHEDULER PRESETS — reusable cron schedules stored in SQLite
+// ============================================================
+
+// GET /presets
+router.get("/presets", (req, res) => {
+  try {
+    return res.json({ success: true, presets: listPresets() });
+  } catch (err) {
+    console.error("❌ GET /presets error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /presets
+// Body: { name, schedule }
+router.post("/presets", (req, res) => {
+  try {
+    const { name, schedule } = req.body || {};
+
+    if (!name?.trim()) {
+      return res.status(400).json({ success: false, message: "name is required." });
+    }
+
+    if (!schedule?.trim()) {
+      return res.status(400).json({ success: false, message: "schedule is required." });
+    }
+
+    if (!cron.validate(schedule.trim())) {
+      return res.status(400).json({ success: false, message: "Invalid cron expression." });
+    }
+
+    const preset = createPreset(name.trim(), schedule.trim());
+    return res.status(201).json({ success: true, preset });
+  } catch (err) {
+    console.error("❌ POST /presets error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /presets/:id
+// Body: { name, schedule }
+router.put("/presets/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { name, schedule } = req.body || {};
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid preset id." });
+    }
+
+    if (!name?.trim()) {
+      return res.status(400).json({ success: false, message: "name is required." });
+    }
+
+    if (!schedule?.trim()) {
+      return res.status(400).json({ success: false, message: "schedule is required." });
+    }
+
+    if (!cron.validate(schedule.trim())) {
+      return res.status(400).json({ success: false, message: "Invalid cron expression." });
+    }
+
+    const updated = updatePreset(id, name.trim(), schedule.trim());
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Preset not found." });
+    }
+
+    return res.json({ success: true, message: "Preset updated." });
+  } catch (err) {
+    console.error("❌ PUT /presets/:id error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /presets/:id
+router.delete("/presets/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid preset id." });
+    }
+
+    const deleted = deletePreset(id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Preset not found." });
+    }
+
+    return res.json({ success: true, message: "Preset deleted." });
+  } catch (err) {
+    console.error("❌ DELETE /presets/:id error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // ============================================================
 // 1. STANDALONE JOBS — run jobs, multiple concurrent allowed
