@@ -119,20 +119,7 @@ export default function Layout({ route, navigate, children }) {
         Skip to main content
       </a>
       <aside className="fixed inset-y-0 left-0 z-30 flex w-60 flex-col border-r border-slate-800 bg-slate-900/90 backdrop-blur">
-        {/* Brand */}
-        <div className="flex items-center gap-3 px-5 pt-5 pb-4">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white shadow-lg shadow-indigo-500/25">
-            PC
-          </span>
-          <span className="min-w-0">
-            <span className="block truncate text-[15px] font-semibold leading-tight tracking-tight text-slate-100" translate="no">
-              PopularCert
-            </span>
-            <span className="block truncate text-[11px] leading-tight text-slate-500">AI Gateway Admin</span>
-          </span>
-        </div>
-
-        <div className="border-t border-slate-800 px-4 py-3">
+        <div className="border-b border-slate-800 px-5 py-4">
           <CompanySelect company={company} companies={companies} select={select} />
         </div>
 
