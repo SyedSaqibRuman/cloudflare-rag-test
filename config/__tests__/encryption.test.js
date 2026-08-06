@@ -126,7 +126,7 @@ test("credentials are encrypted at rest in db/<company>.db and decrypt on load",
   const { createCompany } = await import("../company.js");
   const { loadCompanyConfig, companyDbPath } = await import("../sqlite.js");
 
-  const result = createCompany("acme", {
+  const result = await createCompany("acme", {
     CLOUDFLARE_API_TOKEN: "sk-super-secret-token",
     CLOUDFLARE_ACCOUNT_ID: "account-123",
   });

@@ -58,9 +58,10 @@ export function getCompany(name) {
 /**
  * Create a new company with the given config.
  * Falls back to defaults for missing keys.
- * Returns the created config or an error.
+ * Returns the created config or an error. Persists first, then commits to
+ * memory — a storage failure leaves the runtime config untouched.
  */
-export function createCompany(name, patch = {}) {
+export async function createCompany(name, patch = {}) {
   const n = name?.trim();
   const nameErr = validateCompanyName(n);
   if (nameErr) return { error: nameErr };
@@ -92,8 +93,12 @@ export function createCompany(name, patch = {}) {
   // Auto-set embedding dimensions from model
   applyModelDimensions(companyConfig);
 
+  try {
+    await saveConfig({ COMPANIES: { [n]: companyConfig } });
+  } catch (err) {
+    return { error: `Failed to persist company '${n}': ${err.message}` };
+  }
   runtimeConfig.COMPANIES[n] = companyConfig;
-  saveConfig(runtimeConfig);
 
   console.log(`✅ Company '${n}' created`);
   return { config: { ...companyConfig } };
@@ -131,9 +136,9 @@ export function applyConfigPatch(companyConfig, patch) {
 
 /**
  * Update an existing company's config.
- * Returns the updated config or an error.
+ * Returns the updated config or an error. Persists first, then commits.
  */
-export function updateCompany(name, patch) {
+export async function updateCompany(name, patch) {
   const n = name?.trim();
   if (!n) return { error: "Company name is required." };
   if (!runtimeConfig.COMPANIES[n]) return { error: `Company '${n}' not found.` };
@@ -141,8 +146,12 @@ export function updateCompany(name, patch) {
   const { config, errors } = applyConfigPatch(runtimeConfig.COMPANIES[n], patch);
   if (errors.length) return { error: errors.join("; ") };
 
+  try {
+    await saveConfig({ COMPANIES: { [n]: config } });
+  } catch (err) {
+    return { error: `Failed to persist company '${n}': ${err.message}` };
+  }
   runtimeConfig.COMPANIES[n] = config;
-  saveConfig(runtimeConfig);
   console.log(`✅ Company '${n}' updated:`, Object.keys(patch).join(", "));
   return { config: { ...config } };
 }
@@ -150,14 +159,20 @@ export function updateCompany(name, patch) {
 /**
  * Delete a company.
  */
-export function deleteCompany(name) {
+export async function deleteCompany(name) {
   const n = name?.trim();
   if (!n) return { error: "Company name is required." };
   if (!runtimeConfig.COMPANIES[n]) return { error: `Company '${n}' not found.` };
 
+  const original = runtimeConfig.COMPANIES[n];
   delete runtimeConfig.COMPANIES[n];
-  deleteCompanyDb(n);
-  saveConfig(runtimeConfig);
+  try {
+    await deleteCompanyDb(n);
+  } catch (err) {
+    runtimeConfig.COMPANIES[n] = original;
+    return { error: err.message };
+  }
+  await saveConfig(runtimeConfig);
 
   console.log(`🗑 Company '${n}' deleted`);
   return { success: true };
@@ -167,20 +182,26 @@ export function deleteCompany(name) {
  * Set or clear a company's ask/ask-stream API key.
  * Pass a non-empty key to set it; pass null/"" to revoke it.
  */
-export function setCompanyApiKey(name, apiKey) {
+export async function setCompanyApiKey(name, apiKey) {
   const n = name?.trim();
   if (!n) return { error: "Company name is required." };
   if (!runtimeConfig.COMPANIES[n]) return { error: `Company '${n}' not found.` };
 
+  const draft = { ...runtimeConfig.COMPANIES[n] };
   if (apiKey == null || apiKey === "") {
-    delete runtimeConfig.COMPANIES[n].API_KEY;
+    delete draft.API_KEY;
   } else {
     const err = validateConfigKey("API_KEY", apiKey);
     if (err) return { error: err };
-    runtimeConfig.COMPANIES[n].API_KEY = apiKey.trim();
+    draft.API_KEY = apiKey.trim();
   }
 
-  saveConfig(runtimeConfig);
+  try {
+    await saveConfig({ COMPANIES: { [n]: draft } });
+  } catch (err) {
+    return { error: `Failed to persist company '${n}': ${err.message}` };
+  }
+  runtimeConfig.COMPANIES[n] = draft;
   console.log(`🔑 API key ${apiKey ? "set" : "cleared"} for company '${n}'`);
   return { success: true };
 }

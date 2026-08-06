@@ -31,7 +31,6 @@ import {
   generateApiKey,
   validateConfigKey,
 } from "../config/index.js";
-import { env } from "../env.js";
 import { companyFromRequest } from "../utils/request-context.js";
 
 const router = express.Router();
@@ -86,7 +85,7 @@ router.get("/companies", (req, res) => {
 // POST /cloudflare/companies
 // Create a new company.
 // Body: { name, config?: { BASE_URL, LLM_MODEL, ... } }
-router.post("/companies", (req, res) => {
+router.post("/companies", async (req, res) => {
   try {
     const { name, config: patch } = req.body;
 
@@ -94,7 +93,7 @@ router.post("/companies", (req, res) => {
       return res.status(400).json({ success: false, error: "Company name is required." });
     }
 
-    const result = createCompany(name, patch);
+    const result = await createCompany(name, patch);
 
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
@@ -131,9 +130,9 @@ router.get("/companies/:name", (req, res) => {
 // PUT /cloudflare/companies/:name
 // Update a company's config.
 // Body: { BASE_URL, LLM_MODEL, ... }
-router.put("/companies/:name", (req, res) => {
+router.put("/companies/:name", async (req, res) => {
   try {
-    const result = updateCompany(req.params.name, req.body);
+    const result = await updateCompany(req.params.name, req.body);
 
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
@@ -151,9 +150,9 @@ router.put("/companies/:name", (req, res) => {
 });
 
 // DELETE /cloudflare/companies/:name
-router.delete("/companies/:name", (req, res) => {
+router.delete("/companies/:name", async (req, res) => {
   try {
-    const result = deleteCompany(req.params.name);
+    const result = await deleteCompany(req.params.name);
 
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
@@ -168,9 +167,9 @@ router.delete("/companies/:name", (req, res) => {
 
 // POST /cloudflare/companies/:name/reset
 // Reset a company's config to env defaults.
-router.post("/companies/:name/reset", (req, res) => {
+router.post("/companies/:name/reset", async (req, res) => {
   try {
-    const result = resetCompanyConfig(req.params.name);
+    const result = await resetCompanyConfig(req.params.name);
 
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
@@ -189,10 +188,10 @@ router.post("/companies/:name/reset", (req, res) => {
 
 // POST /cloudflare/companies/:name/apikey
 // Generate (or rotate) the company's API key. The key is returned exactly once.
-router.post("/companies/:name/apikey", (req, res) => {
+router.post("/companies/:name/apikey", async (req, res) => {
   try {
     const apiKey = generateApiKey();
-    const result = setCompanyApiKey(req.params.name, apiKey);
+    const result = await setCompanyApiKey(req.params.name, apiKey);
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
     }
@@ -205,9 +204,9 @@ router.post("/companies/:name/apikey", (req, res) => {
 
 // DELETE /cloudflare/companies/:name/apikey
 // Revoke the company's API key (ask/ask-stream become open again).
-router.delete("/companies/:name/apikey", (req, res) => {
+router.delete("/companies/:name/apikey", async (req, res) => {
   try {
-    const result = setCompanyApiKey(req.params.name, null);
+    const result = await setCompanyApiKey(req.params.name, null);
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
     }
@@ -416,7 +415,7 @@ router.get("/config", (req, res) => {
 
 // PUT /cloudflare/config
 // Update runtime config values for a company.
-router.put("/config", (req, res) => {
+router.put("/config", async (req, res) => {
   try {
     const companyName = companyFromHeader(req, res);
     if (!companyName) return;
@@ -442,7 +441,7 @@ router.put("/config", (req, res) => {
     // which rejects unknown keys and auto-follows EMBEDDING_DIMENSIONS from
     // EMBEDDING_MODEL — no inline re-derivation here.
 
-    const result = updateConfig(patch, companyName);
+    const result = await updateConfig(patch, companyName);
 
     if (result.errors?.length) {
       return res.status(400).json({ success: false, errors: result.errors });
@@ -462,9 +461,9 @@ router.put("/config", (req, res) => {
 });
 
 // POST /cloudflare/config/reset
-router.post("/config/reset", (req, res) => {
+router.post("/config/reset", async (req, res) => {
   try {
-    const config = resetConfig();
+    const config = await resetConfig();
 
     console.log("🗑 Config reset to env defaults");
 
@@ -513,7 +512,7 @@ router.get("/prompt", (req, res) => {
 });
 
 // PUT /cloudflare/prompt
-router.put("/prompt", (req, res) => {
+router.put("/prompt", async (req, res) => {
   try {
     const template = req.body.template || req.body.value;
     if (!template || typeof template !== "string" || !template.trim()) {
@@ -528,7 +527,7 @@ router.put("/prompt", (req, res) => {
     const companyName = companyFromHeader(req, res);
     if (!companyName) return;
 
-    const result = updateConfig({ SYSTEM_PROMPT: template.trim() }, companyName);
+    const result = await updateConfig({ SYSTEM_PROMPT: template.trim() }, companyName);
     if (result.errors?.length) {
       return res.status(400).json({ success: false, errors: result.errors });
     }
@@ -552,11 +551,11 @@ router.put("/prompt", (req, res) => {
 });
 
 // POST /cloudflare/prompt/reset
-router.post("/prompt/reset", (req, res) => {
+router.post("/prompt/reset", async (req, res) => {
   try {
     const companyName = companyFromHeader(req, res);
     if (!companyName) return;
-    const result = resetPrompt(companyName);
+    const result = await resetPrompt(companyName);
     if (result.error) {
       return res.status(400).json({ success: false, error: result.error });
     }

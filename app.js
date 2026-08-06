@@ -13,6 +13,7 @@ import gatewayRoutes from "./mysql/gateway-router.js";
 import { createAskRouter } from "./routes/ask.js";
 import { env } from "./env.js";
 import { requireAdmin } from "./auth.js";
+import { initConfig, runtimeConfig, resolveCreds } from "./config/index.js";
 import { isAllowedOrigin } from "./utils/request-context.js";
 import swaggerUi from "swagger-ui-express";
 import openapi from "./docs/openapi.js";
@@ -49,11 +50,11 @@ app.use(express.json({ limit: "1mb" }));
 
 // Global baseline: 100 req/min across all routes
 const globalWindowMs = 60 * 1000; // 1 minute
-const globalMax = parseInt(env.RATE_LIMIT_GLOBAL, 10);
+const globalMax = 100;
 
 // Strict limit for admin endpoints (POST/PUT/DELETE operations):
 const adminWindowMs = 60 * 1000; // 1 minute
-const adminMax = parseInt(env.RATE_LIMIT_ADMIN, 10);
+const adminMax = 30;
 
 const limiterDefaults = {
   standardHeaders: true,
@@ -169,6 +170,19 @@ app.post("/test", async (req, res) => {
   try {
     const prompt = req.body?.prompt || "Hello";
 
+    // Cloudflare credentials now come from the company's stored config
+    // (MySQL/SQLite), not env vars. Use the x-company-name header if it
+    // matches a known company, else fall back to the first company.
+    const fromHeader = req.headers["x-company-name"];
+    const companyName =
+      (fromHeader && runtimeConfig.COMPANIES[fromHeader] ? fromHeader : null) ||
+      Object.keys(runtimeConfig.COMPANIES)[0];
+
+    if (!companyName) {
+      throw new Error("No company configured — create one first");
+    }
+    const creds = resolveCreds(companyName);
+
     // --------------------------
     // 🔹 SSE Headers
     // --------------------------
@@ -183,7 +197,7 @@ app.post("/test", async (req, res) => {
     // --------------------------
     await testStream(prompt, (token) => {
       res.write(`data: ${token}\n\n`);
-    });
+    }, creds);
 
     // End signals for the frontend listener
     res.write("event: done\ndata: END\n\n");
@@ -221,6 +235,12 @@ app.use((req, res) => {
 // --------------------------
 // 🔹 START SERVER
 // --------------------------
+try {
+  await initConfig();
+} catch (err) {
+  console.error(`❌ Failed to initialize config (${env.CONFIG_STORE}): ${err.message}`);
+  process.exit(1);
+}
 app.listen(PORT, (err) => {
   if (err) {
     console.error(`❌ Failed to start server on port ${PORT}: ${err.message}`);

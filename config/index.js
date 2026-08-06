@@ -15,7 +15,7 @@ export {
 } from "./schema.js";
 
 // Store (runtimeConfig, persistence)
-export { runtimeConfig, saveConfig, getCompanyConfig } from "./store.js";
+export { runtimeConfig, saveConfig, getCompanyConfig, initConfig } from "./store.js";
 
 // Validation
 export { validateConfigKey, validateCompanyName } from "./validation.js";

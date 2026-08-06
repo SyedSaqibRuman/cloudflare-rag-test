@@ -17,7 +17,7 @@ const { createAskRouter } = await import("../../routes/ask.js");
 
 // Seed the company the tests authenticate as. One company, created before any
 // test runs; the API-key gate tests rotate its key.
-createCompany("testco");
+await createCompany("testco");
 
 after(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
@@ -147,7 +147,7 @@ test("POST /ask-stream validates before opening the stream", async () => {
 });
 
 test("API key gate: 401 without the key when one is set", async () => {
-  setCompanyApiKey("testco", "pk_testkey123456");
+  await setCompanyApiKey("testco", "pk_testkey123456");
   const server = await listen(makeApp());
   try {
     const { res, json } = await post(server, "/ask", { question: "hi" }, { "x-company-name": "testco" });

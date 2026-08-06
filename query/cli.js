@@ -1,6 +1,6 @@
 import "dotenv/config";
 import readline from "readline";
-import { getConfig } from "../config/index.js";
+import { getConfig, initConfig } from "../config/index.js";
 import { askQuestion } from "./answer.js";
 import { MAX_HISTORY } from "./llm.js";
 
@@ -11,6 +11,7 @@ import { MAX_HISTORY } from "./llm.js";
 // Run directly, never imported — the guard keeps app.js imports clean.
 // --------------------------
 if (process.argv[1]?.endsWith("query/cli.js")) {
+  await initConfig();
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const history = [];
   let cliCompany = null;

@@ -6,7 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
-import { SENSITIVE_KEY_SET, encryptSecret, decryptSecret } from "./encryption.js";
+import { encodeStoredValue, decodeStoredValue } from "./codec.js";
 
 const DB_DIR = path.resolve(process.cwd(), "db");
 
@@ -43,20 +43,7 @@ export function loadCompanyConfig(name) {
     const rows = db.prepare("SELECT key, value FROM config").all();
     const config = {};
     for (const row of rows) {
-      let value;
-      try {
-        value = JSON.parse(row.value);
-      } catch {
-        value = row.value;
-      }
-      if (SENSITIVE_KEY_SET.has(row.key) && typeof value === "string") {
-        try {
-          value = decryptSecret(value);
-        } catch (err) {
-          throw new Error(`Failed to load credentials for company '${name}' (${row.key}): ${err.message}`);
-        }
-      }
-      config[row.key] = value;
+      config[row.key] = decodeStoredValue(row.key, row.value, name);
     }
     return config;
   } finally {
@@ -81,8 +68,7 @@ export function saveCompanyConfig(name, config) {
     for (const [key, value] of Object.entries(config)) {
       // Sensitive values (provider credentials, ask API key) are encrypted
       // before hitting the file — plaintext only ever lives in memory.
-      const stored = SENSITIVE_KEY_SET.has(key) && typeof value === "string" ? encryptSecret(value) : value;
-      upsert.run(key, JSON.stringify(stored));
+      upsert.run(key, JSON.stringify(encodeStoredValue(key, value)));
       seen.add(key);
     }
     // Remove rows whose keys are no longer part of the config (e.g. cleared credentials).

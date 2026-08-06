@@ -1,5 +1,5 @@
 import { DEFAULT_COMPANY, getDefaultCompanyConfig } from "./schema.js";
-import { runtimeConfig, saveConfig } from "./store.js";
+import { runtimeConfig, saveConfig, deleteCompanyDb } from "./store.js";
 import { resolvePromptVariables } from "./prompts.js";
 import { clearAllCompanyDbs } from "./sqlite.js";
 import { updateCompany } from "./company.js";
@@ -13,13 +13,13 @@ import { updateCompany } from "./company.js";
  * @param {string} companyName — required.
  * Returns the updated config.
  */
-export function updateConfig(patch, companyName) {
+export async function updateConfig(patch, companyName) {
   const n = companyName?.trim();
   if (!n || !runtimeConfig.COMPANIES[n]) {
     return { config: {}, errors: [`Company '${n || "(missing)"}' not found.`] };
   }
 
-  const result = updateCompany(n, patch);
+  const result = await updateCompany(n, patch);
   if (result.error) {
     return { config: { ...runtimeConfig.COMPANIES[n] }, errors: [result.error] };
   }
@@ -31,12 +31,12 @@ export function updateConfig(patch, companyName) {
  * Reset just the system prompt to the default template for a company.
  * Returns the updated prompt.
  */
-export function resetPrompt(companyName) {
+export async function resetPrompt(companyName) {
   const n = companyName?.trim();
   if (!n || !runtimeConfig.COMPANIES[n]) return { error: `Company '${n || "(missing)"}' not found.` };
 
   runtimeConfig.COMPANIES[n].SYSTEM_PROMPT = DEFAULT_COMPANY.SYSTEM_PROMPT;
-  saveConfig(runtimeConfig);
+  await saveConfig({ COMPANIES: { [n]: runtimeConfig.COMPANIES[n] } });
   const config = runtimeConfig.COMPANIES[n];
   return { template: config.SYSTEM_PROMPT, resolved: resolvePromptVariables(config.SYSTEM_PROMPT, config) };
 }
@@ -45,13 +45,13 @@ export function resetPrompt(companyName) {
  * Reset a company's config to env defaults.
  * Returns the default config.
  */
-export function resetCompanyConfig(companyName) {
+export async function resetCompanyConfig(companyName) {
   const n = companyName?.trim();
   if (!n) return { error: "Company name is required." };
 
   runtimeConfig.COMPANIES[n] = getDefaultCompanyConfig();
   runtimeConfig.COMPANIES[n].COMPANY_NAME = n;
-  saveConfig(runtimeConfig);
+  await saveConfig({ COMPANIES: { [n]: runtimeConfig.COMPANIES[n] } });
 
   return { config: { ...runtimeConfig.COMPANIES[n] } };
 }
@@ -60,12 +60,16 @@ export function resetCompanyConfig(companyName) {
  * Reset entire runtime config to env defaults and remove all company databases.
  * Returns the default config.
  */
-export function resetConfig() {
+export async function resetConfig() {
   const companyName = DEFAULT_COMPANY.COMPANY_NAME;
-  runtimeConfig.COMPANIES = { [companyName]: getDefaultCompanyConfig() };
 
+  for (const name of Object.keys(runtimeConfig.COMPANIES)) {
+    await deleteCompanyDb(name).catch(() => {});
+  }
   clearAllCompanyDbs();
-  saveConfig(runtimeConfig);
+
+  runtimeConfig.COMPANIES = { [companyName]: getDefaultCompanyConfig() };
+  await saveConfig(runtimeConfig);
 
   console.log("🗑  All company databases removed — config reset to defaults");
   return { ...runtimeConfig.COMPANIES[companyName] };
