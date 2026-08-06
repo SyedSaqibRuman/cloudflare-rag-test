@@ -204,6 +204,8 @@ export default function Layout({ route, navigate, children }) {
               <DropdownMenuItem
                 onSelect={(e) => {
                   e.preventDefault();
+                  // Docs open in a new tab; auth rides on the path-scoped
+                  // pc_admin_token cookie (set at login, see web/src/auth.js).
                   window.open("/api-docs", "_blank", "noopener,noreferrer");
                 }}
               >

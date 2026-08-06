@@ -47,11 +47,25 @@ export function verifyToken(token) {
 }
 
 // Accepts the token via `x-auth-token` or `Authorization: Bearer <token>`.
+// Falls back to the `pc_admin_token` cookie — the portal opens /api-docs in a
+// new tab, whose page and asset requests can only carry a cookie (the cookie
+// is path-scoped to /api-docs and SameSite=Lax, so it never leaves that route).
 export function extractToken(req) {
   const header = req.headers["x-auth-token"];
   if (typeof header === "string" && header) return header;
   const auth = req.headers.authorization;
   if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice(7);
+  const cookie = req.headers.cookie;
+  if (typeof cookie === "string") {
+    const m = cookie.match(/(?:^|;\s*)pc_admin_token=([^;]+)/);
+    if (m) {
+      try {
+        return decodeURIComponent(m[1]);
+      } catch {
+        return m[1];
+      }
+    }
+  }
   return null;
 }
 

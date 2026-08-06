@@ -101,9 +101,35 @@ app.use(createAskRouter());
 // 🔹 API DOCS (Swagger UI)
 // Serves the OpenAPI spec as a browsable UI at /api-docs and as raw JSON at
 // /api-docs/openapi.json (importable into Postman/insomnia/codegen).
+// Docs open in a new tab, which cannot set request headers — the portal
+// appends ?token=<session> to the URL, and the request interceptor re-attaches
+// the token (from the URL or the portal's localStorage) to every "Try it out"
+// request so authorized calls work from inside the docs page.
 // --------------------------
 app.get("/api-docs/openapi.json", requireAdmin, (req, res) => res.json(openapi));
-app.use("/api-docs", requireAdmin, swaggerUi.serve, swaggerUi.setup(openapi));
+app.use(
+  "/api-docs",
+  requireAdmin,
+  swaggerUi.serve,
+  swaggerUi.setup(openapi, {
+    swaggerOptions: {
+      persistAuthorization: true,
+      requestInterceptor: (req) => {
+        let token = "";
+        try {
+          token = window.localStorage.getItem("pc_admin_token") || "";
+        } catch {
+          /* localStorage unavailable */
+        }
+        if (!token) {
+          token = new URLSearchParams(window.location.search).get("token") || "";
+        }
+        if (token) req.headers.Authorization = `Bearer ${token}`;
+        return req;
+      },
+    },
+  })
+);
 
 // --------------------------
 // 🔹 HEALTH CHECK

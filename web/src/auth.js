@@ -1,5 +1,23 @@
 // Admin session token storage (module-level, localStorage-backed).
 const TOKEN_KEY = "pc_admin_token";
+const DOCS_COOKIE = "pc_admin_token";
+
+/**
+ * Mirror the session token into a cookie scoped to /api-docs (SameSite=Lax,
+ * never HttpOnly). A new-tab docs page can't set the Authorization header, and
+ * its page + asset requests are gated by requireAdmin — the cookie is the only
+ * way those requests can carry auth. Path-scoped so it is never sent anywhere
+ * else on the origin.
+ */
+function setDocsCookie(token) {
+  try {
+    document.cookie = token
+      ? `${DOCS_COOKIE}=${encodeURIComponent(token)}; path=/api-docs; SameSite=Lax`
+      : `${DOCS_COOKIE}=; path=/api-docs; SameSite=Lax; Max-Age=0`;
+  } catch {
+    /* cookie unavailable — docs will require the header path only */
+  }
+}
 
 export function getToken() {
   try {
@@ -16,6 +34,7 @@ export function setToken(token) {
   } catch {
     /* storage unavailable — session lasts for the page lifetime only */
   }
+  setDocsCookie(token);
 }
 
 export function clearToken() {
@@ -24,6 +43,12 @@ export function clearToken() {
   } catch {
     /* noop */
   }
+  setDocsCookie("");
+}
+
+/** Re-sync the docs cookie after a page load that restored a stored token. */
+export function refreshDocsCookie() {
+  setDocsCookie(getToken());
 }
 
 // Called when the API rejects an admin request with 401 (expired/revoked session).

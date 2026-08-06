@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { login as apiLogin } from "./api";
-import { getToken, setToken, clearToken } from "./auth";
+import { getToken, setToken, clearToken, refreshDocsCookie } from "./auth";
 
 const AuthCtx = createContext(null);
 
@@ -34,6 +34,7 @@ export function AuthProvider({ children }) {
           const data = await res.json();
           authedNow = !!data.authenticated;
           name = data.username || null;
+          if (authedNow) refreshDocsCookie();
         }
       } catch {
         authedNow = false;
