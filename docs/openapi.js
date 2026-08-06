@@ -103,7 +103,7 @@ const openapi = {
       "- **Rate limits** (env-tunable): global 100/min, AI tier on `/ask` endpoints, admin tier on `/cloudflare`.",
       "",
       "Full pipeline and architecture notes: `docs/architecture.md`, `docs/AI_API_REFERENCE.md`.",
-    ].join("\n"),
+    ].join("\n\n"),
     version: "1.0.0",
   },
   servers: [{ url: "/", description: "Same origin as this server" }],
