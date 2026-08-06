@@ -27,14 +27,14 @@ Install scripts are gated by the `allowScripts` field in `package.json` (the `.n
 **Tests** — no test script exists; use `node --test` with explicit globs:
 
 ```bash
-node --test "config/__tests__/*.test.js" "query/__tests__/*.test.js" "cron/__tests__/*.test.js" "ingest/__tests__/*.test.js" "routes/__tests__/*.test.js"
+node --test "config/__tests__/*.test.js" "query/__tests__/*.test.js" "cron/__tests__/*.test.js" "ingest/__tests__/*.test.js" "routes/__tests__/*.test.js" "mysql/__tests__/*.test.js"
 
-- 172/172 pass. The route tests (`routes/__tests__/ask-routes.test.js`) run the ask HTTP contract through a real express app with a **fake pipeline injected** via `createAskRouter({ pipeline })` — no network. They `process.chdir()` to a temp dir before importing config so `db/` is isolated; each test file runs in its own process so this can't leak.```
+- 184/184 pass (172 + 12 new). The route tests (`routes/__tests__/ask-routes.test.js`) run the ask HTTP contract through a real express app with a **fake pipeline injected** via `createAskRouter({ pipeline })` — no network. They `process.chdir()` to a temp dir before importing config so `db/` is isolated; each test file runs in its own process so this can't leak. The `mysql/__tests__/credential-service.test.js` suite (encrypt/decrypt/rotate/validate) is pure crypto — no MySQL needed.```
 
 - Tests use the built-in `node:test` runner + `node:assert/strict` (no Jest/Mocha, no mocking libs).
 - `query/__tests__/query-modules.test.js` (scoring, cache, intent) passes **with zero `node_modules` installed** — it only touches node builtins (`node:sqlite`, `crypto`, `node:test`). 86/86 pass.
 - `cron/__tests__/cron-modules.test.js` **requires `npm install` first**: it pulls in `jobs.js → ingest.js`, which imports `dotenv`.
-- **Never run bare `node --test`** — the default file matching grabs root-level scripts named like tests (`test.js`, `test-bot.js`, `test_upsert.js`, `vector_full_test.js`, `streamTest.js`), which need `.env`, network, and a live server, and will fail.
+- **Never run bare `node --test`** — the default file matching grabs root-level scripts named like tests (`test.js`, `test-bot.js`, `test_upsert.js`, `vector_full_test.js`, `streamTest.js`), which need `.env` and network (or a live server) and will fail. `node test.js` on its own is fine — it's the MySQL connection test.
 
 **Lint**: `eslint` is a devDependency but there is **no config file and no script** — effectively unused. Match existing style (2-space indent, JSDoc on exported helpers, `// --------` banner comments, emoji-prefixed console logs).
 
@@ -104,12 +104,22 @@ Key details:
 - Endpoints (all under `/cloudflare`): `/presets` CRUD (SQLite `db/presets/app.db`, seeded with 4 defaults — kept in a subdir so company discovery ignores them), `/job/start`, `/job/stop`, `/cron/start`, `/cron/stop`, `/jobs`, `/jobs/running`, `/status`.
 
 ### Admin portal (`web/`)
-
 - React 18 + Vite 6 + Tailwind 4, hash-based routing (`#dashboard`, `#ask`, `#companies`, `#config`, `#prompt`, `#cloudflare`, `#scheduler`) via `useHashRoute`.
 - Company selection lives in `CompanyProvider` (`web/src/context.jsx`), persisted in `localStorage` under **`pc_selected_company`**; every API call attaches `x-company-name` (`web/src/api.js`).
 - Theme switcher is a Radix dropdown (`web/src/components/theme-toggle.jsx` + `dropdown-menu.jsx`, dep `@radix-ui/react-dropdown-menu`) in the Layout header. Preference (`light`/`dark`/`system`) persists in `localStorage` under **`pc_theme`** (default `system`); the blocking script in `web/index.html` and `Layout.jsx` both resolve it against `prefers-color-scheme` and toggle the `.dark` class. `@utility menu-enter/menu-exit` in `index.css` drive the open/close animation (reduced-motion respected via the global media query).
 - `web/src/models.js` **duplicates** `config/schema.js` model lists — keep them in sync when adding models.
 - Vite dev server allows hosts `*.monkeycode-ai.live`.
+
+### AI Gateway platform layer (`mysql/` + `schema/` + `migrations/`)
+
+An optional **MySQL-backed** multi-tenant provider/credential layer running **alongside** the SQLite config system. Frozen schema in `schema/v5.sql` (v5 final, never edit), applied by incremental migrations in `migrations/`. Routes mount at `/gateway` behind `requireAdmin` + `adminLimiter` (app.js).
+
+- **Config**: `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE` in `.env`. When unset, the app boots fine and every `/gateway` route returns **503** (`mysql/pool.js` is lazy — no connection at import time).
+- **Migrations**: `node mysql/migrate.js` (or `--dry-run`). The runner parses statements itself, honoring `DELIMITER` blocks, tracks `schema_migrations` with a SHA-256 checksum — editing an applied migration fails loudly. `MIGRATIONS_DIR` env override supported. Requires **MySQL 8.0+** (`credential_usage_logs` = partitioning + FKs; MariaDB rejects that, drop the PARTITION clause to run on MariaDB).
+- **Layers**: `mysql/pool.js` (lazy pool) → `mysql/repositories.js` (Provider/Model/Company/Credential/Resource/Audit repositories — all SQL lives here, snake_case rows; callers shape responses) → `mysql/services/credential-service.js` (encrypt/decrypt/rotate/verify over AES-256-GCM blobs, reuses `config/encryption.js`; format validation driven by `provider_auth_schemas`) → `mysql/services/provider-registry.js` (cached catalog: providers + auth forms + resource templates + models, `invalidateRegistry()` after catalog changes) → `mysql/gateway-router.js` (Express routes).
+- **Encryption at rest**: `encrypted_credentials` is a JSON blob whose values are individually `gcm:` blobs; decrypted values exist only in memory, never in API responses. Requires `APP_ENCRYPTION_KEY`.
+- **Endpoints**: `/gateway/health`, `/providers[/:key[/auth-form|/resources|/models]]`, `/companies` CRUD, `/companies/:key/credentials`, `/credentials/:id/verify|rotate` (DELETE too), `/credentials/:id/models`, `/companies/:key/resources|audit`. Live verification probes live in the router's `PROBES` map (currently Cloudflare token verify) — add per provider_key.
+- **No seed data** (per design): the catalog starts empty; add providers/auth schemas/models via SQL or future migrations. The v5 demo tenant seed (`schema/v5.sql`) is not applied.
 
 ---
 
@@ -141,11 +151,15 @@ client.js                  Shared Cloudflare SDK + S3 clients (singletons)
 ingest.js                  WP → Markdown → chunks → R2 → Vectorize pipeline (abortable)
 jobs.js                    Job registry for scheduler (testing, ingest)
 streamTest.js              LLM stream smoke test (used by POST /test)
+test.js                    MySQL connection test (node test.js — prints server version, table count, migration status; the scheduler "testing" job handler lives in cron/testing-job.js)
 config/                    Multi-tenant config: schema, SQLite store, validation, prompts, company CRUD, write path (updateConfig/reset), presets
 query/                     RAG pipeline: intent, llm, cache, retrieval, scoring, reranker, context, prompts, answer, cli (REPL), stream-contract (wire protocol + SSE parser)
 services/                  cloudflare_embeddings, vectorize (+ stale .old), r2, wp
 utils/                     chunker, cleaner, fileWriter, helpers (retry/abort/chunkArray/sleep), logger
 routes/                    ask.js (POST /ask, /ask-stream — company gate, API-key gate, AI limiter, SSE contract), cron.js (scheduler + presets API), cloudflare.js (companies/indexes/buckets/config/prompt)
+mysql/                     Optional MySQL gateway layer: pool, migrate runner, repositories, credential-service, provider-registry, gateway-router
+schema/                    Frozen v5 MySQL schema (reference only — never edit)
+migrations/                Incremental MySQL migrations (001_init: tables/views/procedures, no seed)
 cron/                      standalone.js, scheduler.js, state.js, status.js
 web/                       React admin portal (Vite); build into web/dist
 docs/                      architecture, API references, models, getting-started (partially stale), openapi.js (Swagger/OpenAPI spec)

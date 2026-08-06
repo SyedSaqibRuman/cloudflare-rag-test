@@ -9,6 +9,7 @@ import cronRoutes from "./routes/cron.js";
 import cloudflareRoutes from "./routes/cloudflare.js";
 import authRoutes from "./routes/auth.js";
 import logsRoutes from "./routes/logs.js";
+import gatewayRoutes from "./mysql/gateway-router.js";
 import { createAskRouter } from "./routes/ask.js";
 import { env } from "./env.js";
 import { requireAdmin } from "./auth.js";
@@ -93,6 +94,7 @@ app.use("/cloudflare", requireAdmin, cronRoutes);
 app.use("/cloudflare", adminLimiter, requireAdmin, cloudflareRoutes);
 app.use("/auth", authRoutes);
 app.use("/logs", requireAdmin, logsRoutes);
+app.use("/gateway", requireAdmin, adminLimiter, gatewayRoutes);
 app.use(createAskRouter());
 
 // --------------------------

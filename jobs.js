@@ -1,4 +1,4 @@
-import testingMethod from "./test.js";
+import testingMethod from "./cron/testing-job.js";
 import { main as ingest } from "./ingest.js";
 
 export default {
