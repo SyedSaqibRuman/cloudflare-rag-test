@@ -1,4 +1,4 @@
-import { env } from "./env.js";
+import "dotenv/config";
 
 /**
  * Smoke-test the Cloudflare AI stream endpoint.
@@ -10,16 +10,19 @@ import { env } from "./env.js";
  *
  * @param {string} [prompt="Hello"] - The user query.
  * @param {((token: string) => void)|null} [onToken=null] - Per-token callback.
+ * @param {{ CLOUDFLARE_ACCOUNT_ID?: string, CLOUDFLARE_API_TOKEN?: string }} [creds={}]
+ *        Per-company Cloudflare credentials (resolved by the caller).
  * @returns {Promise<string>} The full concatenated response text.
  */
-export async function testStream(prompt = "Hello", onToken = null) {
+export async function testStream(prompt = "Hello", onToken = null, creds = {}) {
   const MODEL = "@cf/meta/llama-3-8b-instruct";
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${MODEL}`;
+  const { CLOUDFLARE_ACCOUNT_ID = "", CLOUDFLARE_API_TOKEN = "" } = creds;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/${MODEL}`;
 
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({

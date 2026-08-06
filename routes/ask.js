@@ -5,7 +5,6 @@ import { askQuestion, askQuestionStream } from "../query/index.js";
 import { createStreamTransport } from "../query/stream-contract.js";
 import { getCompanyConfig } from "../config/index.js";
 import { companyFromRequest, companyOriginCheck } from "../utils/request-context.js";
-import { env } from "../env.js";
 
 // --------------------------
 // ASK ROUTES (POST /ask, POST /ask-stream)
@@ -22,7 +21,7 @@ const aiLimiter = rateLimit({
   legacyHeaders: false,
   validate: { trustProxy: false },
   windowMs: 60 * 1000,
-  max: parseInt(env.RATE_LIMIT_AI, 10),
+  max: 20,
   message: {
     success: false,
     error: "AI query limit reached. Please wait before sending another question.",
