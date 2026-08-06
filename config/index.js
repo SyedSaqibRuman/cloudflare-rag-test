@@ -9,6 +9,7 @@ export {
   RESOURCE_KEYS,
   ALLOWED_MODELS,
   EMBEDDING_DIMENSIONS,
+  CONFIG_SECTIONS,
   DEFAULT_COMPANY,
   getDefaultCompanyConfig,
 } from "./schema.js";
@@ -25,18 +26,26 @@ export { resolvePromptVariables } from "./prompts.js";
 // Company CRUD
 export {
   getConfig,
-  getRuntimeState,
   listCompanies,
   getCompany,
   createCompany,
   updateCompany,
   deleteCompany,
+  setCompanyApiKey,
+  applyConfigPatch,
+  applyModelDimensions,
 } from "./company.js";
 
-// Legacy / compat
+// Config write path (update/reset) — the live adapter over company.js that
+// routes/cloudflare.js uses for /config and /prompt mutations.
+// "Legacy" in the file refers only to its return shape ({ config, errors }),
+// not to dead code — it is the current write path.
 export {
   updateConfig,
   resetPrompt,
   resetCompanyConfig,
   resetConfig,
-} from "./legacy.js";
+} from "./write.js";
+
+// Credentials (per-company only, no env fallback)
+export { resolveCreds, generateApiKey, CREDENTIAL_KEYS } from "./creds.js";

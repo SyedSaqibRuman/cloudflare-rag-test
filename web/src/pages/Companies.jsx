@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Badge, Empty, Spinner, Modal } from "../components/ui";
+import { Card, Button, Input, Badge, Empty, Spinner, Modal, Toast } from "../components/ui";
 import { useCompanies } from "../context";
-import { shorten } from "../util";
+import { shorten, companyStatus } from "../util";
+import { useHeaderActions } from "../components/Layout";
 
 export default function Companies({ navigate }) {
   const { companies, refresh, select, company } = useCompanies();
@@ -65,7 +66,7 @@ export default function Companies({ navigate }) {
   };
 
   const reset = async (name) => {
-    if (!window.confirm(`Reset company '${name}' to environment defaults?`)) return;
+    if (!window.confirm(`Reset company '${name}' to defaults?`)) return;
     setError(null);
     try {
       await api(`/cloudflare/companies/${encodeURIComponent(name)}/reset`, { method: "POST" });
@@ -75,23 +76,19 @@ export default function Companies({ navigate }) {
     }
   };
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-2">
+      <Button variant="secondary" onClick={load} disabled={loading}>
+        {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
+      </Button>
+      <Button onClick={() => setCreateOpen(true)}>New Company</Button>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">Companies</h1>
-          <p className="text-sm text-slate-400 mt-1">Tenants with isolated config, vector index, and R2 bucket</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={load} disabled={loading}>
-            {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
-          </Button>
-          <Button onClick={() => setCreateOpen(true)}>New Company</Button>
-        </div>
-      </div>
-
       {error && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
       )}
 
       <Card>
@@ -102,8 +99,8 @@ export default function Companies({ navigate }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500">
-                  <th className="pb-3 font-medium">Name</th>
-                  <th className="pb-3 font-medium">Display Name</th>
+                  <th className="pb-3 font-medium">Company</th>
+                  <th className="pb-3 font-medium">Status</th>
                   <th className="pb-3 font-medium">Assistant</th>
                   <th className="pb-3 font-medium">Source</th>
                   <th className="pb-3 font-medium">Vector Index</th>
@@ -112,20 +109,38 @@ export default function Companies({ navigate }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
-                {companies.map((c) => (
+                {companies.map((c) => {
+                  const st = companyStatus(c);
+                  return (
                   <tr key={c.name} className="text-slate-300 hover:bg-slate-800/40">
                     <td className="py-3">
-                      <button
-                        className="font-medium text-indigo-300 hover:text-indigo-200 hover:underline"
-                        onClick={() => {
-                          select(c.name);
-                          navigate("config");
-                        }}
-                      >
-                        {c.name}
-                      </button>
+                      <div className="flex items-center gap-2.5">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-slate-400">
+                          <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" />
+                            <path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+                            <path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" />
+                            <path d="M10 6h4" />
+                            <path d="M10 10h4" />
+                            <path d="M10 14h4" />
+                            <path d="M10 18h4" />
+                          </svg>
+                        </span>
+                        <div className="min-w-0">
+                          <button
+                            className="block font-medium text-indigo-300 hover:text-indigo-200 hover:underline leading-tight"
+                            onClick={() => {
+                              select(c.name);
+                              navigate("config");
+                            }}
+                          >
+                            {c.COMPANY_NAME || c.name}
+                          </button>
+                          <span className="block text-xs text-slate-500">{c.name}</span>
+                        </div>
+                      </div>
                     </td>
-                    <td className="py-3">{c.COMPANY_NAME || "—"}</td>
+                    <td className="py-3"><Badge tone={st.tone}>{st.label}</Badge></td>
                     <td className="py-3">{c.CONSULTANT_NAME || "—"}</td>
                     <td className="py-3">{shorten(c.BASE_URL, 32)}</td>
                     <td className="py-3">
@@ -148,7 +163,8 @@ export default function Companies({ navigate }) {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -191,11 +207,7 @@ export default function Companies({ navigate }) {
         </div>
       </Modal>
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">
-          {toast}
-        </div>
-      )}
+      <Toast message={toast} />
     </div>
   );
 }

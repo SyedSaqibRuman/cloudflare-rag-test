@@ -5,6 +5,8 @@ import {
   STRING_KEYS,
   PROMPT_KEYS,
   RESOURCE_KEYS,
+  CREDENTIAL_KEYS,
+  SECRET_KEYS,
   ALLOWED_MODELS,
 } from "./schema.js";
 
@@ -56,6 +58,19 @@ export function validateConfigKey(key, value) {
     if (!normalized) return `${key} must be a non-empty string.`;
     if (!/^[a-z0-9-]+$/.test(normalized)) return `${key} must contain only lowercase letters, numbers, and hyphens.`;
     if (normalized.length < 3 || normalized.length > 63) return `${key} must be between 3 and 63 characters.`;
+    return null;
+  }
+
+  // Credentials (Cloudflare / R2 keys and tokens)
+  if (CREDENTIAL_KEYS.includes(key)) {
+    if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
+    return null;
+  }
+
+  // Per-company API keys
+  if (SECRET_KEYS.includes(key)) {
+    if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
+    if (value.trim().length < 8) return `${key} must be at least 8 characters.`;
     return null;
   }
 

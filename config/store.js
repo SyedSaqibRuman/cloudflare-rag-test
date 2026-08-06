@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { DEFAULT_COMPANY, getDefaultCompanyConfig } from "./schema.js";
+import { hasEncryptionKey } from "./encryption.js";
 import {
   loadCompanyConfig,
   saveCompanyConfig,
@@ -51,13 +52,14 @@ function loadConfig() {
     if (config) companies[name] = config;
   }
 
-  if (Object.keys(companies).length === 0) {
-    const defaultName = DEFAULT_COMPANY.COMPANY_NAME;
-    const config = getDefaultCompanyConfig();
-    config.COMPANY_NAME = defaultName;
-    companies[defaultName] = config;
-    saveCompanyConfig(defaultName, config);
-    console.log(`🌱 Seeded default company '${defaultName}' in db/${defaultName}.db`);
+  // No default company is seeded — a blank slate. Companies are created
+  // explicitly via POST /cloudflare/companies (admin portal → Companies page).
+
+  if (Object.keys(companies).length > 0 && !hasEncryptionKey()) {
+    console.warn(
+      "⚠️  APP_ENCRYPTION_KEY is not set — company credentials will be stored in plaintext. " +
+        "Set it in .env (see .env.example) to encrypt credentials at rest."
+    );
   }
 
   return { COMPANIES: companies };

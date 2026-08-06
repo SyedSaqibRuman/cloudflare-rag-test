@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { cx } from "../util";
 
 export function Card({ title, subtitle, children, className, actions }) {
@@ -28,7 +29,7 @@ export function Button({ variant = "primary", className, children, ...props }) {
   return (
     <button
       className={cx(
-        "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none",
+        "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
         variants[variant],
         className
       )}
@@ -43,8 +44,9 @@ export function IconButton({ title, className, children, ...props }) {
   return (
     <button
       title={title}
+      aria-label={title}
       className={cx(
-        "inline-flex items-center justify-center rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:pointer-events-none",
+        "inline-flex items-center justify-center rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400",
         className
       )}
       {...props}
@@ -150,10 +152,10 @@ export function Spinner({ className }) {
 export function ErrorBanner({ message, onDismiss }) {
   if (!message) return null;
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-300">
+    <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-300">
       <span>{message}</span>
       {onDismiss && (
-        <button onClick={onDismiss} className="text-rose-400 hover:text-rose-200 text-lg leading-none">
+        <button onClick={onDismiss} aria-label="Dismiss error" className="text-rose-400 hover:text-rose-200 text-lg leading-none">
           ×
         </button>
       )}
@@ -168,21 +170,24 @@ export function Toast({ message, tone = "green" }) {
     red: "border-rose-500/40 bg-rose-500/15 text-rose-200",
   };
   return (
-    <div className={cx("fixed bottom-6 right-6 z-50 rounded-lg border px-4 py-3 text-sm shadow-xl animate-in", map[tone])}>
-      {message}
+    <div role="status" aria-live="polite" className="fixed bottom-6 right-6 z-50 rounded-lg bg-white shadow-xl animate-in">
+      <div className={cx("rounded-lg border px-4 py-3 text-sm", map[tone])}>
+        {message}
+      </div>
     </div>
   );
 }
 
-export function StatCard({ label, value, tone, icon }) {
+export function StatCard({ label, value, tone, icon, meta }) {
   return (
-    <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-lg flex items-center gap-4">
+    <div className="bg-slate-900/70 border border-slate-800 rounded-xl px-4 py-3.5 shadow-lg flex items-center gap-3.5">
       {icon && (
-        <div className={cx("flex h-11 w-11 items-center justify-center rounded-xl", tones[tone])}>{icon}</div>
+        <div className={cx("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", tones[tone])}>{icon}</div>
       )}
-      <div>
-        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">{label}</p>
-        <p className="text-2xl font-bold text-slate-50 mt-0.5">{value}</p>
+      <div className="min-w-0">
+        <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">{label}</p>
+        <p className="text-xl font-bold text-slate-50 mt-0.5 tabular-nums leading-tight">{value}</p>
+        {meta && <div className="mt-1 text-xs text-slate-500">{meta}</div>}
       </div>
     </div>
   );
@@ -197,16 +202,28 @@ export function Empty({ message }) {
 }
 
 export function Modal({ open, title, onClose, children, footer }) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-900 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-lg overscroll-contain rounded-xl border border-slate-700 bg-slate-900 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
           <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-100 text-xl leading-none">
+          <button onClick={onClose} aria-label="Close dialog" className="text-slate-400 hover:text-slate-100 text-xl leading-none">
             ×
           </button>
         </div>

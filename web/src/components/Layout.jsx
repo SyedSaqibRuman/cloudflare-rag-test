@@ -1,27 +1,94 @@
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { cx } from "../util";
-import { api, health as fetchHealth } from "../api";
+import { health as fetchHealth } from "../api";
 import { useCompanies } from "../context";
+import { useAuth } from "../auth.jsx";
+import ThemeToggle from "./theme-toggle";
+import CompanySelect from "./company-select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./dropdown-menu";
+
+const HeaderActionsCtx = createContext(null);
+
+/**
+ * Pages call this with the toolbar JSX they want rendered in the shared
+ * header, right of the title and next to the theme toggle.
+ */
+export function useHeaderActions(node) {
+  const set = useContext(HeaderActionsCtx);
+  useEffect(() => {
+    set(node || null);
+    return () => set(null);
+  });
+}
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: <IconDashboard /> },
-  { id: "ask", label: "Ask Console", icon: <IconChat /> },
-  { id: "companies", label: "Companies", icon: <IconBuilding /> },
-  { id: "config", label: "Company Config", icon: <IconSliders /> },
-  { id: "prompt", label: "Prompt", icon: <IconDoc /> },
-  { id: "cloudflare", label: "Cloudflare", icon: <IconCloud /> },
-  { id: "scheduler", label: "Scheduler", icon: <IconClock /> },
+  {
+    section: "Overview",
+    items: [{ id: "dashboard", label: "Dashboard", icon: <IconDashboard /> }],
+  },
+  {
+    section: "AI",
+    items: [
+      { id: "ask", label: "Ask Console", icon: <IconChat /> },
+      { id: "prompt", label: "Prompt", icon: <IconDoc /> },
+    ],
+  },
+  {
+    section: "Companies",
+    items: [
+      { id: "companies", label: "Companies", icon: <IconBuilding /> },
+      { id: "config", label: "Configuration", icon: <IconSliders /> },
+    ],
+  },
+  {
+    section: "Infrastructure",
+    items: [
+      { id: "cloudflare", label: "Cloudflare", icon: <IconCloud /> },
+      { id: "scheduler", label: "Scheduler", icon: <IconClock /> },
+    ],
+  },
 ];
+
+const PAGE_META = {
+  dashboard: { title: "Dashboard", subtitle: "Platform overview and live system state" },
+  ask: { title: "Ask Console", subtitle: "Test the RAG assistant with live streaming responses" },
+  companies: { title: "Companies", subtitle: "Tenants with isolated config, vector index, and R2 bucket" },
+  config: { title: "Company Config", subtitle: "Hot-reloadable runtime configuration per tenant" },
+  prompt: { title: "System Prompt", subtitle: "The assistant's behavior template with runtime variable interpolation" },
+  cloudflare: { title: "Cloudflare Resources", subtitle: "Vector indexes and R2 buckets across the account" },
+  scheduler: { title: "Scheduler", subtitle: "Run jobs on demand, schedule them with cron, and manage reusable presets" },
+  logs: { title: "Logs", subtitle: "Server log files written by the app (error, process, upload, vector)" },
+};
 
 export default function Layout({ route, navigate, children }) {
   const { company, companies, select } = useCompanies();
+  const { logout, username } = useAuth();
   const [status, setStatus] = useState("checking");
-  const [theme, setTheme] = useState(() =>
-    document.documentElement.classList.contains("dark") ? "dark" : "light"
+  const [headerActions, setHeaderActions] = useState(null);
+  // Theme preference: "light" | "dark" | "system" (defaults to system so the
+  // portal follows the OS until the admin picks an explicit theme).
+  const [theme, setTheme] = useState(() => localStorage.getItem("pc_theme") || "system");
+  const [osDark, setOsDark] = useState(
+    () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false
   );
 
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("pc_theme", theme);
+    const resolved = theme === "system" ? (osDark ? "dark" : "light") : theme;
+    document.documentElement.classList.toggle("dark", resolved === "dark");
+  }, [theme, osDark]);
+
+  // In system mode, live-follow OS preference changes.
+  useEffect(() => {
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e) => setOsDark(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   }, [theme]);
 
   useEffect(() => {
@@ -43,37 +110,51 @@ export default function Layout({ route, navigate, children }) {
   }, []);
 
   return (
+    <HeaderActionsCtx.Provider value={setHeaderActions}>
     <div className="flex min-h-screen">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-indigo-500 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
+      >
+        Skip to main content
+      </a>
       <aside className="fixed inset-y-0 left-0 z-30 flex w-60 flex-col border-r border-slate-800 bg-slate-900/90 backdrop-blur">
-        <div className="flex items-center gap-2.5 px-5 py-5 border-b border-slate-800">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500 text-white font-bold">
-            PC
-          </div>
-          <div>
-            <p className="text-sm font-bold text-slate-50 leading-tight">PopularCert</p>
-            <p className="text-[11px] text-slate-400">AI Conversation Platform</p>
-          </div>
+        <div className="border-b border-slate-800 px-5 py-4">
+          <CompanySelect company={company} companies={companies} select={select} />
         </div>
 
-        <nav className="flex-1 space-y-1 px-3 py-4 overflow-y-auto">
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => navigate(item.id)}
-              className={cx(
-                "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                route === item.id
-                  ? "bg-indigo-500/15 text-indigo-300"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/70"
-              )}
-            >
-              {item.icon}
-              {item.label}
-            </button>
+        <nav className="flex-1 space-y-6 px-3 py-4 overflow-y-auto">
+          {NAV.map((group) => (
+            <div key={group.section}>
+              <p className="pl-10 pr-3 pb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                {group.section}
+              </p>
+              <div className="space-y-1">
+                {group.items.map((item) => (
+                  <a
+                    key={item.id}
+                    href={`#${item.id}`}
+                    aria-current={route === item.id ? "page" : undefined}
+                    className={cx(
+                      "relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                      route === item.id
+                        ? "bg-indigo-500/15 text-indigo-300"
+                        : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/70"
+                    )}
+                  >
+                    {route === item.id && (
+                      <span aria-hidden="true" className="absolute left-0 top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-indigo-400" />
+                    )}
+                    {item.icon}
+                    {item.label}
+                  </a>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
-        <div className="border-t border-slate-800 p-4 space-y-3">
+        <div className="border-t border-slate-800 px-4 pt-4 pb-3">
           <div className="flex items-center justify-between text-xs">
             <span className="text-slate-400">API</span>
             <span className="flex items-center gap-1.5">
@@ -86,80 +167,83 @@ export default function Layout({ route, navigate, children }) {
               <span className="text-slate-300">{status === "online" ? "Online" : status === "offline" ? "Offline" : "Checking…"}</span>
             </span>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Company</label>
-            <select
-              value={company}
-              onChange={(e) => select(e.target.value)}
-              className="w-full rounded-lg bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-            >
-              <option value="">No company selected</option>
-              {companies.map((c) => (
-                <option key={c.name} value={c.name}>
-                  {c.COMPANY_NAME || c.name}
-                </option>
-              ))}
-            </select>
-          </div>
+          <div className="my-3 border-t border-slate-800/80" />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                title="Admin menu"
+                className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-slate-800/70 data-[state=open]:bg-slate-800/70"
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-sm font-semibold text-indigo-300">
+                  {(username || "A").charAt(0).toUpperCase()}
+                </span>
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate text-sm font-medium text-slate-200">{username || "Admin"}</span>
+                  <span className="block truncate text-[11px] text-slate-500">Administrator</span>
+                </span>
+                <svg aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" sideOffset={8} className="w-52">
+              <DropdownMenuItem
+                onSelect={(e) => {
+                  e.preventDefault();
+                  window.open("/api-docs", "_blank", "noopener,noreferrer");
+                }}
+              >
+                <svg aria-hidden="true" className="h-4 w-4 text-slate-500 group-hover:text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                </svg>
+                API docs
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("logs")}>
+                <svg aria-hidden="true" className="h-4 w-4 text-slate-500 group-hover:text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <path d="M14 2v6h6" />
+                  <path d="M8 13h8" />
+                  <path d="M8 17h8" />
+                </svg>
+                All logs
+              </DropdownMenuItem>
+              <div className="my-1 h-px bg-slate-800" />
+              <DropdownMenuItem onSelect={logout} className="text-rose-400 focus:bg-rose-500/15 focus:text-rose-300">
+                <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                Sign out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </aside>
 
-      <main className="ml-60 flex-1">
-        <header className="flex items-center justify-end px-8 pt-5 pb-2">
-          <div
-            role="radiogroup"
-            aria-label="Theme"
-            className={cx(
-              "relative flex items-center rounded-full border p-1 transition-colors",
-              theme === "dark" ? "border-slate-700 bg-slate-800/60" : "border-slate-700 bg-slate-800"
-            )}
-          >
-            <span
-              aria-hidden
-              className={cx(
-                "absolute top-1 bottom-1 w-9 rounded-full shadow-md ring-1 transition-all duration-300 ease-out",
-                theme === "dark" ? "left-10 bg-slate-900 ring-slate-600" : "left-1 bg-white ring-black/5"
-              )}
-            />
-            <button
-              type="button"
-              role="radio"
-              aria-checked={theme === "light"}
-              aria-label="Light mode"
-              title="Light mode"
-              onClick={() => setTheme("light")}
-              className={cx(
-                  "relative z-10 flex h-7 w-9 items-center justify-center rounded-full transition-colors",
-                  theme === "light" ? "text-amber-500" : "text-slate-400 hover:text-slate-200"
-                )}
-              >
-                <IconSun />
-              </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={theme === "dark"}
-              aria-label="Dark mode"
-              title="Dark mode"
-              onClick={() => setTheme("dark")}
-              className={cx(
-                  "relative z-10 flex h-7 w-9 items-center justify-center rounded-full transition-colors",
-                  theme === "dark" ? "text-indigo-300" : "text-slate-400 hover:text-slate-200"
-                )}
-              >
-                <IconMoon />
-              </button>
+      <main id="main" className="ml-60 flex-1">
+        <header className="flex items-end justify-between gap-4 px-8 pt-6 pb-4">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-50">{PAGE_META[route]?.title || "Dashboard"}</h1>
+            <p className="text-sm text-slate-400 mt-1">{PAGE_META[route]?.subtitle || ""}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {headerActions}
+            <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
         </header>
-        <div className="px-8 py-4">{children}</div>
+        <div className="px-8 pb-8">{children}</div>
       </main>
     </div>
+    </HeaderActionsCtx.Provider>
   );
 }
 
 function IconDashboard() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="7" height="9" rx="1" />
       <rect x="14" y="3" width="7" height="5" rx="1" />
       <rect x="14" y="12" width="7" height="9" rx="1" />
@@ -170,7 +254,7 @@ function IconDashboard() {
 
 function IconChat() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   );
@@ -178,7 +262,7 @@ function IconChat() {
 
 function IconBuilding() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 21h18" />
       <path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16" />
       <path d="M19 21V9a2 2 0 0 0-2-2h-2" />
@@ -191,7 +275,7 @@ function IconBuilding() {
 
 function IconSliders() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 21v-7" />
       <path d="M4 10V3" />
       <path d="M12 21v-9" />
@@ -207,7 +291,7 @@ function IconSliders() {
 
 function IconDoc() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <path d="M14 2v6h6" />
       <path d="M8 13h8" />
@@ -218,7 +302,7 @@ function IconDoc() {
 
 function IconCloud() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
     </svg>
   );
@@ -226,26 +310,9 @@ function IconCloud() {
 
 function IconClock() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <path d="M12 6v6l4 2" />
-    </svg>
-  );
-}
-
-function IconSun() {
-  return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-    </svg>
-  );
-}
-
-function IconMoon() {
-  return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
     </svg>
   );
 }

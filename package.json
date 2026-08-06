@@ -1,5 +1,9 @@
 {
   "type": "module",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1032.0",
     "axios": "^1.18.0",
@@ -8,19 +12,25 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
+    "mysql2": "^3.23.2",
     "node-cron": "^4.2.1",
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.14",
     "p-limit": "^7.3.0",
+    "swagger-ui-dist": "^5.32.12",
+    "swagger-ui-express": "^5.0.1",
     "turndown": "^7.2.4",
-    "wrangler": "^4.63.0"
+    "wrangler": "^4.118.0"
   },
   "devDependencies": {
     "eslint": "^10.3.0"
   },
+  "overrides": {
+    "undici": "7.29.0"
+  },
   "allowScripts": {
-    "esbuild@0.27.3": true,
-    "sharp@0.34.5": true,
-    "workerd@1.20260616.1": true
+    "esbuild@0.28.1": true,
+    "sharp@0.35.2": true,
+    "workerd@1.20260730.1": true
   }
 }

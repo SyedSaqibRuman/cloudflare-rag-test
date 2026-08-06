@@ -1,11 +1,8 @@
 import pLimit from "p-limit";
 import { logToFile } from "../utils/logger.js";
 import { chunkArray, sleep } from "../utils/helpers.js";
-import { env } from "../env.js";
 import { getConfig } from "../config/index.js";
-
-const ACCOUNT_ID = env.CLOUDFLARE_ACCOUNT_ID;
-const API_TOKEN = env.CLOUDFLARE_API_TOKEN;
+import { fetchCloudflareAI } from "./cloudflare_ai.js";
 
 /** Read embedding model from runtime config (supports hot-swap). */
 function getEmbeddingModel(companyName) {
@@ -26,17 +23,7 @@ const limit = pLimit(CONCURRENCY);
 async function fetchEmbeddingBatch(texts, attempt = 0, companyName) {
   try {
     const model = getEmbeddingModel(companyName);
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/run/${model}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${API_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: texts }), // 🔥 batch input
-      }
-    );
+    const res = await fetchCloudflareAI(companyName, model, { text: texts }); // 🔥 batch input
 
     if (res.status === 429) {
       if (attempt >= MAX_RETRIES) {

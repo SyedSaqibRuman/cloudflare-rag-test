@@ -128,5 +128,5 @@ export default function Markdown({ text }) {
   flushBlock();
   flushList();
 
-  return <div className="text-sm text-slate-200">{blocks}</div>;
+  return <div className="break-words text-sm text-slate-200">{blocks}</div>;
 }

@@ -14,6 +14,16 @@ export function sanitizeText(text = "") {
 }
 
 // --------------------------
+// USER MESSAGE FRAMING
+// --------------------------
+// The core shape of every RAG prompt: context, then question. Owned here so
+// the streaming and non-streaming ask paths can't drift. The context is
+// already sanitized by buildContext — no second pass.
+export function buildUserMessage(context, question) {
+  return `CONTEXT:\n${context}\n\nQUESTION:\n${question}`;
+}
+
+// --------------------------
 // CONTEXT BUILDER
 // --------------------------
 export function buildContext(chunks = []) {

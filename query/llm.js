@@ -1,16 +1,10 @@
-import { getCFClient } from "../client.js";
-import { env } from "../env.js";
 import { getConfig } from "../config/index.js";
+import { runCloudflareAI } from "../services/cloudflare_ai.js";
 
 // --------------------------
 // CONFIGURATION
 // --------------------------
 const MAX_HISTORY = 6;
-
-// --------------------------
-// CLIENTS
-// --------------------------
-const cfClient = getCFClient();
 
 // --------------------------
 // MODEL GETTERS
@@ -56,8 +50,7 @@ Return ONLY the rewritten search query or INVALID. No explanation.
   `.trim();
 
   try {
-    const res = await cfClient.ai.run(getSmallLlm(companyName), {
-      account_id: env.CLOUDFLARE_ACCOUNT_ID,
+    const res = await runCloudflareAI(companyName, getSmallLlm(companyName), {
       messages: [{ role: "user", content: prompt }],
       temperature: 0,
       max_tokens: 120,
@@ -70,4 +63,4 @@ Return ONLY the rewritten search query or INVALID. No explanation.
   }
 }
 
-export { cfClient, MAX_HISTORY };
+export { MAX_HISTORY };

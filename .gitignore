@@ -54,6 +54,7 @@ ragBot/
 # --------------------------
 
 *.zip
+archive-*/
 ragBot.zip
 processed.json
 runtime-config.json

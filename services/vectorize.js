@@ -2,22 +2,19 @@ import { generateEmbeddings } from "./cloudflare_embeddings.js";
 import { logToFile } from "../utils/logger.js";
 import { getCFClient } from "../client.js";
 import { chunkArray } from "../utils/helpers.js";
-import { env } from "../env.js";
-import { getConfig } from "../config/index.js";
+import { resolveCreds, getConfig } from "../config/index.js";
 
 // --------------------------
 // 🔹 Config
 // --------------------------
-const ACCOUNT_ID = env.CLOUDFLARE_ACCOUNT_ID;
 const DIMENSIONS = 768;
+
+const accountId = (companyName) => resolveCreds(companyName).CLOUDFLARE_ACCOUNT_ID;
 
 /** Read VECTOR_INDEX from runtime config (hot-swappable). Falls back to env. */
 export function getVectorIndex(companyName) {
   return getConfig(companyName).VECTOR_INDEX;
 }
-
-// 🔹 Use shared Cloudflare client from client.js
-const client = getCFClient();
 
 // --------------------------
 // 🔹 Helpers
@@ -34,10 +31,10 @@ function cleanString(str = "") {
 // --------------------------
 // 🔹 Index Management (via Cloudflare SDK)
 // --------------------------
-export async function listVectors() {
+export async function listVectors(companyName) {
   try {
-    const res = await client.vectorize.indexes.list({
-      account_id: ACCOUNT_ID,
+    const res = await getCFClient(companyName).vectorize.indexes.list({
+      account_id: accountId(companyName),
     });
     return res?.result || [];
   } catch (error) {
@@ -47,8 +44,8 @@ export async function listVectors() {
   }
 }
 
-export async function findVector(name) {
-  const vectors = await listVectors();
+export async function findVector(name, companyName) {
+  const vectors = await listVectors(companyName);
   return vectors.find((v) => v.name === name) || null;
 }
 
@@ -59,7 +56,7 @@ export async function createVectorIndex(
 ) {
   // Use company's configured dimensions if not explicitly provided
   const dims = dimensions || (companyName ? getConfig(companyName).EMBEDDING_DIMENSIONS : DIMENSIONS) || DIMENSIONS;
-  const existing = await findVector(name);
+  const existing = await findVector(name, companyName);
   if (existing) {
     console.log("Vector index already exists");
     return existing;
@@ -68,8 +65,8 @@ export async function createVectorIndex(
   console.log("Creating Vector Index...");
 
   try {
-    const res = await client.vectorize.indexes.create({
-      account_id: ACCOUNT_ID,
+    const res = await getCFClient(companyName).vectorize.indexes.create({
+      account_id: accountId(companyName),
       name,
       config: {
         dimensions: dims,
@@ -93,13 +90,13 @@ export async function createVectorIndex(
   }
 }
 
-export async function deleteVectorIndex(name) {
-  const existing = await findVector(name);
+export async function deleteVectorIndex(name, companyName) {
+  const existing = await findVector(name, companyName);
   if (!existing) return `${name} not found`;
 
   try {
-    await client.vectorize.indexes.delete(name, {
-      account_id: ACCOUNT_ID,
+    await getCFClient(companyName).vectorize.indexes.delete(name, {
+      account_id: accountId(companyName),
     });
 
     console.log("🗑 Vector index deleted");
@@ -170,8 +167,8 @@ export async function upsertVectors(chunks = [], companyName) {
       const vectorIndex = getVectorIndex(companyName);
       if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
-      const res = await client.vectorize.indexes.upsert(vectorIndex, {
-        account_id: ACCOUNT_ID,
+      const res = await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
+        account_id: accountId(companyName),
         "unparsable-behavior": "error",
         body: ndjson,
       });
@@ -199,8 +196,8 @@ export async function vectorQuery(vector, topK, companyName) {
     const vectorIndex = getVectorIndex(companyName);
     if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
-    const res = await client.vectorize.indexes.query(vectorIndex, {
-      account_id: ACCOUNT_ID,
+    const res = await getCFClient(companyName).vectorize.indexes.query(vectorIndex, {
+      account_id: accountId(companyName),
       topK: topK,
       vector: vector,
       returnMetadata: "all",
@@ -223,8 +220,8 @@ export async function getVectorByID(ids, companyName) {
     const vectorIndex = getVectorIndex(companyName);
     if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
-    const res = await client.vectorize.indexes.getByIds(vectorIndex, {
-      account_id: ACCOUNT_ID,
+    const res = await getCFClient(companyName).vectorize.indexes.getByIds(vectorIndex, {
+      account_id: accountId(companyName),
       ids,
     });
 

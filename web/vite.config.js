@@ -15,6 +15,7 @@ export default defineConfig({
       },
       "/cloudflare": "http://localhost:3000",
       "/ask": "http://localhost:3000",
+      "/auth": "http://localhost:3000",
     },
   },
 });

@@ -17,6 +17,10 @@ export const env = Object.freeze({
 
   // Admin
   ADMIN_API_KEY: process.env.ADMIN_API_KEY,
+  ADMIN_USERNAME: process.env.ADMIN_USERNAME,
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
+  ADMIN_SECRET: process.env.ADMIN_SECRET,
+  ADMIN_TOKEN_TTL_HOURS: process.env.ADMIN_TOKEN_TTL_HOURS || "12",
 
   // Rate Limiting
   RATE_LIMIT_GLOBAL: process.env.RATE_LIMIT_GLOBAL || "100",

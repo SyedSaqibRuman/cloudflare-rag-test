@@ -1,11 +1,14 @@
-import { DEFAULT_COMPANY, getDefaultCompanyConfig, EMBEDDING_DIMENSIONS } from "./schema.js";
+import { DEFAULT_COMPANY, getDefaultCompanyConfig } from "./schema.js";
 import { runtimeConfig, saveConfig } from "./store.js";
-import { validateConfigKey } from "./validation.js";
 import { resolvePromptVariables } from "./prompts.js";
 import { clearAllCompanyDbs } from "./sqlite.js";
+import { updateCompany } from "./company.js";
 
 /**
  * Update one or more runtime config keys on a company.
+ * Thin adapter over updateCompany: same write rules (validation, empty-string
+ * clearing, EMBEDDING_DIMENSIONS auto-follows EMBEDDING_MODEL), legacy return
+ * shape kept for existing callers.
  * @param {object} patch — key/value pairs to update.
  * @param {string} companyName — required.
  * Returns the updated config.
@@ -16,25 +19,12 @@ export function updateConfig(patch, companyName) {
     return { config: {}, errors: [`Company '${n || "(missing)"}' not found.`] };
   }
 
-  const errors = [];
-  for (const [key, value] of Object.entries(patch)) {
-    if (typeof value === "string" && value.trim()) {
-      const err = validateConfigKey(key, value);
-      if (err) { errors.push(err); continue; }
-      runtimeConfig.COMPANIES[n][key] = value.trim();
-    } else if (typeof value === "number" && key === "EMBEDDING_DIMENSIONS") {
-      const err = validateConfigKey(key, value);
-      if (err) { errors.push(err); continue; }
-      runtimeConfig.COMPANIES[n][key] = value;
-    }
+  const result = updateCompany(n, patch);
+  if (result.error) {
+    return { config: { ...runtimeConfig.COMPANIES[n] }, errors: [result.error] };
   }
 
-  if (errors.length) {
-    return { config: { ...runtimeConfig.COMPANIES[n] }, errors };
-  }
-
-  saveConfig(runtimeConfig);
-  return { config: { ...runtimeConfig.COMPANIES[n] } };
+  return { config: result.config };
 }
 
 /**

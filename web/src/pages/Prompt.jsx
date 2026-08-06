@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Button, TextArea, Select, Spinner, Badge } from "../components/ui";
+import { Card, Button, TextArea, Select, Spinner, Badge, Toast } from "../components/ui";
 import { useCompanies } from "../context";
+import { useHeaderActions } from "../components/Layout";
 
 export default function Prompt() {
   const { company, companies, select } = useCompanies();
@@ -78,38 +79,34 @@ export default function Prompt() {
   const dirty = data && template !== data.template;
   const variables = data?.variables || {};
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-3">
+      <Select
+        value={company}
+        onChange={(e) => select(e.target.value)}
+        options={[
+          { value: "", label: "Select a company…" },
+          ...companies.map((c) => ({ value: c.name, label: c.COMPANY_NAME || c.name })),
+        ]}
+        className="w-64"
+      />
+      {company && (
+        <>
+          <Button variant="secondary" onClick={reset}>
+            Reset
+          </Button>
+          <Button onClick={save} disabled={!dirty || saving}>
+            {saving ? <Spinner className="h-3.5 w-3.5" /> : "Save"}
+          </Button>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">System Prompt</h1>
-          <p className="text-sm text-slate-400 mt-1">The assistant's behavior template with runtime variable interpolation</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Select
-            value={company}
-            onChange={(e) => select(e.target.value)}
-            options={[
-              { value: "", label: "Select a company…" },
-              ...companies.map((c) => ({ value: c.name, label: c.COMPANY_NAME || c.name })),
-            ]}
-            className="w-64"
-          />
-          {company && (
-            <>
-              <Button variant="secondary" onClick={reset}>
-                Reset
-              </Button>
-              <Button onClick={save} disabled={!dirty || saving}>
-                {saving ? <Spinner className="h-3.5 w-3.5" /> : "Save"}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-
       {error && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
       )}
 
       {!company ? (
@@ -155,6 +152,7 @@ export default function Prompt() {
           >
             <TextArea
               id="prompt-template"
+              label="Template"
               rows={24}
               value={template}
               onChange={(e) => setTemplate(e.target.value)}
@@ -195,11 +193,7 @@ export default function Prompt() {
         </div>
       )}
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">
-          {toast}
-        </div>
-      )}
+      <Toast message={toast} />
     </div>
   );
 }

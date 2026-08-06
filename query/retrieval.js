@@ -1,9 +1,6 @@
-import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { getS3Client } from "../client.js";
-import { env } from "../env.js";
 import { generateEmbeddings } from "../services/cloudflare_embeddings.js";
 import { vectorQuery } from "../services/vectorize.js";
-import { getConfig } from "../config/index.js";
+import { getChunk } from "../services/r2.js";
 import { rerankMatches } from "./reranker.js";
 import { buildContext } from "./context.js";
 import { keywordScore, hybridScore, dedupeMatches } from "./scoring.js";
@@ -17,39 +14,15 @@ const SCORE_THRESHOLD = 0.75;
 const ABSOLUTE_MIN_SCORE = 0.5;
 
 // --------------------------
-// CLIENTS
-// --------------------------
-const r2 = getS3Client();
-
-// --------------------------
-// STREAM UTILS
-// --------------------------
-async function streamToString(stream) {
-  const chunks = [];
-  for await (const chunk of stream)
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  return Buffer.concat(chunks).toString("utf-8");
-}
-
-// --------------------------
-// R2 CHUNK FETCHER
-// --------------------------
-async function getChunk(key, companyName) {
-  if (!key) return null;
-  const bucket = getConfig(companyName).R2_BUCKET_NAME;
-  if (!bucket) return null;
-  try {
-    const res = await r2.send(new GetObjectCommand({ Bucket: bucket, Key: key.trim() }));
-    if (!res.Body) return null;
-    return JSON.parse(await streamToString(res.Body));
-  } catch (err) {
-    if (env.NODE_ENV !== "production") console.error(`❌ Chunk fetch error (${key}):`, err.message);
-    return null;
-  }
-}
-
-// --------------------------
 // RAG CONTEXT RETRIEVAL
+//
+// Pipeline contract (order matters, every step's precondition is set by the
+// step before it):
+//   1. vectorQuery top 10 → filter (≥75% of top score AND ≥0.5 abs)
+//   2. hybridScore (0–1, clamped) → sort desc
+//   3. dedupeMatches — requires .hybrid to be set (step 2 did it)
+//   4. rerankMatches — skips itself when < MIN_RERANK_MATCHES
+//   5. slice top 5 → fetch chunks → buildContext
 // --------------------------
 export async function retrieveContext(question, companyName) {
   const embeddings = await generateEmbeddings([question], companyName);

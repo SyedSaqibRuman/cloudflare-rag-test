@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { askStream } from "../api";
 import { useCompanies } from "../context";
-import { Button, Badge, ErrorBanner } from "../components/ui";
+import { Button, Badge, ErrorBanner, Input } from "../components/ui";
 import Markdown from "../components/Markdown";
+import { useHeaderActions } from "../components/Layout";
 
 const START = "__START_RESPONSE__";
 
@@ -12,6 +13,7 @@ export default function AskConsole() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
+  const [apiKey, setApiKey] = useState("");
   const [draftIndex, setDraftIndex] = useState(null);
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
@@ -20,6 +22,16 @@ export default function AskConsole() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streaming]);
+
+  // Per-company API key (only needed when the company has one configured)
+  useEffect(() => {
+    setApiKey(localStorage.getItem(`ask-api-key:${company || ""}`) || "");
+  }, [company]);
+
+  const setApiKeyForCompany = (value) => {
+    setApiKey(value);
+    localStorage.setItem(`ask-api-key:${company || ""}`, value);
+  };
 
   const send = async () => {
     const question = input.trim();
@@ -52,6 +64,7 @@ export default function AskConsole() {
         question,
         history: fullHistory,
         company,
+        apiKey: apiKey || undefined,
         signal: controller.signal,
         onToken: (token) => {
           if (token === START) {
@@ -93,24 +106,32 @@ export default function AskConsole() {
     setError(null);
   };
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-2">
+      <Badge tone={company ? "green" : "amber"}>{company ? `Company: ${company}` : "No company selected"}</Badge>
+      {company && (
+        <Input
+          type="password"
+          placeholder="API key (if company requires one)"
+          aria-label="API key for selected company"
+          value={apiKey}
+          onChange={(e) => setApiKeyForCompany(e.target.value)}
+          autoComplete="off"
+          className="w-56 py-1.5 text-xs"
+        />
+      )}
+      <Button variant="ghost" onClick={clear} disabled={streaming || messages.length === 0}>
+        Clear
+      </Button>
+    </div>
+  );
+
   return (
-    <div className="flex h-[calc(100vh-3rem)] flex-col space-y-4">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">Ask Console</h1>
-          <p className="text-sm text-slate-400 mt-1">Test the RAG assistant with live streaming responses</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge tone={company ? "green" : "amber"}>{company ? `Company: ${company}` : "No company selected"}</Badge>
-          <Button variant="ghost" onClick={clear} disabled={streaming || messages.length === 0}>
-            Clear
-          </Button>
-        </div>
-      </div>
+    <div className="flex h-[calc(100vh-4.5rem)] flex-col space-y-4">
 
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
-      <div className="flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/70 p-5">
+      <div role="log" aria-live="polite" className="flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/70 p-5">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-500/15 text-indigo-300">
@@ -126,13 +147,13 @@ export default function AskConsole() {
             {messages.map((msg, i) =>
               msg.role === "user" ? (
                 <div key={i} className="flex justify-end">
-                  <div className="max-w-[75%] rounded-2xl rounded-br-sm bg-indigo-500/20 border border-indigo-500/30 px-4 py-2.5 text-sm text-slate-100">
+                  <div className="max-w-[75%] break-words rounded-2xl rounded-br-sm bg-indigo-500/20 border border-indigo-500/30 px-4 py-2.5 text-sm text-slate-100">
                     {msg.content}
                   </div>
                 </div>
               ) : (
                 <div key={i} className="flex justify-start">
-                  <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-slate-950 border border-slate-800 px-4 py-3">
+                  <div className="max-w-[85%] break-words rounded-2xl rounded-bl-sm bg-slate-950 border border-slate-800 px-4 py-3">
                     {msg.streaming && msg.content === "" && (
                       <span className="inline-flex gap-1">
                         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-400" />
@@ -158,6 +179,7 @@ export default function AskConsole() {
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
+            aria-label="Your question"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Select, Badge, Empty, Spinner, Modal } from "../components/ui";
+import { Card, Button, Input, Select, Badge, Empty, Spinner, Modal, Toast } from "../components/ui";
 import { useCompanies } from "../context";
 import { JOB_IDS } from "../models";
 import { usePoll } from "../hooks";
+import { useHeaderActions } from "../components/Layout";
 import { formatDate } from "../util";
 
 const JOB_LABELS = {
@@ -163,23 +164,19 @@ export default function Scheduler() {
     }
   };
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-2">
+      <Badge tone={status?.mode === "active" ? "green" : "slate"}>
+        {status?.mode === "active" ? "Active" : "Idle"}
+      </Badge>
+      <Button onClick={() => setCronOpen(true)}>Schedule Cron</Button>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">Scheduler</h1>
-          <p className="text-sm text-slate-400 mt-1">Run jobs on demand, schedule them with cron, and manage reusable presets</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge tone={status?.mode === "active" ? "green" : "slate"}>
-            {status?.mode === "active" ? "Active" : "Idle"}
-          </Badge>
-          <Button onClick={() => setCronOpen(true)}>Schedule Cron</Button>
-        </div>
-      </div>
-
       {error && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
       )}
 
       <Card title="Registered Jobs" subtitle="Job types available on this server">
@@ -270,7 +267,7 @@ export default function Scheduler() {
                   <div>
                     <p className="text-sm font-medium text-slate-100">{JOB_LABELS[c.jobId] || c.jobId}</p>
                     <p className="text-xs text-slate-500">
-                      {c.companyName ? `Company: ${c.companyName}` : "Global"} · <span className="font-mono">{c.schedule}</span> · runs: {c.runCount ?? 0}
+                      {c.companyName ? `Company: ${c.companyName}` : "Global"} · <span className="font-mono">{c.schedule}</span> · runs: <span className="tabular-nums">{c.runCount ?? 0}</span>
                     </p>
                     {c.lastRun && <p className="text-[11px] text-slate-600">last run {formatDate(c.lastRun)}</p>}
                   </div>
@@ -367,11 +364,7 @@ export default function Scheduler() {
         </div>
       </Modal>
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">
-          {toast}
-        </div>
-      )}
+      <Toast message={toast} />
     </div>
   );
 }

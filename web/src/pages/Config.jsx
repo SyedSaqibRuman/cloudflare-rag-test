@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Select, Badge, Spinner } from "../components/ui";
+import { Card, Button, Input, Select, Spinner, Badge, Toast } from "../components/ui";
 import { useCompanies } from "../context";
+import { useHeaderActions } from "../components/Layout";
 import {
   EMBEDDING_MODELS,
   LLM_MODELS,
@@ -10,6 +11,7 @@ import {
   EMBEDDING_DIMENSIONS,
   GENERAL_KEYS,
   STORAGE_KEYS,
+  CREDENTIAL_KEYS,
 } from "../models";
 
 const MODEL_LABELS = {
@@ -33,6 +35,22 @@ const STORAGE_LABELS = {
   R2_BUCKET_NAME: "R2 Bucket",
 };
 
+const CREDENTIAL_LABELS = {
+  CLOUDFLARE_ACCOUNT_ID: "Cloudflare Account ID",
+  CLOUDFLARE_API_TOKEN: "Cloudflare API Token",
+  R2_ACCESS_KEY_ID: "R2 Access Key ID",
+  R2_SECRET_ACCESS_KEY: "R2 Secret Access Key",
+  R2_TOKEN_VALUE: "R2 Token Value",
+  R2_JURISDICTION_END_POINT: "R2 Jurisdiction Endpoint",
+};
+
+const SECRET_FIELDS = [
+  "CLOUDFLARE_API_TOKEN",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
+  "R2_TOKEN_VALUE",
+];
+
 export default function Config() {
   const { company, companies, select, refresh } = useCompanies();
   const [config, setConfig] = useState(null);
@@ -41,6 +59,9 @@ export default function Config() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
+  const [apiKeyEnabled, setApiKeyEnabled] = useState(false);
+  const [generatedKey, setGeneratedKey] = useState(null);
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
 
   const notify = (msg) => {
     setToast(msg);
@@ -55,14 +76,66 @@ export default function Config() {
     }
     setLoading(true);
     setError(null);
+    setGeneratedKey(null);
     try {
       const data = await api(`/cloudflare/config?company=${encodeURIComponent(name)}`);
-      setConfig(data.config);
-      setDraft(data.config);
+      const cfg = data.config || {};
+      // API returns sectioned config (GENERAL/MODELS/STORAGE/CREDENTIALS/AUTH);
+      // flatten the value groups so fields can read draft[key] directly.
+      const flat = {
+        ...(cfg.GENERAL || {}),
+        ...(cfg.MODELS || {}),
+        ...(cfg.STORAGE || {}),
+        ...(cfg.CREDENTIALS || {}),
+      };
+      setConfig(flat);
+      setDraft(flat);
+      setApiKeyEnabled(!!cfg.AUTH?.API_KEY_ENABLED);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const generateApiKey = async () => {
+    if (!company) return;
+    setApiKeyBusy(true);
+    setError(null);
+    try {
+      const data = await api(`/cloudflare/companies/${encodeURIComponent(company)}/apikey`, { method: "POST" });
+      setGeneratedKey(data.apiKey);
+      setApiKeyEnabled(true);
+      notify("API key generated — copy it now.");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const revokeApiKey = async () => {
+    if (!window.confirm(`Revoke '${company}'s API key? /ask and /ask-stream will become open for this company again.`)) return;
+    setApiKeyBusy(true);
+    setError(null);
+    try {
+      await api(`/cloudflare/companies/${encodeURIComponent(company)}/apikey`, { method: "DELETE" });
+      setGeneratedKey(null);
+      setApiKeyEnabled(false);
+      notify("API key revoked.");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const copyApiKey = async () => {
+    try {
+      await navigator.clipboard.writeText(generatedKey);
+      notify("API key copied to clipboard.");
+    } catch {
+      notify("Could not copy — select the key manually.");
     }
   };
 
@@ -101,7 +174,7 @@ export default function Config() {
   };
 
   const reset = async () => {
-    if (!window.confirm(`Reset '${company}' to environment defaults?`)) return;
+    if (!window.confirm(`Reset '${company}' to defaults?`)) return;
     setError(null);
     try {
       await api(`/cloudflare/companies/${encodeURIComponent(company)}/reset`, { method: "POST" });
@@ -115,38 +188,34 @@ export default function Config() {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-3">
+      <Select
+        value={company}
+        onChange={(e) => select(e.target.value)}
+        options={[
+          { value: "", label: "Select a company…" },
+          ...companies.map((c) => ({ value: c.name, label: c.COMPANY_NAME || c.name })),
+        ]}
+        className="w-64"
+      />
+      {company && (
+        <>
+          <Button variant="secondary" onClick={reset}>
+            Reset
+          </Button>
+          <Button onClick={save} disabled={!dirty || saving}>
+            {saving ? <Spinner className="h-3.5 w-3.5" /> : "Save Changes"}
+          </Button>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">Company Config</h1>
-          <p className="text-sm text-slate-400 mt-1">Hot-reloadable runtime configuration per tenant</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Select
-            value={company}
-            onChange={(e) => select(e.target.value)}
-            options={[
-              { value: "", label: "Select a company…" },
-              ...companies.map((c) => ({ value: c.name, label: c.COMPANY_NAME || c.name })),
-            ]}
-            className="w-64"
-          />
-          {company && (
-            <>
-              <Button variant="secondary" onClick={reset}>
-                Reset
-              </Button>
-              <Button onClick={save} disabled={!dirty || saving}>
-                {saving ? <Spinner className="h-3.5 w-3.5" /> : "Save Changes"}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-
       {error && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
       )}
 
       {!company ? (
@@ -225,6 +294,56 @@ export default function Config() {
             </div>
           </Card>
 
+          <Card title="Cloudflare Credentials" subtitle="Stored in this company's SQLite database; no environment fallback">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {CREDENTIAL_KEYS.map((key) => (
+                <Input
+                  key={key}
+                  type={SECRET_FIELDS.includes(key) ? "password" : "text"}
+                  label={CREDENTIAL_LABELS[key]}
+                  value={draft[key] ?? ""}
+                  onChange={(e) => setKey(key, e.target.value)}
+                  autoComplete="off"
+                />
+              ))}
+            </div>
+          </Card>
+
+          <Card
+            title="Ask API Key"
+            subtitle="When enabled, POST /ask and /ask-stream require x-api-key and must originate from <company>.com or a subdomain"
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <Badge tone={apiKeyEnabled ? "green" : "amber"}>{apiKeyEnabled ? "Enabled" : "Disabled"}</Badge>
+              {generatedKey ? (
+                <Input
+                  readOnly
+                  label="Generated API key"
+                  value={generatedKey}
+                  onFocus={(e) => e.target.select()}
+                  className="w-96 font-mono text-xs"
+                />
+              ) : null}
+              {apiKeyEnabled ? (
+                <Button variant="danger" onClick={revokeApiKey} disabled={apiKeyBusy}>
+                  {apiKeyBusy ? <Spinner className="h-3.5 w-3.5" /> : "Revoke"}
+                </Button>
+              ) : (
+                <Button onClick={generateApiKey} disabled={apiKeyBusy}>
+                  {apiKeyBusy ? <Spinner className="h-3.5 w-3.5" /> : "Generate API Key"}
+                </Button>
+              )}
+              {generatedKey && (
+                <Button variant="secondary" onClick={copyApiKey}>
+                  Copy
+                </Button>
+              )}
+            </div>
+            {generatedKey && (
+              <p className="mt-2 text-xs text-amber-300">Shown once — copy it now. Regenerating invalidates the previous key.</p>
+            )}
+          </Card>
+
           {dirty && (
             <div className="flex items-center justify-between rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200">
               <span>You have unsaved changes.</span>
@@ -241,19 +360,7 @@ export default function Config() {
         </div>
       )}
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">
-          {toast}
-        </div>
-      )}
-
-      {company && config && (
-        <div className="fixed bottom-4 left-64">
-          <Badge tone="slate">
-            {config.COMPANY_NAME} · {config.LLM_MODEL}
-          </Badge>
-        </div>
-      )}
+      <Toast message={toast} />
     </div>
   );
 }

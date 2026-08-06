@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton } from "../components/ui";
+import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton, Toast } from "../components/ui";
+import { useCompanies } from "../context";
 import { usePoll } from "../hooks";
+import { useHeaderActions } from "../components/Layout";
 import { formatDate } from "../util";
 
 function ModalForm({ open, title, placeholder, confirmLabel, onClose, onSubmit }) {
@@ -58,6 +60,7 @@ function ModalForm({ open, title, placeholder, confirmLabel, onClose, onSubmit }
 }
 
 export default function Cloudflare() {
+  const { company } = useCompanies();
   const [indexes, setIndexes] = useState([]);
   const [buckets, setBuckets] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -74,8 +77,14 @@ export default function Cloudflare() {
 
   const load = async () => {
     setError(null);
+    if (!company) {
+      setIndexes([]);
+      setBuckets([]);
+      setLoading(false);
+      return;
+    }
     try {
-      const [i, b] = await Promise.all([api("/cloudflare/indexes"), api("/cloudflare/buckets")]);
+      const [i, b] = await Promise.all([api("/cloudflare/indexes", { company }), api("/cloudflare/buckets", { company })]);
       setIndexes(i.indexes || []);
       setBuckets(b.buckets || []);
     } catch (e) {
@@ -85,15 +94,15 @@ export default function Cloudflare() {
     }
   };
 
-  usePoll(load, 15000);
+  usePoll(load, 15000, [company]);
 
   const handleCreateIndex = async (name) => {
-    await api("/cloudflare/indexes", { method: "POST", body: { name } });
+    await api("/cloudflare/indexes", { method: "POST", body: { name }, company });
     notify(`Index '${name}' ready.`);
   };
 
   const handleCreateBucket = async (name) => {
-    await api("/cloudflare/buckets", { method: "POST", body: { name } });
+    await api("/cloudflare/buckets", { method: "POST", body: { name }, company });
     notify(`Bucket '${name}' ready.`);
   };
 
@@ -102,7 +111,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/indexes/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await api(`/cloudflare/indexes/${encodeURIComponent(name)}`, { method: "DELETE", company });
       await load();
       notify(`Index '${name}' deleted.`);
     } catch (e) {
@@ -117,7 +126,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/buckets/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await api(`/cloudflare/buckets/${encodeURIComponent(name)}`, { method: "DELETE", company });
       await load();
       notify(`Bucket '${name}' deleted.`);
     } catch (e) {
@@ -132,7 +141,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/buckets/${encodeURIComponent(name)}/clear`, { method: "POST" });
+      await api(`/cloudflare/buckets/${encodeURIComponent(name)}/clear`, { method: "POST", company });
       notify(`Bucket '${name}' cleared.`);
     } catch (e) {
       setError(e.message);
@@ -141,24 +150,28 @@ export default function Cloudflare() {
     }
   };
 
+  useHeaderActions(
+    <div className="flex items-center justify-end gap-2">
+      <Button variant="secondary" onClick={load} disabled={loading}>
+        {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
+      </Button>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50">Cloudflare Resources</h1>
-          <p className="text-sm text-slate-400 mt-1">Vector indexes and R2 buckets across the account</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={load} disabled={loading}>
-            {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
-          </Button>
-        </div>
-      </div>
-
       {error && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
       )}
 
+      {!company ? (
+        <Card>
+          <div className="py-10 text-center text-sm text-slate-500">
+            Select a company in the sidebar to view its Cloudflare resources.
+          </div>
+        </Card>
+      ) : (
+      <>
       <Card
         title="Vector Indexes"
         subtitle={`${indexes.length} indexes`}
@@ -195,7 +208,7 @@ export default function Cloudflare() {
                           onClick={() => deleteIndex(idx.name)}
                           disabled={busyName === idx.name}
                         >
-                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
+                          <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
                         </IconButton>
                       </div>
                     </td>
@@ -235,20 +248,23 @@ export default function Cloudflare() {
                     <td className="py-2.5">{formatDate(b.creation_date ?? b.creationDate)}</td>
                     <td className="py-2.5">
                       <div className="flex items-center justify-end gap-1">
-                        <IconButton
+                        <button
                           title={`Clear ${b.name}`}
+                          aria-label={`Clear ${b.name}`}
                           onClick={() => clearBucket(b.name)}
                           disabled={busyName === b.name}
+                          className="inline-flex h-7 items-center gap-1.5 rounded-lg border-0 px-2.5 text-xs text-slate-500 transition-all hover:bg-amber-500/10 hover:text-amber-600 disabled:pointer-events-none disabled:opacity-40"
                         >
-                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" /><path d="M9 12l2 2 4-4" /></svg>
-                        </IconButton>
+                          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" /></svg>
+                          Clear
+                        </button>
                         <IconButton
                           title={`Delete ${b.name}`}
                           className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
                           onClick={() => deleteBucket(b.name)}
                           disabled={busyName === b.name}
                         >
-                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
+                          <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
                         </IconButton>
                       </div>
                     </td>
@@ -259,6 +275,9 @@ export default function Cloudflare() {
           </div>
         )}
       </Card>
+      </>
+
+      )}
 
       <ModalForm
         open={createIndex}
@@ -277,11 +296,7 @@ export default function Cloudflare() {
         onSubmit={handleCreateBucket}
       />
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">
-          {toast}
-        </div>
-      )}
+      <Toast message={toast} />
     </div>
   );
 }

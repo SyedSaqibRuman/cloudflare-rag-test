@@ -3,15 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a" />
     <title>PopularCert AI Admin</title>
     <script>
       (function () {
         try {
-          var t = localStorage.getItem("pc_theme");
-          if (!t) {
-            t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-          }
-          if (t === "dark") document.documentElement.classList.add("dark");
+          var t = localStorage.getItem("pc_theme") || "system";
+          var dark =
+            t === "dark" ||
+            (t !== "light" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
         } catch (e) {}
       })();
     </script>

@@ -18,6 +18,18 @@ const PROMPT_KEYS = ["SYSTEM_PROMPT"];
 
 const RESOURCE_KEYS = ["VECTOR_INDEX", "R2_BUCKET_NAME"];
 
+const CREDENTIAL_KEYS = [
+  "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_API_TOKEN",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
+  "R2_TOKEN_VALUE",
+  "R2_JURISDICTION_END_POINT",
+];
+
+/** Per-company API keys that gate the /ask and /ask-stream endpoints. */
+const SECRET_KEYS = ["API_KEY"];
+
 /** Keys that belong to each company config (multi-company capable). */
 export const COMPANY_KEYS = [
   ...MODEL_KEYS,
@@ -26,9 +38,23 @@ export const COMPANY_KEYS = [
   ...STRING_KEYS,
   ...PROMPT_KEYS,
   ...RESOURCE_KEYS,
+  ...CREDENTIAL_KEYS,
+  ...SECRET_KEYS,
 ];
 
-export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS };
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, CREDENTIAL_KEYS, SECRET_KEYS };
+
+/**
+ * Sectioned grouping of company config keys, used by the API (GET /config) and
+ * the admin portal to derive the config shape from one source. Adding a key to
+ * a section list is all that's needed — nothing else to hand-sync.
+ */
+export const CONFIG_SECTIONS = [
+  { section: "GENERAL", keys: [...URL_KEYS, ...STRING_KEYS] },
+  { section: "MODELS", keys: [...MODEL_KEYS, ...DIMENSION_KEYS] },
+  { section: "STORAGE", keys: RESOURCE_KEYS },
+  { section: "CREDENTIALS", keys: CREDENTIAL_KEYS },
+];
 
 /** Whitelist of allowed Cloudflare model IDs for each role. */
 export const ALLOWED_MODELS = {

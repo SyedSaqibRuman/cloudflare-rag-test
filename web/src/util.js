@@ -28,3 +28,15 @@ export function shorten(value, n = 60) {
   const s = String(value);
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
+
+/**
+ * Derive a company's setup status from its config summary.
+ * Returns { label, tone } where tone maps to the Badge palette.
+ */
+export function companyStatus(c) {
+  if (!c?.hasCredentials) return { label: "Config Required", tone: "amber" };
+  if (c.VECTOR_INDEX && c.R2_BUCKET_NAME) return { label: "Healthy", tone: "green" };
+  if (!c.VECTOR_INDEX && c.R2_BUCKET_NAME) return { label: "Missing Vector", tone: "red" };
+  if (c.VECTOR_INDEX && !c.R2_BUCKET_NAME) return { label: "Missing Bucket", tone: "red" };
+  return { label: "Config Required", tone: "amber" };
+}

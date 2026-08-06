@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 
 // Ensure default company config is loaded before tests that need it
 import "../context.js"; // side-effect free
-import { runtimeConfig } from "../../config/index.js";
+import { runtimeConfig, getDefaultCompanyConfig } from "../../config/index.js";
+
+// Blank slate: register an in-memory default company so fast-path/intent tests
+// have something to resolve against (no db file is written).
+if (!Object.keys(runtimeConfig.COMPANIES).length) {
+  runtimeConfig.COMPANIES.Popularcert = getDefaultCompanyConfig();
+}
 
 // --------------------------
 // SCORING TESTS
@@ -151,6 +157,23 @@ describe("scoring", () => {
       assert.equal(result[2].id, "c");
     });
   });
+
+  describe("hybridScore bounds", () => {
+    it("clamps hybrid score to a maximum of 1", () => {
+      // keywordScore("test", "test test test test test") = 3, so the raw
+      // hybrid would be 0.85*1.0 + 0.15*3 = 1.3 — clamped back to 1.0.
+      const match = { score: 1.0, metadata: { title: "test test test test test" } };
+      const result = hybridScore(match, "test");
+      assert.ok(result <= 1, `Expected clamp to 1, got ${result}`);
+      assert.equal(result, 1);
+    });
+
+    it("stays monotonic with unclamped scores", () => {
+      const high = hybridScore({ score: 0.9, metadata: { title: "iso certification" } }, "iso certification");
+      const low = hybridScore({ score: 0.4, metadata: { title: "pizza delivery" } }, "iso certification");
+      assert.ok(high > low);
+    });
+  });
 });
 
 // --------------------------
@@ -223,7 +246,7 @@ describe("cache", () => {
 // --------------------------
 // CONTEXT TESTS
 // --------------------------
-import { sanitizeText, buildContext } from "../context.js";
+import { sanitizeText, buildContext, buildUserMessage } from "../context.js";
 
 describe("context", () => {
   describe("sanitizeText", () => {
@@ -327,6 +350,18 @@ describe("context", () => {
       const result = buildContext(chunks);
       // The second source should push it over the limit
       assert.ok(result.includes("[Source 1]"));
+    });
+  });
+
+  describe("buildUserMessage", () => {
+    it("frames context then question", () => {
+      const msg = buildUserMessage("[Source 1]\nTitle: T", "What is ISO?");
+      assert.equal(msg, "CONTEXT:\n[Source 1]\nTitle: T\n\nQUESTION:\nWhat is ISO?");
+    });
+
+    it("does not re-sanitize the context (no double pass)", () => {
+      const msg = buildUserMessage("[Source 1]\nContent: a\nb", "q");
+      assert.ok(msg.includes("Content: a\nb"));
     });
   });
 });

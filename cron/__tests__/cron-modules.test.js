@@ -10,7 +10,7 @@ import {
   MAX_CONCURRENT_JOBS,
   jobKey,
   jobKeyDisplay,
-} from "../state.js";
+} from "../lifecycle.js";
 
 describe("cron/state", () => {
   describe("jobKey", () => {
@@ -74,7 +74,7 @@ describe("cron/state", () => {
 // --------------------------
 // STANDALONE TESTS
 // --------------------------
-import { startJob, stopJob, getRunningJobs } from "../standalone.js";
+import { startJob, stopJob, getRunningJobs } from "../lifecycle.js";
 
 // Helper: a job handler that blocks until signal fires (never completes on its own)
 function blockingHandler({ signal } = {}) {
@@ -304,7 +304,7 @@ describe("cron/standalone", () => {
 // --------------------------
 // SCHEDULER TESTS
 // --------------------------
-import { startCron, stopCron } from "../scheduler.js";
+import { startCron, stopCron } from "../lifecycle.js";
 
 function cleanupCron() {
   for (const [, state] of cronSchedulers) {
@@ -421,7 +421,7 @@ describe("cron/scheduler", () => {
 // --------------------------
 // STATUS TESTS
 // --------------------------
-import { getJobs, getStatus } from "../status.js";
+import { getJobs, getStatus } from "../lifecycle.js";
 
 describe("cron/status", () => {
   beforeEach(() => {
@@ -503,26 +503,16 @@ describe("cron/status", () => {
       assert.equal(cronEntry.avgDuration, null);
     });
 
-    it("idle mode includes recent standalone history", () => {
-      // Inject a completed job in history
-      standaloneJobs.set("testing:co1", {
-        jobId: "testing",
-        companyName: "co1",
-        status: "completed",
-        startedAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        duration: 42.5,
-      });
-
+    it("idle mode reports empty standalone/cron and the job catalog", () => {
+      // Finished entries are deleted from the maps on completion, so idle mode
+      // has no history to report — it returns the catalog instead.
       const status = getStatus();
       assert.equal(status.mode, "idle");
-      assert.ok(status.standalone.length >= 1);
-      const entry = status.standalone.find(
-        (s) => s.jobId === "testing" && s.companyName === "co1"
-      );
-      assert.ok(entry);
-      assert.equal(entry.status, "completed");
-      assert.equal(entry.duration, "42.5ms");
+      assert.deepEqual(status.standalone, []);
+      assert.deepEqual(status.cron, []);
+      assert.ok(Array.isArray(status.jobs));
+      assert.ok(status.jobs.length >= 1);
+      assert.ok(status.jobs.some((j) => j.id === "testing"));
     });
   });
 });

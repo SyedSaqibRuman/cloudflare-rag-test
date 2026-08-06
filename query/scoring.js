@@ -4,7 +4,8 @@
 
 /**
  * Keyword overlap score between a query and a text.
- * Returns a value between 0 and 1.
+ * Returns a value between 0 and 3: each query term contributes up to 3
+ * (its frequency in the text, capped), averaged over the query terms.
  */
 export function keywordScore(query, text = "") {
   const qTerms = query.toLowerCase().split(/\W+/).filter(Boolean);
@@ -17,15 +18,20 @@ export function keywordScore(query, text = "") {
 
 /**
  * Hybrid score combining vector similarity (85%) and keyword overlap (15%).
+ * Clamped to [0, 1] so downstream thresholds (which assume a 0–1 score) hold
+ * even when the keyword component pushes past 1.
  */
 export function hybridScore(match, question) {
   const text = `${match.metadata?.title || ""} ${match.metadata?.preview || ""}`;
-  return 0.85 * (match.score || 0) + 0.15 * keywordScore(question, text);
+  const raw = 0.85 * (match.score || 0) + 0.15 * keywordScore(question, text);
+  return Math.min(1, Math.max(0, raw));
 }
 
 /**
  * Deduplicate matches by post_id, url, r2_key, or id.
  * Keeps the match with the highest hybrid score.
+ * Precondition: each match must carry .hybrid — retrieveContext sets it
+ * before calling this (sort by hybrid first, then dedupe).
  */
 export function dedupeMatches(matches) {
   const map = new Map();

@@ -4,11 +4,17 @@ import fs from "fs";
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import { askQuestion, askQuestionStream } from "./query/index.js";
 import { testStream } from "./streamTest.js";
 import cronRoutes from "./routes/cron.js";
 import cloudflareRoutes from "./routes/cloudflare.js";
+import authRoutes from "./routes/auth.js";
+import logsRoutes from "./routes/logs.js";
+import { createAskRouter } from "./routes/ask.js";
 import { env } from "./env.js";
+import { requireAdmin } from "./auth.js";
+import { isAllowedOrigin } from "./utils/request-context.js";
+import swaggerUi from "swagger-ui-express";
+import openapi from "./docs/openapi.js";
 
 // --------------------------
 // 🔹 APP & CONFIG
@@ -21,45 +27,18 @@ const WEB_DIR = path.resolve(process.cwd(), "web", "dist");
 const WEB_INDEX = path.join(WEB_DIR, "index.html");
 const hasWeb = fs.existsSync(WEB_INDEX);
 
-const ALLOWED_ORIGINS = [
-  "https://dev.popularcert.com",
-  "https://staging.popularcert.com",
-  "https://www.popularcert.com",
-  "https://popularcert.com",
-  "https://crm.popularcert.com",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:8080",
-];
-
 // --------------------------
 // 🔹 MIDDLEWARE
 // --------------------------
 app.set("trust proxy", true);
 
 app.use(cors({
-  origin: ALLOWED_ORIGINS,
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "X-WP-Nonce", "X-Company-Name"],
+  allowedHeaders: ["Content-Type", "X-WP-Nonce", "X-Company-Name", "X-Api-Key", "Authorization", "X-Auth-Token"],
 }));
 
 app.use(express.json({ limit: "1mb" }));
-
-// --------------------------
-// 🔹 COMPANY RESOLUTION
-// Extract x-company-name header and attach to request.
-// Required on /ask and /ask-stream — returns 400 if missing.
-// --------------------------
-function requireCompany(req, res, next) {
-  const company = req.headers["x-company-name"];
-  if (!company?.trim()) {
-    return res.status(400).json({ success: false, error: "x-company-name header is required." });
-  }
-  req.companyName = company.trim();
-  next();
-}
-app.use("/ask", requireCompany);
-app.use("/ask-stream", requireCompany);
 
 // --------------------------
 // 🔹 RATE LIMITING
@@ -71,12 +50,7 @@ app.use("/ask-stream", requireCompany);
 const globalWindowMs = 60 * 1000; // 1 minute
 const globalMax = parseInt(env.RATE_LIMIT_GLOBAL, 10);
 
-// Strict limit for AI-powered endpoints (POST /ask, POST /ask-stream):
-// Lower limit because these call Cloudflare Workers AI (cost per request).
-const aiWindowMs = 60 * 1000; // 1 minute
-const aiMax = parseInt(env.RATE_LIMIT_AI, 10);
-
-// Moderate limit for admin endpoints (POST/PUT/DELETE operations):
+// Strict limit for admin endpoints (POST/PUT/DELETE operations):
 const adminWindowMs = 60 * 1000; // 1 minute
 const adminMax = parseInt(env.RATE_LIMIT_ADMIN, 10);
 
@@ -93,16 +67,6 @@ const globalLimiter = rateLimit({
   message: {
     success: false,
     error: "Too many requests. Please slow down and try again later.",
-  },
-});
-
-const aiLimiter = rateLimit({
-  ...limiterDefaults,
-  windowMs: aiWindowMs,
-  max: aiMax,
-  message: {
-    success: false,
-    error: "AI query limit reached. Please wait before sending another question.",
   },
 });
 
@@ -125,8 +89,19 @@ app.use((req, res, next) => {
 });
 
 // Mount routes
-app.use("/cloudflare", cronRoutes);
-app.use("/cloudflare", adminLimiter, cloudflareRoutes);
+app.use("/cloudflare", requireAdmin, cronRoutes);
+app.use("/cloudflare", adminLimiter, requireAdmin, cloudflareRoutes);
+app.use("/auth", authRoutes);
+app.use("/logs", requireAdmin, logsRoutes);
+app.use(createAskRouter());
+
+// --------------------------
+// 🔹 API DOCS (Swagger UI)
+// Serves the OpenAPI spec as a browsable UI at /api-docs and as raw JSON at
+// /api-docs/openapi.json (importable into Postman/insomnia/codegen).
+// --------------------------
+app.get("/api-docs/openapi.json", requireAdmin, (req, res) => res.json(openapi));
+app.use("/api-docs", requireAdmin, swaggerUi.serve, swaggerUi.setup(openapi));
 
 // --------------------------
 // 🔹 HEALTH CHECK
@@ -159,118 +134,6 @@ app.get("/_health", (req, res) => {
 // --------------------------
 // 🔹 STATIC ASK (JSON Response)
 // --------------------------
-app.post("/ask", aiLimiter, async (req, res) => {
-  try {
-    const { question, history = [] } = req.body;
-
-    if (!question?.trim()) {
-      return res.status(400).json({ success: false, error: "Question is required" });
-    }
-
-    if (!Array.isArray(history)) {
-      return res.status(400).json({ success: false, error: "History must be an array" });
-    }
-
-    const result = await askQuestion(question, history, req.companyName);
-    return res.json({ success: true, ...result });
-
-  } catch (err) {
-    console.error("❌ /ask Error:", err);
-    return res.status(500).json({ success: false, error: "Internal Server Error" });
-  }
-});
-
-app.post("/ask-stream", aiLimiter, async (req, res) => {
-  try {
-    const { question, history = [] } = req.body;
-
-    // --------------------------
-    // 🔹 VALIDATION
-    // --------------------------
-    if (!question?.trim()) {
-      return res.status(400).json({ success: false, error: "Question is required" });
-    }
-
-    if (!Array.isArray(history)) {
-      return res.status(400).json({ success: false, error: "History must be an array" });
-    }
-
-    // --------------------------
-    // 🔹 SSE HEADERS
-    // --------------------------
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // Disable proxy buffering (Nginx)
-    res.flushHeaders?.();
-
-    // --------------------------
-    // 🔹 ABORT HANDLING
-    // --------------------------
-    const abortController = new AbortController();
-    let closed = false;
-
-    res.on("close", () => {
-      closed = true;
-
-      abortController.abort();
-
-      console.log(
-        "ℹ️ SSE connection closed"
-      );
-    });
-
-    // --------------------------
-    // 🔹 EXECUTE STREAM
-    // --------------------------
-    await askQuestionStream(
-      question,
-      history,
-      // Token callback
-      (token) => {
-        if (closed) return;
-        try {
-          res.write(`data: ${JSON.stringify({ token })}\n\n`);
-        } catch (err) {
-          console.error("❌ SSE write error:", err.message);
-        }
-      },
-      // Abort signal
-      abortController.signal,
-      // Company name from header
-      req.companyName
-    );
-
-    // --------------------------
-    // 🔹 FINISH STREAM
-    // --------------------------
-    if (!closed) {
-      res.write("data: [DONE]\n\n");
-      res.end();
-    }
-
-  } catch (err) {
-    console.error("❌ Stream API Error:", err.message);
-
-    try {
-      if (!res.headersSent) {
-        res.setHeader("Content-Type", "text/event-stream");
-      }
-
-      if (!res.destroyed) {
-        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-        res.end();
-      }
-    } catch (innerErr) {
-      console.error("❌ Stream error recovery failed:", innerErr.message);
-      try { res.destroy(); } catch { /* best effort */ }
-    }
-  }
-});
-
-
-
-
 // --------------------------
 // 🔹 STREAM TEST API
 // --------------------------
@@ -286,28 +149,13 @@ app.post("/test", async (req, res) => {
     res.setHeader("Connection", "keep-alive");
 
     // --------------------------
-    // 🔹 Capture stdout chunks
+    // 🔹 Stream via an output channel — no process.stdout hijacking.
+    // Each token is framed as a data: event; errors propagate to the catch
+    // below and are framed as an error event.
     // --------------------------
-    const originalWrite = process.stdout.write;
-
-    process.stdout.write = function (chunk, encoding, callback) {
-      try {
-        // Send streamed chunk to client in SSE format
-        res.write(`data: ${chunk}\n\n`);
-      } catch (err) {
-        console.error("❌ SSE write error:", err.message);
-      }
-
-      return originalWrite.apply(process.stdout, [chunk, encoding, callback]);
-    };
-
-    // --------------------------
-    // 🔹 Execute stream test
-    // --------------------------
-    await testStream(prompt);
-
-    // Restore stdout to its original state
-    process.stdout.write = originalWrite;
+    await testStream(prompt, (token) => {
+      res.write(`data: ${token}\n\n`);
+    });
 
     // End signals for the frontend listener
     res.write("event: done\ndata: END\n\n");
@@ -345,7 +193,12 @@ app.use((req, res) => {
 // --------------------------
 // 🔹 START SERVER
 // --------------------------
-app.listen(PORT, () => {
+app.listen(PORT, (err) => {
+  if (err) {
+    console.error(`❌ Failed to start server on port ${PORT}: ${err.message}`);
+    console.error("   Another server may already be running on this port.");
+    process.exit(1);
+  }
   console.log(`
 🚀 PopularCert API Started
 ----------------------------
