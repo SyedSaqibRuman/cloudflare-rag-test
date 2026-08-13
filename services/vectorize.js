@@ -109,7 +109,11 @@ export async function deleteVectorIndex(name, companyName) {
 // --------------------------
 // 🔹 Vector Upsert
 // --------------------------
-export async function upsertVectors(chunks = [], companyName) {
+export async function upsertVectors(
+  chunks = [],
+  companyName,
+  { indexName = getVectorIndex(companyName), embeddingModel = null, dimensions = null } = {}
+) {
   if (!chunks.length) return;
 
   const batches = chunkArray(chunks, 100);
@@ -122,7 +126,7 @@ export async function upsertVectors(chunks = [], companyName) {
       // 🔹 Generate embeddings
       // --------------------------
       const texts = batch.map((c) => c.text);
-      const embeddings = await generateEmbeddings(texts, companyName);
+      const embeddings = await generateEmbeddings(texts, companyName, embeddingModel);
 
       // --------------------------
       // 🔹 Validate embeddings
@@ -131,7 +135,8 @@ export async function upsertVectors(chunks = [], companyName) {
         throw new Error("Embedding mismatch");
       }
 
-      const expectedDims = (companyName ? getConfig(companyName).EMBEDDING_DIMENSIONS : null) || DIMENSIONS;
+      const expectedDims =
+        dimensions || (companyName ? getConfig(companyName).EMBEDDING_DIMENSIONS : null) || DIMENSIONS;
       if (embeddings.some((e) => !e || e.length !== expectedDims)) {
         throw new Error("Invalid embedding detected");
       }
@@ -164,7 +169,7 @@ export async function upsertVectors(chunks = [], companyName) {
       // --------------------------
       // 🔹 Upsert via SDK
       // --------------------------
-      const vectorIndex = getVectorIndex(companyName);
+      const vectorIndex = indexName;
       if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
       const res = await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
@@ -234,5 +239,27 @@ export async function getVectorByID(ids, companyName) {
       success: false,
       error: err instanceof Error ? err.message : "Unknown error",
     };
+  }
+}
+
+// --------------------------
+// 🔹 Vector Count (best-effort)
+// --------------------------
+/**
+ * Vector count for an index, or null on any failure — KB /status treats it
+ * as best-effort (F12). The caller passes the resolved index name (KB
+ * resource override or config fallback).
+ */
+export async function countVectors(indexName, companyName) {
+  if (!indexName) return null;
+  try {
+    const res = await getCFClient(companyName).vectorize.indexes.get(indexName, {
+      account_id: accountId(companyName),
+    });
+    return res?.result?.vectorCount ?? null;
+  } catch (err) {
+    logToFile("error.log", `Vector count error: ${err.message}`);
+    console.error("Vector count error:", err.message);
+    return null;
   }
 }

@@ -42,6 +42,9 @@ export function listCompanies() {
     // Whether any Cloudflare credentials are configured. Boolean only — never
     // expose the secrets themselves through the list endpoint.
     hasCredentials: CREDENTIAL_KEYS.some((k) => config[k]),
+    // Whether the Cloudflare API is usable for this company: account id +
+    // API token both set. Drives the admin sidebar's "Cloudflare" nav item.
+    hasCloudflareApi: !!(config.CLOUDFLARE_ACCOUNT_ID && config.CLOUDFLARE_API_TOKEN),
   }));
 }
 

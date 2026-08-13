@@ -74,32 +74,77 @@ All models can be changed at runtime via the Cloudflare API. See [Model Configur
 
 ---
 
+## Module Layout
+
+The codebase is split by responsibility — thin HTTP routers (one resource group per file/dir), business logic in `services/`, and all SQL in repository files. Barrels (`mysql/repositories.js`, `mysql/gateway-router.js`, `routes/cloudflare.js`) re-export the split modules, so import paths never change.
+
+```
+app.js                     Express server: middleware, rate limits, /ask, /ask-stream, SPA
+config/                    Multi-tenant company config (facade, schema, SQLite/MySQL stores, encryption)
+query/                     RAG pipeline: intent, rewrite, cache, retrieval, scoring, reranker, answer, cli
+services/                  Cloudflare embeddings, Vectorize, R2, WordPress
+utils/                     chunker, cleaner, helpers (retry/abort), logger
+routes/                    HTTP routers — one resource group per module
+  ask.js                   POST /ask, /ask-stream (company gate, API-key gate, SSE contract)
+  cloudflare/              companies, apikey, indexes, buckets, config, prompt (+ helpers.js)
+  cloudflare.js            barrel — composes cloudflare/ (mounted at /cloudflare)
+  cron.js · auth.js · logs.js
+mysql/                     MySQL gateway layer — one file per entity / router
+  repositories/            one file per entity (provider, model, endpoint, pricing, credential,
+                           company, resource, assistant, audit, kb, catalog-import) + helpers.js
+  repositories.js          barrel — re-exports every repository
+  services/                credential-service, provider-registry, catalog-importer, kb-service, …
+  routes/                  one Express router per resource group (providers, companies, credentials,
+                           resources, endpoints, pricing, kbs, assistants, health) + helpers/probes
+  gateway-router.js        barrel — composes routes/ (mounted at /gateway)
+cron/                      standalone jobs, scheduler, lifecycle, status
+web/                       React admin portal (Vite)
+  src/pages/catalog/       provider list/detail + 5-step wizard (wizard/), one modal per file (modals/)
+  src/pages/credentials/   page + modals.jsx · cards.jsx · fields.jsx · helpers.js · icons.jsx
+  src/components/layout/   nav.js (NAV/PAGE_META) + icons.jsx (NAV_ICONS)
+docs/                      architecture, API reference, OpenAPI spec, provider/credential guides
+```
+
+---
+
 ## CORS
 
-Allowed origins are restricted to:
+CORS is dynamic (`utils/request-context.js` `isAllowedOrigin`). A browser origin passes when any of these hold:
 
-- `https://dev.popularcert.com`
-- `https://popularcert.com`
-- `https://crm.popularcert.com`
-- `http://localhost:3000`
-- `http://localhost:5173`
+- It is on the static allowlist:
+  - `https://dev.popularcert.com`
+  - `https://staging.popularcert.com`
+  - `https://www.popularcert.com`
+  - `https://popularcert.com`
+  - `https://crm.popularcert.com`
+  - `http://localhost:3000`, `http://localhost:5173`, `http://localhost:8080`
+- The host is a dev host (`localhost` / `*.localhost`)
+- The host is `<company>.com` or a subdomain of it for any company in the runtime config (derived from the company name, e.g. `popularcert` → `popularcert.com`)
+- The request carries no `Origin` header (non-browser clients like curl always pass)
 
 ---
 
 ## Rate Limiting
 
-The API has three tiers of rate limiting to protect against abuse and control AI API costs:
+The API has two hardcoded tiers to protect against abuse and control AI API costs, plus a login brute-force guard. The values are constants in `app.js` / `routes/ask.js` — **not** configurable via environment variables:
 
-| Tier | Routes | Default Limit | Env Var |
-|------|--------|---------------|---------|
-| Global | All routes except `GET /` | 100 req/min | `RATE_LIMIT_GLOBAL` |
-| AI | `POST /ask`, `POST /ask-stream` | 20 req/min | `RATE_LIMIT_AI` |
-| Cloudflare | All `/cloudflare/*` routes | 30 req/min | `RATE_LIMIT_ADMIN` |
+| Tier | Routes | Limit |
+|------|--------|-------|
+| Global | All routes except `GET /` | 100 req/min |
+| AI | `POST /ask`, `POST /ask-stream` | 20 req/min |
+| Login | `POST /auth/login` (brute-force guard) | 10 req/min |
+
+Admin routes (`/cloudflare/*`, `/gateway/*`) are **not** rate-limited — the global wrapper skips authenticated admin sessions (`verifyToken(extractToken(req))`), so portal/catalog operations never hit a 429.
 
 - Limits are per-IP address (uses the `trust proxy` setting for accurate client IP behind reverse proxies)
-- Rate-limited requests receive a `429 Too Many Requests` response with a descriptive error message
+- Rate-limited requests receive a `429 Too Many Requests` response with a JSON error body
 - Standard `RateLimit-*` headers are returned with every response
-- All limits are configurable via environment variables; omit the variable to use defaults
+
+---
+
+## Admin Authentication
+
+Admin routes (`/cloudflare/*`, `/gateway/*`, `/logs`, `/api-docs`) are protected by an HMAC-signed session token when `ADMIN_USERNAME` + `ADMIN_PASSWORD` are set in `.env` (see `auth.js` `requireAdmin`). Tokens come from `POST /auth/login` and travel via `Authorization: Bearer`, `x-auth-token`, or a path-scoped `pc_admin_token` cookie (Swagger UI). When the login env vars are unset, auth is disabled and every route stays open. The `/gateway` layer additionally returns **503** when the `MYSQL_*` env vars are unset.
 
 ---
 
@@ -107,4 +152,10 @@ The API has three tiers of rate limiting to protect against abuse and control AI
 
 - In development (`NODE_ENV !== 'production'`), verbose debug logs are printed to the console
 - In production, debug logs are suppressed for cleaner output
-- File logs are always written to `logs/` regardless of environment
+- File logs are always written to `logs/` regardless of environment (`utils/logger.js`, async/batched, ~5MB rotation)
+
+---
+
+## Admin Portal
+
+The same Express server serves the React admin portal from `web/dist` (built with `cd web && npm run build`). Hash-based routes: `#dashboard`, `#ask`, `#companies`, `#config`, `#cloudflare`, `#scheduler`, `#logs`, `#catalog` (provider catalog), `#kbs` / `#kbs/<key>` (knowledge bases), and `#assistants`. (The legacy `#prompt` page was removed — system prompts are edited per assistant.) The portal requires admin auth when the login env vars are set.

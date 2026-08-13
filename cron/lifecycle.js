@@ -17,13 +17,17 @@ export const cronSchedulers = new Map();
 // --------------------------
 // KEY HELPERS
 // --------------------------
-export function jobKey(jobId, companyName) {
-  return `${jobId}:${companyName || "_default"}`;
+export function jobKey(jobId, companyName, kbKey = null) {
+  return `${jobId}:${companyName || "_default"}${kbKey ? `:${kbKey}` : ""}`;
 }
 
 export function jobKeyDisplay(key) {
-  const [jobId, company] = key.split(":");
-  return company === "_default" ? jobId : `${jobId} [company: ${company}]`;
+  const parts = key.split(":");
+  const [jobId, company] = parts;
+  const kbKey = parts[2] || null;
+  let display = company === "_default" ? jobId : `${jobId} [company: ${company}]`;
+  if (kbKey) display += ` [kb: ${kbKey}]`;
+  return display;
 }
 
 function jobExists(jobId) {
@@ -114,18 +118,19 @@ function applyStop(map, key, state, kind) {
     message: kind.stopped(key),
     jobId: state.jobId,
     companyName: state.companyName,
+    kbKey: state.kbKey ?? null,
   };
 }
 
 // --------------------------
 // STANDALONE JOBS (on-demand)
 // --------------------------
-export async function startJob(jobId, companyName) {
+export async function startJob(jobId, companyName, opts = {}) {
   if (!jobExists(jobId)) {
     return { success: false, message: `Job '${jobId}' not found.` };
   }
 
-  const key = jobKey(jobId, companyName);
+  const key = jobKey(jobId, companyName, opts.kbKey);
   const denied = guardStart(standaloneJobs, key, KINDS.standalone);
   if (denied) return denied;
 
@@ -135,6 +140,7 @@ export async function startJob(jobId, companyName) {
   const state = {
     jobId,
     companyName: companyName || null,
+    kbKey: opts.kbKey || null,
     status: "running",
     startedAt: new Date().toISOString(),
     completedAt: null,
@@ -155,6 +161,7 @@ export async function startJob(jobId, companyName) {
       await job.handler({
         signal: abortController.signal,
         companyName,
+        ...opts,
       });
 
       if (state.status !== "stopped") {
@@ -185,11 +192,12 @@ export async function startJob(jobId, companyName) {
     startedAt: state.startedAt,
   };
   if (companyName) response.companyName = companyName;
+  if (opts.kbKey) response.kbKey = opts.kbKey;
   return response;
 }
 
-export function stopJob(jobId, companyName) {
-  const key = jobKey(jobId, companyName);
+export function stopJob(jobId, companyName, kbKey = null) {
+  const key = jobKey(jobId, companyName, kbKey);
   const result = guardStop(standaloneJobs, key, jobId, KINDS.standalone);
   if (result.success === false) return result;
   return applyStop(standaloneJobs, result.key, result.state, KINDS.standalone);
@@ -202,6 +210,7 @@ export function getRunningJobs() {
       jobs.push({
         jobId: state.jobId,
         companyName: state.companyName,
+        kbKey: state.kbKey ?? null,
         status: state.status,
         startedAt: state.startedAt,
       });

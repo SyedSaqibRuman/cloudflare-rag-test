@@ -38,9 +38,9 @@ function slugify(text) {
     .toLowerCase();
 }
 
-function makeVectorId(pageSlug, index) {
+function makeVectorId(r2Prefix, pageSlug, index) {
   const hash = createHash("sha256")
-    .update(pageSlug)
+    .update(`${r2Prefix}/${pageSlug}`) // F14: r2Prefix keeps KB vector ids unique
     .digest("hex")
     .slice(0, 48);
   return `${hash}-${index}`;
@@ -69,7 +69,7 @@ function enforceChunkSize(chunks, max = MAX_CHUNK_SIZE) {
   return result;
 }
 
-function transformItem(item, type) {
+export function transformItem(item, type, { r2Prefix = "site", chunkSize = MAX_CHUNK_SIZE } = {}) {
   const title = item?.title?.rendered || "Untitled";
   const slug = item?.slug || `unknown-${Date.now()}`;
   const registryKey = `${type}-${slug}`;
@@ -77,7 +77,7 @@ function transformItem(item, type) {
 
   const markdown = cleanContent(item.content.rendered);
   const rawChunks = chunkMarkdown(markdown);
-  const sizedChunks = enforceChunkSize(rawChunks);
+  const sizedChunks = enforceChunkSize(rawChunks, chunkSize);
 
   const cleanChunks = sizedChunks
     .filter((c) => c?.content && c.content.trim().length >= MIN_CHUNK_LENGTH)
@@ -86,9 +86,9 @@ function transformItem(item, type) {
   const pageSlug = slugify(`${type}-${slug}`);
 
   const vectorChunks = cleanChunks.map((chunk, i) => {
-    const r2_key = `site/${type}/${pageSlug}/chunk-${i}.json`;
+    const r2_key = `${r2Prefix}/${type}/${pageSlug}/chunk-${i}.json`;
     return {
-      id: makeVectorId(pageSlug, i),
+      id: makeVectorId(r2Prefix, pageSlug, i),
       text: chunk.content,
       url: item.link,
       title,
@@ -111,7 +111,7 @@ function transformItem(item, type) {
 // --------------------------
 // PIPELINE STAGES
 // --------------------------
-export async function processContent({ fetchFn, type, store, index, registry, signal, companyName }) {
+export async function processContent({ fetchFn, type, store, index, registry, signal, companyName, r2Prefix, chunkOptions }) {
   const uploadLimit = pLimit(UPLOAD_CONCURRENCY);
   let currentPage = 1;
 
@@ -134,7 +134,10 @@ export async function processContent({ fetchFn, type, store, index, registry, si
       // ✋ Check before each item
       checkAbort(signal);
 
-      const { registryKey, modifiedDate, markdown, rawChunks, sizedChunks, cleanChunks, vectorChunks } = transformItem(item, type);
+      const { registryKey, modifiedDate, markdown, rawChunks, sizedChunks, cleanChunks, vectorChunks } = transformItem(item, type, {
+        r2Prefix,
+        chunkSize: chunkOptions?.size ?? MAX_CHUNK_SIZE,
+      });
 
       if (!registry.isStale(registryKey, modifiedDate)) {
         console.log(`⏭️ Skipping: ${registryKey}`);
@@ -214,7 +217,7 @@ export async function processContent({ fetchFn, type, store, index, registry, si
  * Full ingestion run: ensure bucket + index exist, then process posts and
  * pages against one registry. All I/O is adapter-mediated.
  */
-export async function runIngestion({ fetchPost, fetchPage, store, index, registry, signal, companyName }) {
+export async function runIngestion({ fetchPost, fetchPage, store, index, registry, signal, companyName, r2Prefix = "site", chunkOptions = {} }) {
   checkAbort(signal);
   await store.ensureBucket();
 
@@ -223,8 +226,8 @@ export async function runIngestion({ fetchPost, fetchPage, store, index, registr
 
   console.log(`🚀 Starting ingestion for company: ${companyName || "(default)"}`);
 
-  await processContent({ fetchFn: fetchPost, type: "post", store, index, registry, signal, companyName });
-  await processContent({ fetchFn: fetchPage, type: "page", store, index, registry, signal, companyName });
+  await processContent({ fetchFn: fetchPost, type: "post", store, index, registry, signal, companyName, r2Prefix, chunkOptions });
+  await processContent({ fetchFn: fetchPage, type: "page", store, index, registry, signal, companyName, r2Prefix, chunkOptions });
 
   console.log("✅ Ingestion complete");
 }

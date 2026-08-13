@@ -56,11 +56,24 @@ export function IconButton({ title, className, children, ...props }) {
   );
 }
 
-export function Input({ className, label, error, ...props }) {
+const slugify = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/\*/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+// Every form control gets an `id`/`name` derived from its label so React's
+// a11y warning never fires. Callers can still pass an explicit name/id (a
+// real form submit needs a stable name), which wins over the derived one.
+export function Input({ className, label, error, name, id, ...props }) {
+  const fieldId = id || (label ? slugify(label) : name);
   return (
     <label className="block">
       {label && <span className="block text-xs font-medium text-slate-400 mb-1.5">{label}</span>}
       <input
+        id={fieldId}
+        name={name || fieldId}
         className={cx(
           "w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500",
           error && "border-rose-500",
@@ -73,11 +86,14 @@ export function Input({ className, label, error, ...props }) {
   );
 }
 
-export function Select({ label, options = [], className, ...props }) {
+export function Select({ label, options = [], className, name, id, ...props }) {
+  const fieldId = id || (label ? slugify(label) : name);
   return (
     <label className="block">
       {label && <span className="block text-xs font-medium text-slate-400 mb-1.5">{label}</span>}
       <select
+        id={fieldId}
+        name={name || fieldId}
         className={cx(
           "w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500",
           className
@@ -100,11 +116,14 @@ export function Select({ label, options = [], className, ...props }) {
   );
 }
 
-export function TextArea({ label, className, ...props }) {
+export function TextArea({ label, className, name, id, ...props }) {
+  const fieldId = id || (label ? slugify(label) : name);
   return (
     <label className="block">
       {label && <span className="block text-xs font-medium text-slate-400 mb-1.5">{label}</span>}
       <textarea
+        id={fieldId}
+        name={name || fieldId}
         className={cx(
           "w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-mono",
           className
@@ -201,33 +220,43 @@ export function Empty({ message }) {
   );
 }
 
-export function Modal({ open, title, onClose, children, footer }) {
+export function Modal({ open, title, onClose, children, footer, wide, closeOnBackdrop = false, closeOnEscape = false }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && closeOnEscape) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, closeOnEscape]);
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+    // Dismissal is OPT-IN: by default neither a backdrop click nor Escape
+    // closes a modal (every modal has an explicit X and Cancel/action button,
+    // so nothing is ever stuck). Dialogs that want dismiss-on-click or
+    // dismiss-on-Escape must pass closeOnBackdrop / closeOnEscape explicitly.
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+      onClick={closeOnBackdrop ? onClose : undefined}
+    >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-lg overscroll-contain rounded-xl border border-slate-700 bg-slate-900 shadow-2xl"
+        className={cx(
+          "w-full overscroll-contain rounded-xl border border-slate-700 bg-slate-900 shadow-2xl",
+          wide ? "max-w-3xl" : "max-w-lg"
+        )}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
           <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
           <button onClick={onClose} aria-label="Close dialog" className="text-slate-400 hover:text-slate-100 text-xl leading-none">
-            ×
+            x
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className={cx("p-5", wide && "max-h-[70vh] overflow-y-auto")}>{children}</div>
         {footer && <div className="flex justify-end gap-2 border-t border-slate-800 px-5 py-3">{footer}</div>}
       </div>
     </div>

@@ -17,13 +17,25 @@ import {
 export function validateConfigKey(key, value) {
   if (!COMPANY_KEYS.includes(key)) return `Unknown config key: ${key}`;
 
-  // Models must be non-empty strings
+  // Models must be non-empty strings. The Cloudflare @cf/ allowlist is the
+  // known-good set, but catalog-sourced model keys (e.g. `gpt-4o`,
+  // `text-embedding-3-small`) are also accepted — the company's provider is
+  // chosen on the Config page. Only @cf/ models are runtime-callable today;
+  // other keys are validated for shape, not callability.
   if (MODEL_KEYS.includes(key)) {
     if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
     const allowed = ALLOWED_MODELS[key];
-    if (allowed && !allowed.includes(value.trim())) {
-      return `${key} '${value}' is not in the allowed list: ${allowed.join(", ")}`;
+    const v = value.trim();
+    if (allowed && !allowed.includes(v) && !/^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]{1,120}$/.test(v)) {
+      return `${key} '${v}' is not in the allowed list: ${allowed.join(", ")}`;
     }
+    return null;
+  }
+
+  // AI provider key (from the gateway catalog: /^[a-z0-9_]+$/)
+  if (key === "AI_PROVIDER") {
+    if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
+    if (!/^[a-z0-9_]+$/.test(value.trim())) return `${key} must match /^[a-z0-9_]+$/ (provider key).`;
     return null;
   }
 

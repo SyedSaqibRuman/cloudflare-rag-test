@@ -1,0 +1,127 @@
+{
+  "providerKey": "openai",
+  "providerName": "OpenAI",
+  "category": "ai",
+  "authType": "bearer_token",
+  "authHeaderName": "Authorization",
+  "defaultApiBaseUrl": "https://api.openai.com/v1",
+  "apiKeyFormatRegex": "^sk-[A-Za-z0-9_-]{20,}$",
+  "websiteUrl": "https://openai.com",
+  "documentationUrl": "https://platform.openai.com/docs",
+  "logoUrl": null,
+
+  "authFields": [
+    {
+      "name": "api_key",
+      "label": "API Key",
+      "type": "password",
+      "placeholder": "sk-…",
+      "helpText": "Found under platform.openai.com → API keys",
+      "required": true,
+      "encrypted": true,
+      "validationRegex": "^sk-[A-Za-z0-9_-]{20,}$",
+      "storagePath": "api_key",
+      "displayOrder": 10,
+      "group": "main",
+      "width": "full"
+    },
+    {
+      "name": "organization_id",
+      "label": "Organization ID",
+      "type": "text",
+      "placeholder": "org-…",
+      "required": false,
+      "encrypted": true,
+      "displayOrder": 20,
+      "group": "main",
+      "width": "half"
+    }
+  ],
+
+  "endpoints": [
+    {
+      "key": "chat-completions",
+      "name": "Chat Completions",
+      "url": "https://api.openai.com/v1/chat/completions",
+      "method": "POST",
+      "timeoutSeconds": 60,
+      "isDefault": true
+    },
+    {
+      "key": "embeddings",
+      "name": "Embeddings",
+      "url": "https://api.openai.com/v1/embeddings",
+      "method": "POST",
+      "timeoutSeconds": 60
+    },
+    {
+      "key": "list-models",
+      "name": "List Models",
+      "url": "https://api.openai.com/v1/models",
+      "method": "GET",
+      "timeoutSeconds": 30
+    }
+  ],
+
+  "capabilities": ["chat", "streaming", "embeddings", "function_calling", "vision"],
+
+  "models": [
+    {
+      "key": "gpt-4o",
+      "name": "GPT-4o",
+      "category": "chat",
+      "streaming": true,
+      "functionCalling": true,
+      "vision": true,
+      "maxContextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "pricing": [
+        {
+          "effectiveFrom": "2025-01-01",
+          "effectiveTo": null,
+          "inputPricePerMillion": 2.5,
+          "outputPricePerMillion": 10,
+          "cachedInputPricePerMillion": 1.25,
+          "priceCurrency": "USD",
+          "billingUnit": "tokens"
+        }
+      ]
+    },
+    {
+      "key": "text-embedding-3-small",
+      "name": "text-embedding-3-small",
+      "category": "embedding",
+      "maxContextWindow": 8191,
+      "pricing": [
+        {
+          "effectiveFrom": "2024-01-25",
+          "effectiveTo": null,
+          "inputPricePerMillion": 0.02,
+          "outputPricePerMillion": 0,
+          "priceCurrency": "USD",
+          "billingUnit": "tokens"
+        }
+      ]
+    }
+  ],
+
+  "resources": [
+    {
+      "type": "vector_index",
+      "displayName": "Vector Index",
+      "description": "Vectorize-style index this provider can provision",
+      "required": false,
+      "defaultEnabled": false,
+      "maxPerCredential": 5,
+      "displayOrder": 10
+    },
+    {
+      "type": "object_bucket",
+      "displayName": "Object Bucket",
+      "description": "R2-style storage bucket this provider can provision",
+      "required": false,
+      "defaultEnabled": false,
+      "displayOrder": 20
+    }
+  ]
+}

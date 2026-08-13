@@ -9,6 +9,9 @@ const MODEL_KEYS = [
   "RERANKING_MODEL",
 ];
 
+/** AI provider selected from the gateway catalog (Config page → Models & Provider). */
+const PROVIDER_KEY = ["AI_PROVIDER"];
+
 const DIMENSION_KEYS = ["EMBEDDING_DIMENSIONS"];
 
 const URL_KEYS = ["BASE_URL", "CONTACT_US_URL", "LOCATIONS_URL", "SERVICES_URL"];
@@ -40,9 +43,10 @@ export const COMPANY_KEYS = [
   ...RESOURCE_KEYS,
   ...CREDENTIAL_KEYS,
   ...SECRET_KEYS,
+  ...PROVIDER_KEY,
 ];
 
-export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, CREDENTIAL_KEYS, SECRET_KEYS };
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
 
 /**
  * Sectioned grouping of company config keys, used by the API (GET /config) and
@@ -51,7 +55,7 @@ export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURC
  */
 export const CONFIG_SECTIONS = [
   { section: "GENERAL", keys: [...URL_KEYS, ...STRING_KEYS] },
-  { section: "MODELS", keys: [...MODEL_KEYS, ...DIMENSION_KEYS] },
+  { section: "MODELS", keys: [...PROVIDER_KEY, ...MODEL_KEYS, ...DIMENSION_KEYS] },
   { section: "STORAGE", keys: RESOURCE_KEYS },
   { section: "CREDENTIALS", keys: CREDENTIAL_KEYS },
 ];
@@ -104,6 +108,7 @@ export const DEFAULT_COMPANY = {
   SERVICES_URL: "https://popularcert.com/services/",
   CONSULTANT_NAME: "Sarah",
   COMPANY_NAME: "Popularcert",
+  AI_PROVIDER: "cloudflare",
   EMBEDDING_MODEL: "@cf/baai/bge-base-en-v1.5",
   EMBEDDING_DIMENSIONS: 768,
   LLM_MODEL: "@cf/meta/llama-3.1-8b-instruct-fp8",

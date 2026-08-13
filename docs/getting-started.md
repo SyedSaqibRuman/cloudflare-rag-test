@@ -9,81 +9,124 @@ npm install
 # Create .env file (see Environment Variables below)
 cp .env.example .env
 
+# Apply MySQL migrations (required for the gateway layer + MySQL config store)
+node mysql/migrate.js
+
+# Build the admin portal UI (served by the API server)
+cd web && npm install && npm run build && cd ..
+
 # Start the server
 node app.js
 ```
 
-The server starts on `http://localhost:3000` by default.
+The server starts on `http://localhost:3000` by default. Browsers get the admin dashboard; API clients get JSON. For UI development with hot reload, run `cd web && npm run dev` — the Vite dev server (port 5173) proxies API requests to the backend on :3000.
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `node app.js` | Start the API server (also serves the built UI from `web/dist`) |
+| `node mysql/migrate.js` | Apply MySQL migrations (`--dry-run` previews without applying) |
+| `node test.js` | MySQL connectivity + migration status check |
+| `cd web && npm run build` | Build the admin portal into `web/dist` — required before the server serves the UI |
+| `cd web && npm run dev` | Vite dev server with API proxying (:5173) |
+
+There are **no `npm test` / `npm run lint` scripts** in the root `package.json`. Run the test suite directly:
+
+```bash
+node --test "config/__tests__/*.test.js" "query/__tests__/*.test.js" \
+  "cron/__tests__/*.test.js" "ingest/__tests__/*.test.js" \
+  "routes/__tests__/*.test.js" "mysql/__tests__/*.test.js"
+```
 
 ---
 
 ## Environment Variables
 
-Create a `.env` file in the project root:
+**All company + AI/RAG configuration lives in the database — never in env vars.** Models, URLs, system prompts, Cloudflare credentials, vector index / R2 bucket names, and per-company ask API keys are stored per company in MySQL (`CONFIG_STORE=mysql`) or SQLite files (`db/<company>.db`). The environment only carries server knobs, the admin login, and the MySQL connection:
 
 ```env
-# Cloudflare
-CLOUDFLARE_ACCOUNT_ID=
-CLOUDFLARE_API_TOKEN=
-
-# WordPress (for ingestion — used as default for new companies)
-BASE_URL=
-
-# Cloudflare API (optional — protects /cloudflare routes with x-api-key header)
-ADMIN_API_KEY=
-
-# AI Models (optional — defaults for new companies, can also be changed at runtime per company)
-EMBEDDING_MODEL=@cf/baai/bge-base-en-v1.5
-EMBEDDING_DIMENSIONS=768
-LLM_MODEL=@cf/meta/llama-3.1-8b-instruct-fp8
-SMALL_LLM=@cf/meta/llama-3.2-3b-instruct
-RERANKING_MODEL=@cf/baai/bge-reranker-base
-
-# Rate Limiting
-RATE_LIMIT_GLOBAL=100
-RATE_LIMIT_AI=20
-RATE_LIMIT_ADMIN=30
-
 # Server
 PORT=3000
+NODE_ENV=development
+
+# Config store backend: "mysql" (recommended) or "sqlite" (default when unset)
+CONFIG_STORE=mysql
+
+# MySQL — companies + AI config (required for CONFIG_STORE=mysql and /gateway)
+MYSQL_HOST=
+MYSQL_PORT=3306
+MYSQL_USER=
+MYSQL_PASSWORD=
+MYSQL_DATABASE=
+
+# Admin login (OPT-IN — every admin route stays open until both are set)
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
+ADMIN_SECRET=              # optional; defaults to ADMIN_PASSWORD
+ADMIN_TOKEN_TTL_HOURS=12   # session length
+
+# Master key for encrypting stored credentials at rest
+# (generate with: openssl rand -hex 32)
+APP_ENCRYPTION_KEY=
 ```
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CLOUDFLARE_ACCOUNT_ID` | Yes | — | Cloudflare account ID |
-| `CLOUDFLARE_API_TOKEN` | Yes | — | Cloudflare API token with AI, Vectorize, and R2 permissions |
-| `BASE_URL` | Yes | `""` | Default WordPress site URL for content ingestion |
-| `ADMIN_API_KEY` | No | — | API key for Cloudflare routes (unprotected if not set) |
-| `EMBEDDING_MODEL` | No | `@cf/baai/bge-base-en-v1.5` | Default embedding model for new companies |
-| `EMBEDDING_DIMENSIONS` | No | `768` | Vector dimensions (auto-set when embedding model changes) |
-| `LLM_MODEL` | No | `@cf/meta/llama-3.1-8b-instruct-fp8` | Default primary LLM for new companies |
-| `SMALL_LLM` | No | `@cf/meta/llama-3.2-3b-instruct` | Default query rewriting LLM |
-| `RERANKING_MODEL` | No | `@cf/baai/bge-reranker-base` | Default reranking model |
-| `RATE_LIMIT_GLOBAL` | No | `100` | Global rate limit (req/min) for all routes except health check |
-| `RATE_LIMIT_AI` | No | `20` | Rate limit (req/min) for AI endpoints (`POST /ask`, `POST /ask-stream`) |
-| `RATE_LIMIT_ADMIN` | No | `30` | Rate limit (req/min) for admin routes (`/cloudflare/*`) |
-| `PORT` | No | `3000` | Server port |
+| `PORT` | No | `3000` | API server port |
+| `NODE_ENV` | No | `development` | `production` suppresses console debug logs (file logs always written) |
+| `CONFIG_STORE` | No | `sqlite` | Where company config lives: `mysql` (recommended) or `sqlite` |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Only for `mysql` | — | MySQL connection. When unset, `/gateway/*` routes return 503 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | No | — | Enables admin auth (login page + protected routes). Unset = everything open |
+| `ADMIN_SECRET` | No | `ADMIN_PASSWORD` | HMAC secret used to sign session tokens |
+| `ADMIN_TOKEN_TTL_HOURS` | No | `12` | Session token lifetime in hours |
+| `APP_ENCRYPTION_KEY` | No | — | AES-256-GCM master key; without it stored credentials stay plaintext (with a boot warning) |
 
-> **Note:** Model, brand, and resource settings are configured per-company via the Cloudflare API, not via environment variables. See [Config API](./api/config.md) and [Company Management](#company-management) below.
+---
+
+## Admin Authentication
+
+Admin auth is **opt-in**. When `ADMIN_USERNAME` and `ADMIN_PASSWORD` are both set, `POST /auth/login` issues an HMAC-signed session token and every `/cloudflare/*`, `/gateway/*`, `/logs`, and `/api-docs` route is protected (`401` without a valid token). When either is unset, auth is disabled and every route stays open (backwards compatible).
+
+```bash
+# Login
+curl -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "secret"}'
+# → { "success": true, "token": "<hmac-token>", "expiresIn": 43200 }
+
+# Use the token on protected routes
+curl http://localhost:3000/cloudflare/companies \
+  -H "Authorization: Bearer <token>"
+```
+
+- Tokens are stateless (HMAC-signed) and last `ADMIN_TOKEN_TTL_HOURS` (default 12h).
+- Send them as `Authorization: Bearer <token>` or `x-auth-token: <token>`.
+- `GET /auth/me` reports whether a session is valid; `POST /auth/logout` discards it client-side.
+- The portal stores the token in `localStorage` and shows a login page when auth is enabled. The Swagger UI at `/api-docs` re-attaches the token from a path-scoped cookie.
+- **Legacy `x-api-key` / `ADMIN_API_KEY` auth was removed** — don't rely on it.
 
 ---
 
 ## Multi-Company Architecture
 
-The API is multi-tenant. Every request to `/ask`, `/ask-stream`, or config/prompt endpoints must include the `x-company-name` header specifying which company to use. Each company has its own isolated:
+The API is multi-tenant. Every request to `/ask`, `/ask-stream`, or the config/prompt endpoints must include the `x-company-name` header specifying which company to use. Each company has its own isolated:
 
 - **Vector index** (semantic search)
 - **R2 bucket** (chunk storage)
 - **WordPress source** (`BASE_URL`)
 - **System prompt** and brand settings
 - **AI models** (LLM, embedding, reranking)
+- **Cloudflare credentials** (encrypted at rest)
 
 ### Creating a Company
+
+Companies start as a blank slate — no default company is seeded. Create them from the admin portal (Companies page) or via the API:
 
 ```bash
 curl -X POST http://localhost:3000/cloudflare/companies \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -d '{
     "name": "my-company",
     "config": {
@@ -94,7 +137,31 @@ curl -X POST http://localhost:3000/cloudflare/companies \
   }'
 ```
 
-### Making Requests
+### Where Config Lives
+
+- **`CONFIG_STORE=mysql`** — company rows live in the MySQL `companies` + `company_config` tables (migration `002_company_config.sql`). On the first boot with an empty `companies` table, existing SQLite companies are auto-lifted into MySQL.
+- **`CONFIG_STORE=sqlite`** (or unset) — one SQLite file per company: `db/<company>.db`.
+- Values are loaded into an in-memory singleton at boot and mutated through the API (writes are persist-first: a failed DB write leaves memory untouched).
+- Cloudflare credentials and per-company ask API keys are **encrypted at rest** (AES-256-GCM, master key `APP_ENCRYPTION_KEY`); plaintext exists only in memory.
+- Nothing is seeded from env — new companies start with default model/URL values and empty credentials, filled in per company (Config page → "Cloudflare Credentials").
+
+### Company Management Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/cloudflare/companies` | `GET` | List all companies |
+| `/cloudflare/companies` | `POST` | Create a new company |
+| `/cloudflare/companies/:name` | `GET` | Get a company's full config |
+| `/cloudflare/companies/:name` | `PUT` | Update a company's config (incl. credentials) |
+| `/cloudflare/companies/:name` | `DELETE` | Delete a company |
+| `/cloudflare/companies/:name/reset` | `POST` | Reset a company to defaults |
+| `/cloudflare/companies/:name/apikey` | `POST` / `DELETE` | Generate / revoke the per-company ask API key |
+
+All of the above sit behind admin auth.
+
+---
+
+## Making Requests
 
 All AI endpoints (`/ask`, `/ask-stream`) require the `x-company-name` header. Config and prompt endpoints also require it:
 
@@ -105,18 +172,38 @@ curl -X POST http://localhost:3000/ask \
   -d '{"question": "What is ISO 9001?"}'
 ```
 
-If the header is missing, the API returns `400: x-company-name header is required.`
+If the header is missing, the API returns `400: Company is required (x-company-name header, ?company=, or body.company).`
 
-### Company Management Endpoints
+If a company has an ask API key set (Config page → "Ask API Key"), `/ask` and `/ask-stream` additionally require it via `x-api-key` (or `Authorization: Bearer`), and browser requests must originate from `<company>.com` or a subdomain. Companies without a key stay open.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/cloudflare/companies` | `GET` | List all companies |
-| `/cloudflare/companies` | `POST` | Create a new company |
-| `/cloudflare/companies/:name` | `GET` | Get a company's full config |
-| `/cloudflare/companies/:name` | `PUT` | Update a company's config |
-| `/cloudflare/companies/:name` | `DELETE` | Delete a company |
-| `/cloudflare/companies/:name/reset` | `POST` | Reset a company to defaults |
+---
+
+## Project Structure
+
+```
+.
+├── app.js                    # Express server: middleware, /ask, /ask-stream, /test, SPA, /api-docs
+├── env.js                    # Frozen env accessor — server/MySQL/admin knobs only (no company config)
+├── auth.js                   # Admin auth: login check, HMAC token sign/verify, requireAdmin
+├── client.js                 # Shared Cloudflare + S3 clients (per-company)
+├── ingest.js                 # WordPress → Markdown → chunks → R2 → Vectorize pipeline (abortable)
+├── jobs.js                   # Job registry for the scheduler (testing, ingest)
+├── config/                   # Multi-tenant config: schema, SQLite/MySQL stores, encryption, validation, prompts
+├── query/                    # RAG pipeline: intent, llm, cache, retrieval, scoring, reranker, answer, cli
+├── services/                 # cloudflare_embeddings, vectorize, r2, wp
+├── utils/                    # chunker, cleaner, fileWriter, helpers (retry/abort), logger
+├── routes/                   # ask.js (company + API-key gates, SSE), cloudflare/ (companies, apikey,
+│                             #   indexes, buckets, config, prompt sub-routers + barrel), cron.js, auth.js, logs.js
+├── cron/                     # standalone jobs, cron scheduler, lifecycle, status
+├── mysql/                    # MySQL gateway layer: pool, migrate runner, repositories/ (one file per
+│                             #   entity + barrel), services/, routes/ (one router per resource group +
+│                             #   barrel) + the MySQL company-config backend (mysql-store.js)
+├── migrations/               # Checksummed MySQL migrations (001_init … 005_credentials_view_left_join)
+├── schema/                   # Frozen v5 schema (reference only — never edit)
+├── web/                      # React 18 + Vite + Tailwind admin portal (build into web/dist)
+├── docs/                     # Architecture, API references, models, OpenAPI spec
+└── db/                       # SQLite config store + scheduler presets (gitignored)
+```
 
 ---
 
@@ -124,49 +211,14 @@ If the header is missing, the API returns `400: x-company-name header is require
 
 | Component | Technology |
 |-----------|------------|
-| Runtime | Node.js (ES Modules) |
+| Runtime | Node.js ≥ 22.5 (ES Modules) |
 | Framework | Express 5 |
+| Admin portal | React 18 + Vite 6 + Tailwind 4 |
+| Database | MySQL / MariaDB (config + gateway) with a SQLite fallback |
 | AI | Cloudflare Workers AI |
 | Vector DB | Cloudflare Vectorize |
 | Object Storage | Cloudflare R2 |
 | Scheduler | node-cron |
 | HTML Parsing | Turndown |
 | Rate Limiting | express-rate-limit |
-
----
-
-## Project Structure
-
-```
-cloudflare-rag/
-├── app.js                          # Express server & route mounting
-├── client.js                       # Shared Cloudflare & S3 clients
-├── config.js                       # Runtime config (models, persistence, validation)
-├── env.js                          # Environment variable config
-├── query.js                        # RAG query engine (ask, stream, rerank)
-├── ingest.js                       # WordPress content ingestion pipeline
-├── cron.js                         # Standalone & cron job manager
-├── jobs.js                         # Job registry (ingest, testing)
-├── streamTest.js                   # Streaming infrastructure test
-├── package.json
-│
-├── routes/
-│   ├── cron.js                     # Scheduler API routes
-│   └── cloudflare.js              # Cloudflare API (indexes, buckets, config)
-│
-├── services/
-│   ├── vectorize.js                # Vectorize CRUD & query
-│   ├── cloudflare_embeddings.js    # Batch embedding generation
-│   ├── r2.js                       # R2 bucket & object management
-│   └── wp.js                       # WordPress API client
-│
-├── utils/
-│   ├── helpers.js                  # Shared utilities (retry, chunkArray, sleep)
-│   ├── cleaner.js                  # HTML → Markdown cleaning
-│   ├── chunker.js                  # Markdown → chunk splitting
-│   ├── fileWriter.js               # File output helper
-│   └── logger.js                   # Async file logger with rotation
-│
-├── logs/                           # Runtime logs (auto-created)
-└── runtime-config.json             # Persisted runtime config (auto-created, gitignored)
-```
+| API Docs | Swagger UI (`/api-docs`, OpenAPI 3.0.3) |

@@ -20,10 +20,10 @@ const limit = pLimit(CONCURRENCY);
 // --------------------------
 // 🔥 Batch Embedding Request
 // --------------------------
-async function fetchEmbeddingBatch(texts, attempt = 0, companyName) {
+async function fetchEmbeddingBatch(texts, attempt = 0, companyName, model) {
   try {
-    const model = getEmbeddingModel(companyName);
-    const res = await fetchCloudflareAI(companyName, model, { text: texts }); // 🔥 batch input
+    const resolvedModel = model || getEmbeddingModel(companyName);
+    const res = await fetchCloudflareAI(companyName, resolvedModel, { text: texts }); // 🔥 batch input
 
     if (res.status === 429) {
       if (attempt >= MAX_RETRIES) {
@@ -38,7 +38,7 @@ async function fetchEmbeddingBatch(texts, attempt = 0, companyName) {
       console.warn(`⚠️ 429 Rate limited — retrying in ${delay}ms`);
       await sleep(delay);
 
-      return fetchEmbeddingBatch(texts, attempt + 1, companyName);
+      return fetchEmbeddingBatch(texts, attempt + 1, companyName, model);
     }
 
     if (!res.ok) {
@@ -60,14 +60,14 @@ async function fetchEmbeddingBatch(texts, attempt = 0, companyName) {
     console.warn(`⚠️ Retry due to error: ${err.message}, waiting ${delay}ms`);
 
     await sleep(delay);
-    return fetchEmbeddingBatch(texts, attempt + 1, companyName);
+    return fetchEmbeddingBatch(texts, attempt + 1, companyName, model);
   }
 }
 
 // --------------------------
 // 🔥 MAIN FUNCTION
 // --------------------------
-export async function generateEmbeddings(texts = [], companyName) {
+export async function generateEmbeddings(texts = [], companyName, model = null) {
   if (!texts.length) return [];
 
   const batches = chunkArray(texts, BATCH_SIZE);
@@ -79,7 +79,7 @@ export async function generateEmbeddings(texts = [], companyName) {
     batches.map((batch, batchIndex) =>
       limit(async () => {
         try {
-          const embeddings = await fetchEmbeddingBatch(batch, 0, companyName);
+          const embeddings = await fetchEmbeddingBatch(batch, 0, companyName, model);
 
           embeddings.forEach((emb, i) => {
             const globalIndex = batchIndex * BATCH_SIZE + i;

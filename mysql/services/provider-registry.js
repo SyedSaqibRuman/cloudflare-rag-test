@@ -10,7 +10,10 @@
 import {
   ProviderRepository,
   ModelRepository,
+  EndpointRepository,
+  PricingRepository,
 } from "../repositories.js";
+import * as CatalogService from "./catalog-service.js";
 
 let cache = null;
 let loading = null;
@@ -30,16 +33,18 @@ export function invalidateRegistry() {
  */
 export async function refreshRegistry() {
   const providers = await ProviderRepository.list();
+  const entries = [];
   cache = {
-    providers,
+    providers: entries,
     byKey: new Map(),
   };
   for (const provider of providers) {
-    const [capabilities, authForm, resourceTemplates, models] = await Promise.all([
+    const [capabilities, authForm, resourceTemplates, models, endpoints] = await Promise.all([
       ProviderRepository.capabilities(provider.id),
       ProviderRepository.authForm(provider.id),
       ProviderRepository.resourceTemplates(provider.id),
       ModelRepository.listByProvider(provider.id),
+      EndpointRepository.list({ providerId: provider.id }),
     ]);
     const entry = {
       ...provider,
@@ -47,7 +52,9 @@ export async function refreshRegistry() {
       authForm,
       resourceTemplates,
       models,
+      endpoints,
     };
+    entries.push(entry);
     cache.byKey.set(provider.provider_key, entry);
   }
   return providers;
@@ -64,16 +71,29 @@ async function load() {
   return cache;
 }
 
-/** All providers (lightweight — id/key/name/category). */
+/** All providers — lightweight list enriched with the stats the catalog UI needs
+ * (models/endpoints/capability counts, supported capability keys, pricing flag).
+ * Compute-only: the registry already eagerly loaded the nested data. */
 export async function listProviders() {
   const state = await load();
-  return state.providers.map(({ id, provider_key, provider_name, primary_service_category, auth_type }) => ({
-    id,
-    providerKey: provider_key,
-    providerName: provider_name,
-    category: primary_service_category,
-    authType: auth_type,
-  }));
+  return state.providers.map((entry) => {
+    const { id, provider_key, provider_name, primary_service_category, auth_type } = entry;
+    const capabilityKeys = entry.capabilities.filter((c) => c.is_supported).map((c) => c.capability_key);
+    return {
+      id,
+      providerKey: provider_key,
+      providerName: provider_name,
+      category: primary_service_category,
+      authType: auth_type,
+      models: entry.models.length,
+      endpoints: entry.endpoints.length,
+      capabilities: capabilityKeys.length,
+      capabilityKeys,
+      hasPricing: entry.models.some(
+        (m) => m.input_price_per_million != null || m.output_price_per_million != null
+      ),
+    };
+  });
 }
 
 /** Full provider entry (capabilities, auth form, resource templates, models). */
@@ -107,4 +127,88 @@ export async function providerKeyById(providerId) {
     if (p.id === providerId) return p.provider_key;
   }
   return null;
+}
+
+/**
+ * Endpoints for one provider (from the cache) or for all providers when
+ * providerKey is omitted.
+ * @param {string} [providerKey]
+ */
+export async function listEndpoints(providerKey) {
+  if (providerKey) {
+    const p = await getProvider(providerKey);
+    return p ? p.endpoints : null;
+  }
+  return EndpointRepository.list();
+}
+
+/** Full price history for one provider (flat query — history stays uncached, D1). */
+export function listPricing(providerKey) {
+  return PricingRepository.list({ providerKey });
+}
+
+/** Price history filtered by model id, provider key, or both. */
+export function listPricingByModel(providerModelId, providerKey) {
+  return PricingRepository.list({ providerModelId, providerKey });
+}
+
+/** Single endpoint row (used by routes for 404 checks + audit before-state). */
+export async function getEndpointById(id) {
+  return EndpointRepository.findById(id);
+}
+
+/** Single model row (used by routes for audit after-state enrichment). */
+export async function getModelById(id) {
+  return ModelRepository.findById(id);
+}
+
+/** Single pricing row (used by routes for 404 checks + audit before-state). */
+export async function getPricingById(id) {
+  return PricingRepository.findById(id);
+}
+
+/**
+ * Create an endpoint. Validates, writes through the repository transaction,
+ * then drops the registry cache (F7) so subsequent reads see it.
+ * @returns {Promise<{id: number}>}
+ */
+export async function saveEndpoint(input) {
+  const result = await CatalogService.saveEndpoint(input);
+  invalidateRegistry();
+  return result;
+}
+
+/** Update an endpoint and drop the registry cache (F7). */
+export async function updateEndpoint(id, input) {
+  const result = await CatalogService.updateEndpoint(id, input);
+  invalidateRegistry();
+  return result;
+}
+
+/** Remove an endpoint (guarded against resource-type references) + cache drop. */
+export async function removeEndpoint(id, opts) {
+  const result = await CatalogService.removeEndpoint(id, opts);
+  invalidateRegistry();
+  return result;
+}
+
+/** Create a pricing row (closing the open row on overlap) + cache drop. */
+export async function savePricing(input) {
+  const result = await CatalogService.savePricing(input);
+  invalidateRegistry();
+  return result;
+}
+
+/** Update a pricing row + cache drop. */
+export async function updatePricing(id, input) {
+  const result = await CatalogService.updatePricing(id, input);
+  invalidateRegistry();
+  return result;
+}
+
+/** Remove a pricing row + cache drop. */
+export async function removePricing(id) {
+  const result = await CatalogService.removePricing(id);
+  invalidateRegistry();
+  return result;
 }

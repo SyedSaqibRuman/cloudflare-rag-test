@@ -61,22 +61,22 @@ All models can be changed at runtime via the Cloudflare API. See [Model Configur
 
 ## Runtime Configuration
 
-Models can be changed at runtime via the Cloudflare API without restarting the server. Each company has its own model configuration:
+Models are configurable per company at runtime — via the admin portal (Config page) or the API — without restarting the server. Each company's settings are persisted in the config store (MySQL `company_config` when `CONFIG_STORE=mysql`, otherwise `db/<company>.db`) and survive server restarts:
 
 ```bash
 # Update a single model
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -H "x-company-name: popularcert" \
   -d '{"key": "LLM_MODEL", "value": "@cf/meta/llama-3.3-70b-instruct-fp8"}'
 
 # Update multiple models at once
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -H "x-company-name: popularcert" \
   -d '{"models": {"LLM_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8", "EMBEDDING_MODEL": "@cf/baai/bge-m3"}}'
 ```
 
-Changes are persisted to `runtime-config.json` on disk and survive server restarts. Use `POST /cloudflare/config/reset` to revert to environment defaults.
+`<token>` comes from `POST /auth/login` (admin routes are protected when `ADMIN_USERNAME` / `ADMIN_PASSWORD` are set in `.env`). Use `POST /cloudflare/companies/:name/reset` to revert one company to defaults.

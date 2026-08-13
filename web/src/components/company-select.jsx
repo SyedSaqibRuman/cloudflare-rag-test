@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { cx, companyStatus } from "../util";
 import { Badge } from "./ui";
 
-export default function CompanySelect({ company, companies, select }) {
+export default function CompanySelect({ company, companies, select, onCreate }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef(null);
@@ -49,6 +49,7 @@ export default function CompanySelect({ company, companies, select }) {
     <div className="relative" ref={rootRef}>
       <button
         type="button"
+        title={selected?.COMPANY_NAME || selected?.name || "No company selected"}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
@@ -69,14 +70,14 @@ export default function CompanySelect({ company, companies, select }) {
           </svg>
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center justify-between gap-2">
-            <span className="block min-w-0 truncate text-sm font-semibold text-slate-100">
-              {selected?.COMPANY_NAME || selected?.name || "No company selected"}
-            </span>
-            {st && <Badge tone={st.tone} className="shrink-0 px-1.5 py-0 text-[10px]">{st.label}</Badge>}
+          <span className="block min-w-0 truncate text-sm font-semibold text-slate-100">
+            {selected?.COMPANY_NAME || selected?.name || "No company selected"}
           </span>
-          <span className="block truncate text-[11px] text-slate-500">
-            {selected ? "Cloudflare Workspace" : "Select a workspace"}
+          <span className="mt-0.5 flex items-center gap-1.5">
+            {st && <Badge tone={st.tone} className="shrink-0 px-1.5 py-0 text-[10px]">{st.label}</Badge>}
+            <span className="block min-w-0 truncate text-[11px] text-slate-500">
+              {selected ? "Cloudflare Workspace" : "Select a workspace"}
+            </span>
           </span>
         </span>
         <svg
@@ -124,22 +125,6 @@ export default function CompanySelect({ company, companies, select }) {
             </div>
           </div>
           <ul role="listbox" aria-label="Company" className="max-h-[216px] overflow-y-auto py-1">
-            <li
-              role="option"
-              aria-selected={!company}
-              tabIndex={0}
-              onClick={() => choose("")}
-              onKeyDown={(e) => e.key === "Enter" && choose("")}
-              className={cx(
-                "flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-xs",
-                !company
-                  ? "bg-indigo-500/15 text-indigo-300"
-                  : "text-slate-300 hover:bg-slate-800 hover:text-slate-100"
-              )}
-            >
-              <span>No company selected</span>
-              {!company && <CheckIcon />}
-            </li>
             {filtered.map((c) => {
               const isSel = c.name === company;
               return (
@@ -166,6 +151,22 @@ export default function CompanySelect({ company, companies, select }) {
               <li className="px-3 py-2 text-xs text-slate-500">No companies found</li>
             )}
           </ul>
+          <div className="border-t border-slate-800 p-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setQuery("");
+                onCreate?.();
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-indigo-500/15 hover:text-indigo-200"
+            >
+              <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12h14M12 5v14" />
+              </svg>
+              New Company
+            </button>
+          </div>
         </div>
       )}
     </div>

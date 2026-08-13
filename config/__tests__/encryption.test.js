@@ -118,8 +118,14 @@ test("credentials are encrypted at rest in db/<company>.db and decrypt on load",
   const oldCwd = process.cwd();
   process.chdir(dir);
   process.env.APP_ENCRYPTION_KEY = "cd".repeat(32);
+  // This test exercises the SQLite backend — pin it so an ambient
+  // CONFIG_STORE=mysql (shell/.env) can't reroute writes to MySQL.
+  const prevStore = process.env.CONFIG_STORE;
+  process.env.CONFIG_STORE = "sqlite";
   t.after(() => {
     process.chdir(oldCwd);
+    if (prevStore === undefined) delete process.env.CONFIG_STORE;
+    else process.env.CONFIG_STORE = prevStore;
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

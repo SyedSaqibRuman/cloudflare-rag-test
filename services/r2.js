@@ -49,7 +49,7 @@ export async function getChunk(key, companyName) {
 }
 
 
-export async function uploadObject(key, data, companyName) {
+export async function uploadObject(key, data, companyName, bucketName = getR2Bucket(companyName)) {
   try {
     // --------------------------
     // 🔹 Check if object exists
@@ -57,7 +57,7 @@ export async function uploadObject(key, data, companyName) {
     try {
       await getS3Client(companyName).send(
         new HeadObjectCommand({
-          Bucket: getR2Bucket(companyName),
+          Bucket: bucketName,
           Key: key,
         })
       );
@@ -79,7 +79,7 @@ export async function uploadObject(key, data, companyName) {
     // 🔹 Upload if NOT exists
     // --------------------------
     const command = new PutObjectCommand({
-      Bucket: getR2Bucket(companyName),
+      Bucket: bucketName,
       Key: key,
       Body: JSON.stringify(data),
       ContentType: "application/json",

@@ -22,6 +22,95 @@ function statLog(name) {
 }
 
 // --------------------------
+// 🔹 GET /logs/export — download every log file concatenated
+// Registered before /:name so "export" isn't treated as a file name.
+// --------------------------
+router.get("/export", (req, res) => {
+  let names = [];
+  try {
+    names = fs
+      .readdirSync(LOG_DIR)
+      .filter((name) => name.endsWith(".log") && fs.statSync(path.join(LOG_DIR, name)).isFile())
+      .sort();
+  } catch (err) {
+    return res.status(500).json({ success: false, error: `Failed to read logs: ${err.message}` });
+  }
+
+  const parts = [];
+  for (const name of names) {
+    try {
+      const raw = fs.readFileSync(path.join(LOG_DIR, name), "utf8");
+      parts.push(`\n===== ${name} =====\n${raw}`);
+    } catch (err) {
+      parts.push(`\n===== ${name} =====\n(ERROR reading: ${err.message})\n`);
+    }
+  }
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="all-logs-${stamp}.txt"`);
+  res.send(parts.join("\n"));
+});
+
+// --------------------------
+// 🔹 GET /logs/:name/download — download a single log file
+// --------------------------
+router.get("/:name/download", (req, res) => {
+  const name = path.basename(req.params.name);
+  if (name !== req.params.name || !name.endsWith(".log")) {
+    return res.status(400).json({ success: false, error: "Invalid log file name." });
+  }
+  const filePath = path.join(LOG_DIR, name);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return res.status(404).json({ success: false, error: `Log file '${name}' not found.` });
+  }
+
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
+  res.send(fs.readFileSync(filePath));
+});
+
+// --------------------------
+// 🔹 DELETE /logs — clear every log file (truncate to empty, keep files)
+// --------------------------
+router.delete("/", (req, res) => {
+  let cleared = 0;
+  try {
+    const names = fs
+      .readdirSync(LOG_DIR)
+      .filter((name) => name.endsWith(".log") && fs.statSync(path.join(LOG_DIR, name)).isFile());
+    for (const name of names) {
+      fs.writeFileSync(path.join(LOG_DIR, name), "");
+      cleared += 1;
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: `Failed to clear logs: ${err.message}` });
+  }
+  res.json({ success: true, message: `Cleared ${cleared} log file(s).`, cleared });
+});
+
+// --------------------------
+// 🔹 DELETE /logs/:name — clear a single log file
+// --------------------------
+router.delete("/:name", (req, res) => {
+  const name = path.basename(req.params.name);
+  if (name !== req.params.name || !name.endsWith(".log")) {
+    return res.status(400).json({ success: false, error: "Invalid log file name." });
+  }
+  const filePath = path.join(LOG_DIR, name);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return res.status(404).json({ success: false, error: `Log file '${name}' not found.` });
+  }
+
+  try {
+    fs.writeFileSync(filePath, "");
+  } catch (err) {
+    return res.status(500).json({ success: false, error: `Failed to clear '${name}': ${err.message}` });
+  }
+  res.json({ success: true, message: `Cleared '${name}'.` });
+});
+
+// --------------------------
 // 🔹 GET /logs — list log files (newest first)
 // --------------------------
 router.get("/", (req, res) => {

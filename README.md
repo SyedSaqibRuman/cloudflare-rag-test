@@ -3,7 +3,7 @@
 A Retrieval-Augmented Generation (RAG) API powered by Cloudflare AI, Vectorize, and R2. Provides intelligent question-answering for PopularCert's certification services using semantic vector search, hybrid ranking, and LLM response generation.
 
 ---
-
+freebuff --continue 2026-08-12T05-16-47.513Z
 ## Quick Start
 
 ```bash
@@ -38,6 +38,8 @@ For UI development with hot reload, run `cd web && npm run dev` and the Vite dev
 | [API: Cloudflare](docs/api/cloudflare.md) | Vector indexes, R2 buckets (`/cloudflare/*`) |
 | [API: Config](docs/api/config.md) | Runtime config, model configuration (`/cloudflare/config`) |
 | [Models](docs/models.md) | Available AI models and how to switch them |
+| [Providers](docs/providers.md) | Adding & editing AI gateway providers (Catalog wizard) |
+| [Credentials](docs/credentials.md) | Provider connection, encrypted storage, auto-verify, rotation |
 
 ---
 

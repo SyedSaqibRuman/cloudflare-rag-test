@@ -12,6 +12,10 @@ import path from "node:path";
 const TEST_DIR = mkdtempSync(path.join(tmpdir(), "ask-routes-"));
 process.chdir(TEST_DIR);
 
+// These tests exercise the SQLite backend — pin it so an ambient
+// CONFIG_STORE=mysql (shell/.env) can't reroute company writes to MySQL.
+process.env.CONFIG_STORE = "sqlite";
+
 const { createCompany, setCompanyApiKey } = await import("../../config/index.js");
 const { createAskRouter } = await import("../../routes/ask.js");
 

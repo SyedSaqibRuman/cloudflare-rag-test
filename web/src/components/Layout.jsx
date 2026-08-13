@@ -1,3 +1,7 @@
+// --------------------------
+// LAYOUT SHELL (Clean Architecture: shell composes nav constants + icons)
+// Sidebar, header, theme + health state, and the HeaderActions context.
+// --------------------------
 import { createContext, useContext, useEffect, useState } from "react";
 import { cx } from "../util";
 import { health as fetchHealth } from "../api";
@@ -11,6 +15,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "./dropdown-menu";
+import { NAV, PAGE_META } from "./layout/nav.js";
+import { NAV_ICONS } from "./layout/icons.jsx";
 
 const HeaderActionsCtx = createContext(null);
 
@@ -25,47 +31,9 @@ export function useHeaderActions(node) {
     return () => set(null);
   });
 }
-const NAV = [
-  {
-    section: "Overview",
-    items: [{ id: "dashboard", label: "Dashboard", icon: <IconDashboard /> }],
-  },
-  {
-    section: "AI",
-    items: [
-      { id: "ask", label: "Ask Console", icon: <IconChat /> },
-      { id: "prompt", label: "Prompt", icon: <IconDoc /> },
-    ],
-  },
-  {
-    section: "Companies",
-    items: [
-      { id: "companies", label: "Companies", icon: <IconBuilding /> },
-      { id: "config", label: "Configuration", icon: <IconSliders /> },
-    ],
-  },
-  {
-    section: "Infrastructure",
-    items: [
-      { id: "cloudflare", label: "Cloudflare", icon: <IconCloud /> },
-      { id: "scheduler", label: "Scheduler", icon: <IconClock /> },
-    ],
-  },
-];
-
-const PAGE_META = {
-  dashboard: { title: "Dashboard", subtitle: "Platform overview and live system state" },
-  ask: { title: "Ask Console", subtitle: "Test the RAG assistant with live streaming responses" },
-  companies: { title: "Companies", subtitle: "Tenants with isolated config, vector index, and R2 bucket" },
-  config: { title: "Company Config", subtitle: "Hot-reloadable runtime configuration per tenant" },
-  prompt: { title: "System Prompt", subtitle: "The assistant's behavior template with runtime variable interpolation" },
-  cloudflare: { title: "Cloudflare Resources", subtitle: "Vector indexes and R2 buckets across the account" },
-  scheduler: { title: "Scheduler", subtitle: "Run jobs on demand, schedule them with cron, and manage reusable presets" },
-  logs: { title: "Logs", subtitle: "Server log files written by the app (error, process, upload, vector)" },
-};
 
 export default function Layout({ route, navigate, children }) {
-  const { company, companies, select } = useCompanies();
+  const { company, companies, select, refresh } = useCompanies();
   const { logout, username } = useAuth();
   const [status, setStatus] = useState("checking");
   const [headerActions, setHeaderActions] = useState(null);
@@ -75,6 +43,23 @@ export default function Layout({ route, navigate, children }) {
   const [osDark, setOsDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false
   );
+  // Sidebar collapse state (icon-only mode), persisted across reloads.
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("pc_sidebar_collapsed") === "1");
+
+  // The "Cloudflare" nav item is company-scoped: it only appears when the
+  // selected company has Cloudflare API credentials (account id + token)
+  // configured. Refresh the companies list periodically so the menu appears
+  // shortly after credentials are saved on another page.
+  useEffect(() => {
+    const id = setInterval(refresh, 30000);
+    return () => clearInterval(id);
+  }, [refresh]);
+  const selectedCompany = companies.find((c) => c.name === company);
+  const showCloudflare = !!selectedCompany?.hasCloudflareApi;
+
+  useEffect(() => {
+    localStorage.setItem("pc_sidebar_collapsed", collapsed ? "1" : "0");
+  }, [collapsed]);
 
   useEffect(() => {
     localStorage.setItem("pc_theme", theme);
@@ -118,76 +103,137 @@ export default function Layout({ route, navigate, children }) {
       >
         Skip to main content
       </a>
-      <aside className="fixed inset-y-0 left-0 z-30 flex w-60 flex-col border-r border-slate-800 bg-slate-900/90 backdrop-blur">
-        <div className="border-b border-slate-800 px-5 py-4">
-          <CompanySelect company={company} companies={companies} select={select} />
+      <aside className={`fixed inset-y-0 left-0 z-30 flex flex-col border-r border-slate-800 bg-slate-900/90 backdrop-blur transition-[width] duration-200 ${collapsed ? "w-16" : "w-60"}`}>
+        <div className="shrink-0 border-b border-slate-800">
+          <div className={`flex items-center justify-between ${collapsed ? "px-2 pb-2 pt-2" : "px-3 pb-1 pt-2"}`}>
+            {!collapsed && (
+              <span className="px-1 text-[15px] font-semibold uppercase tracking-[0.08em] text-slate-400">Workspace</span>
+            )}
+            <button
+              type="button"
+              onClick={() => setCollapsed((c) => !c)}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className={`rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-800/70 hover:text-slate-100 ${collapsed ? "mx-auto" : ""}`}
+            >
+              {collapsed ? (
+                <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect width="18" height="18" x="3" y="3" rx="2" />
+                  <path d="M9 3v18" />
+                  <path d="m14 9 3 3-3 3" />
+                </svg>
+              ) : (
+                <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect width="18" height="18" x="3" y="3" rx="2" />
+                  <path d="M9 3v18" />
+                  <path d="m16 15-3-3 3-3" />
+                </svg>
+              )}
+            </button>
+          </div>
+          {!collapsed && (
+            <div className="px-3 pb-3">
+              <CompanySelect company={company} companies={companies} select={select} onCreate={() => navigate("companies")} />
+            </div>
+          )}
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-3 py-4">
+        <nav className={`flex-1 overflow-y-auto py-4 ${collapsed ? "px-2" : "px-3"}`}>
           {NAV.map((group, i) => (
-            <div key={group.section} className={i === 0 ? "" : "mt-6 border-t border-slate-800/60 pt-4"}>
-              <p className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                {group.section}
-              </p>
+            <div
+              key={group.section}
+              className={cx(
+                i === 0 ? "" : collapsed ? "mt-3 border-t border-slate-800/60 pt-3" : "mt-6"
+              )}
+            >
+              {!collapsed && (
+                <p className="px-3 pb-2 text-[15px] font-semibold uppercase tracking-[0.08em] text-slate-400">
+                  {group.section}
+                </p>
+              )}
               <div className="space-y-1">
-                {group.items.map((item) => (
-                  <a
-                    key={item.id}
-                    href={`#${item.id}`}
-                    aria-current={route === item.id ? "page" : undefined}
-                    className={cx(
-                      "relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                      route === item.id
-                        ? "bg-indigo-500/15 text-indigo-300"
-                        : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/70"
-                    )}
-                  >
-                    {route === item.id && (
-                      <span aria-hidden="true" className="absolute left-0 top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-indigo-400" />
-                    )}
-                    {item.icon}
-                    {item.label}
-                  </a>
-                ))}
+                {group.items
+                  .filter((item) => item.id !== "cloudflare" || showCloudflare)
+                  .map((item) => {
+                    const Icon = NAV_ICONS[item.icon] || NAV_ICONS.dashboard;
+                    return (
+                    <a
+                      key={item.id}
+                      href={`#${item.id}`}
+                      title={collapsed ? item.label : undefined}
+                      aria-current={route === item.id ? "page" : undefined}
+                      className={cx(
+                        "relative flex items-center rounded-lg font-medium transition-colors",
+                        collapsed ? "w-full justify-center py-2" : "w-full gap-3 px-3 py-2 text-sm",
+                        route === item.id
+                          ? "bg-indigo-500/15 font-semibold text-indigo-200"
+                          : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/70"
+                      )}
+                    >
+                      {route === item.id && (
+                        <span aria-hidden="true" className="absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-full bg-indigo-400" />
+                      )}
+                      <Icon />
+                      {!collapsed && item.label}
+                    </a>
+                  );
+                  })}
               </div>
             </div>
           ))}
         </nav>
 
-        <div className="border-t border-slate-800 px-4 pt-4 pb-3">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-slate-400">API</span>
-            <span className="flex items-center gap-1.5">
-              <span
-                className={cx(
-                  "h-2 w-2 rounded-full",
-                  status === "online" ? "bg-emerald-400" : status === "offline" ? "bg-rose-500" : "bg-amber-400"
-                )}
-              />
-              <span className="text-slate-300">{status === "online" ? "Online" : status === "offline" ? "Offline" : "Checking…"}</span>
-            </span>
+        <div className={`shrink-0 space-y-3 border-t border-slate-800 pt-3 pb-3 ${collapsed ? "px-2" : "px-4"}`}>
+          <div className={`rounded-lg bg-slate-800/40 py-2 ${collapsed ? "flex justify-center" : "px-2.5"}`}>
+            {collapsed ? (
+              <span className="flex items-center gap-1.5" title={`API ${status}`}>
+                <span
+                  className={cx(
+                    "h-2 w-2 rounded-full",
+                    status === "online" ? "bg-emerald-400" : status === "offline" ? "bg-rose-500" : "bg-amber-400"
+                  )}
+                />
+              </span>
+            ) : (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-400">System</span>
+                <span className="flex items-center gap-1.5" title={`API ${status}`}>
+                  <span
+                    className={cx(
+                      "h-2 w-2 rounded-full",
+                      status === "online" ? "bg-emerald-400" : status === "offline" ? "bg-rose-500" : "bg-amber-400"
+                    )}
+                  />
+                  <span className="text-slate-300">{status === "online" ? "API Online" : status === "offline" ? "API Offline" : "Checking…"}</span>
+                </span>
+              </div>
+            )}
           </div>
-          <div className="my-3 border-t border-slate-800/80" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                title="Admin menu"
-                className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-slate-800/70 data-[state=open]:bg-slate-800/70"
+                title={username || "Admin"}
+                className={`flex items-center rounded-lg transition-colors hover:bg-slate-800/70 data-[state=open]:bg-slate-800/70 ${
+                  collapsed ? "mx-auto justify-center p-1" : "w-full gap-3 px-3 py-2 text-sm"
+                }`}
               >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-sm font-semibold text-indigo-300">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-base font-semibold text-indigo-300">
                   {(username || "A").charAt(0).toUpperCase()}
                 </span>
-                <span className="min-w-0 flex-1 text-left">
-                  <span className="block truncate text-sm font-medium text-slate-200">{username || "Admin"}</span>
-                  <span className="block truncate text-[11px] text-slate-500">Administrator</span>
-                </span>
-                <svg aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
+                {!collapsed && (
+                  <span className="min-w-0 flex-1 text-left">
+                    <span className="block truncate text-sm font-medium text-slate-200">{username || "Admin"}</span>
+                    <span className="block truncate text-[11px] text-slate-500">Administrator</span>
+                  </span>
+                )}
+                {!collapsed && (
+                  <svg aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                )}
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" sideOffset={8} className="w-52">
+            <DropdownMenuContent align="start" sideOffset={8} className="w-60">
               <DropdownMenuItem
                 onSelect={(e) => {
                   e.preventDefault();
@@ -225,7 +271,7 @@ export default function Layout({ route, navigate, children }) {
         </div>
       </aside>
 
-      <main id="main" className="ml-60 flex-1">
+      <main id="main" className={`flex-1 transition-[margin] duration-200 ${collapsed ? "ml-16" : "ml-60"}`}>
         <header className="flex items-end justify-between gap-4 px-8 pt-6 pb-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-50">{PAGE_META[route]?.title || "Dashboard"}</h1>
@@ -240,81 +286,5 @@ export default function Layout({ route, navigate, children }) {
       </main>
     </div>
     </HeaderActionsCtx.Provider>
-  );
-}
-
-function IconDashboard() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="7" height="9" rx="1" />
-      <rect x="14" y="3" width="7" height="5" rx="1" />
-      <rect x="14" y="12" width="7" height="9" rx="1" />
-      <rect x="3" y="16" width="7" height="5" rx="1" />
-    </svg>
-  );
-}
-
-function IconChat() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-    </svg>
-  );
-}
-
-function IconBuilding() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 21h18" />
-      <path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16" />
-      <path d="M19 21V9a2 2 0 0 0-2-2h-2" />
-      <path d="M9 7h2" />
-      <path d="M9 11h2" />
-      <path d="M9 15h2" />
-    </svg>
-  );
-}
-
-function IconSliders() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 21v-7" />
-      <path d="M4 10V3" />
-      <path d="M12 21v-9" />
-      <path d="M12 8V3" />
-      <path d="M20 21v-5" />
-      <path d="M20 12V3" />
-      <path d="M1 14h6" />
-      <path d="M9 8h6" />
-      <path d="M17 16h6" />
-    </svg>
-  );
-}
-
-function IconDoc() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <path d="M14 2v6h6" />
-      <path d="M8 13h8" />
-      <path d="M8 17h5" />
-    </svg>
-  );
-}
-
-function IconCloud() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
-    </svg>
-  );
-}
-
-function IconClock() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 6v6l4 2" />
-    </svg>
   );
 }

@@ -119,17 +119,17 @@ router.delete("/presets/:id", (req, res) => {
 // ============================================================
 
 // POST /job/start
-// Body: { jobId, companyName? }
+// Body: { jobId, companyName?, kbKey? }
 // Starts a job immediately. Multiple concurrent jobs allowed (up to MAX_CONCURRENT_JOBS).
 router.post("/job/start", async (req, res) => {
   try {
-    const { jobId, companyName } = req.body;
+    const { jobId, companyName, kbKey } = req.body;
 
     if (!jobId) {
       return res.status(400).json({ success: false, message: "jobId is required." });
     }
 
-    const result = await startJob(jobId, companyName);
+    const result = await startJob(jobId, companyName, { kbKey });
     return res.status(result.success ? 200 : 400).json(result);
   } catch (err) {
     console.error(err);
@@ -138,11 +138,11 @@ router.post("/job/start", async (req, res) => {
 });
 
 // POST /job/stop
-// Body: { jobId?, companyName? }
+// Body: { jobId?, companyName?, kbKey? }
 // Stops a specific running job, or the first running job if no params given.
 router.post("/job/stop", (req, res) => {
-  const { jobId, companyName } = req.body || {};
-  const result = stopJob(jobId, companyName);
+  const { jobId, companyName, kbKey } = req.body || {};
+  const result = stopJob(jobId, companyName, kbKey);
   return res.status(result.success ? 200 : 400).json(result);
 });
 

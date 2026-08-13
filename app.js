@@ -12,7 +12,7 @@ import logsRoutes from "./routes/logs.js";
 import gatewayRoutes from "./mysql/gateway-router.js";
 import { createAskRouter } from "./routes/ask.js";
 import { env } from "./env.js";
-import { requireAdmin } from "./auth.js";
+import { requireAdmin, verifyToken, extractToken, AUTH_ENABLED } from "./auth.js";
 import { initConfig, runtimeConfig, resolveCreds } from "./config/index.js";
 import { isAllowedOrigin } from "./utils/request-context.js";
 import swaggerUi from "swagger-ui-express";
@@ -44,17 +44,15 @@ app.use(express.json({ limit: "1mb" }));
 
 // --------------------------
 // 🔹 RATE LIMITING
-// Protects AI endpoints (costly) and admin routes (sensitive) from abuse.
-// Tune via env vars — defaults are conservative.
+// Protects AI endpoints (costly) and public routes from abuse. Admin routes
+// are deliberately NOT rate-limited: authenticated admin sessions bypass the
+// global baseline too, so heavy portal/catalog work never trips a 429. The
+// AI tier limiter (routes/ask.js) and the login brute-force guard still apply.
 // --------------------------
 
 // Global baseline: 100 req/min across all routes
 const globalWindowMs = 60 * 1000; // 1 minute
 const globalMax = 100;
-
-// Strict limit for admin endpoints (POST/PUT/DELETE operations):
-const adminWindowMs = 60 * 1000; // 1 minute
-const adminMax = 30;
 
 const limiterDefaults = {
   standardHeaders: true,
@@ -72,30 +70,22 @@ const globalLimiter = rateLimit({
   },
 });
 
-const adminLimiter = rateLimit({
-  ...limiterDefaults,
-  windowMs: adminWindowMs,
-  max: adminMax,
-  message: {
-    success: false,
-    error: "Admin request limit reached. Please slow down.",
-  },
-});
-
-// Apply global limiter to every request (excluding health check)
-// Note: Must use a wrapper function instead of a regex path pattern because
-// Express 5 does not apply middleware correctly when passed via app.use(regex, fn).
+// Apply global limiter to every request (excluding health check and
+// authenticated admin sessions). Note: must use a wrapper function instead of
+// a regex path pattern because Express 5 does not apply middleware correctly
+// when passed via app.use(regex, fn).
 app.use((req, res, next) => {
   if (req.path === "/") return next();
+  if (AUTH_ENABLED && verifyToken(extractToken(req))) return next();
   return globalLimiter(req, res, next);
 });
 
 // Mount routes
 app.use("/cloudflare", requireAdmin, cronRoutes);
-app.use("/cloudflare", adminLimiter, requireAdmin, cloudflareRoutes);
+app.use("/cloudflare", requireAdmin, cloudflareRoutes);
 app.use("/auth", authRoutes);
 app.use("/logs", requireAdmin, logsRoutes);
-app.use("/gateway", requireAdmin, adminLimiter, gatewayRoutes);
+app.use("/gateway", requireAdmin, gatewayRoutes);
 app.use(createAskRouter());
 
 // --------------------------

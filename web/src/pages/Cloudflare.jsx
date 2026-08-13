@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton, Toast } from "../components/ui";
 import { useCompanies } from "../context";
@@ -6,10 +6,17 @@ import { usePoll } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
 import { formatDate } from "../util";
 
-function ModalForm({ open, title, placeholder, confirmLabel, onClose, onSubmit }) {
-  const [name, setName] = useState("");
+function ModalForm({ open, title, placeholder, confirmLabel, defaultName = "", onClose, onSubmit }) {
+  const [name, setName] = useState(defaultName);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const wasOpen = useRef(open);
+
+  // Prefill with the auto-suggested name each time the modal opens.
+  useEffect(() => {
+    if (open && !wasOpen.current) setName(defaultName);
+    wasOpen.current = open;
+  }, [open, defaultName]);
 
   const submit = async () => {
     if (!name.trim()) return;
@@ -95,6 +102,20 @@ export default function Cloudflare() {
   };
 
   usePoll(load, 15000, [company]);
+
+  // Suggest <company>-<suffix> (kept ≤ 63 chars), bumping a numeric suffix
+  // when the plain suggestion is already taken.
+  const suggestName = (existing, suffix) => {
+    if (!company) return "";
+    const base = company.slice(0, 63 - suffix.length - 1);
+    const stem = `${base}-${suffix}`;
+    if (!existing.some((r) => r.name === stem)) return stem;
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${stem}-${i}`;
+      if (!existing.some((r) => r.name === candidate)) return candidate;
+    }
+    return "";
+  };
 
   const handleCreateIndex = async (name) => {
     await api("/cloudflare/indexes", { method: "POST", body: { name }, company });
@@ -282,7 +303,8 @@ export default function Cloudflare() {
       <ModalForm
         open={createIndex}
         title="Create Vector Index"
-        placeholder="e.g. acme-knowledge"
+        placeholder={`e.g. ${company ? `${company}-index` : "acme-knowledge"}`}
+        defaultName={suggestName(indexes, "index")}
         confirmLabel="Create"
         onClose={() => setCreateIndex(false)}
         onSubmit={handleCreateIndex}
@@ -290,7 +312,8 @@ export default function Cloudflare() {
       <ModalForm
         open={createBucket}
         title="Create R2 Bucket"
-        placeholder="e.g. acme-chunks"
+        placeholder={`e.g. ${company ? `${company}-data` : "acme-chunks"}`}
+        defaultName={suggestName(buckets, "data")}
         confirmLabel="Create"
         onClose={() => setCreateBucket(false)}
         onSubmit={handleCreateBucket}

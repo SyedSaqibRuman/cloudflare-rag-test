@@ -1,25 +1,9 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, listProviders, getProvider, getKbOptions } from "../api";
 import { Card, Button, Input, Select, Spinner, Badge, Toast } from "../components/ui";
 import { useCompanies } from "../context";
 import { useHeaderActions } from "../components/Layout";
-import {
-  EMBEDDING_MODELS,
-  LLM_MODELS,
-  SMALL_LLMS,
-  RERANKING_MODELS,
-  EMBEDDING_DIMENSIONS,
-  GENERAL_KEYS,
-  STORAGE_KEYS,
-  CREDENTIAL_KEYS,
-} from "../models";
-
-const MODEL_LABELS = {
-  EMBEDDING_MODEL: "Embedding Model",
-  LLM_MODEL: "Primary LLM",
-  SMALL_LLM: "Query Rewriter",
-  RERANKING_MODEL: "Reranker",
-};
+import { GENERAL_KEYS, EMBEDDING_DIMENSIONS } from "../models";
 
 const GENERAL_LABELS = {
   BASE_URL: "Base Website",
@@ -30,29 +14,8 @@ const GENERAL_LABELS = {
   COMPANY_NAME: "Company Display Name",
 };
 
-const STORAGE_LABELS = {
-  VECTOR_INDEX: "Vector Index",
-  R2_BUCKET_NAME: "R2 Bucket",
-};
-
-const CREDENTIAL_LABELS = {
-  CLOUDFLARE_ACCOUNT_ID: "Cloudflare Account ID",
-  CLOUDFLARE_API_TOKEN: "Cloudflare API Token",
-  R2_ACCESS_KEY_ID: "R2 Access Key ID",
-  R2_SECRET_ACCESS_KEY: "R2 Secret Access Key",
-  R2_TOKEN_VALUE: "R2 Token Value",
-  R2_JURISDICTION_END_POINT: "R2 Jurisdiction Endpoint",
-};
-
-const SECRET_FIELDS = [
-  "CLOUDFLARE_API_TOKEN",
-  "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY",
-  "R2_TOKEN_VALUE",
-];
-
 export default function Config() {
-  const { company, companies, select, refresh } = useCompanies();
+  const { company, refresh } = useCompanies();
   const [config, setConfig] = useState(null);
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -62,6 +25,15 @@ export default function Config() {
   const [apiKeyEnabled, setApiKeyEnabled] = useState(false);
   const [generatedKey, setGeneratedKey] = useState(null);
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  // Gateway provider catalog — drives the Models & Provider card dropdowns.
+  const [providers, setProviders] = useState([]);
+  const [catalogModels, setCatalogModels] = useState([]);
+  const [catalogNote, setCatalogNote] = useState(null);
+  const [catalogReload, setCatalogReload] = useState(0);
+  // Company resource catalog (provider_resources rows) — vector index + R2 bucket selectors.
+  const [vectorResources, setVectorResources] = useState([]);
+  const [storageResources, setStorageResources] = useState([]);
+  const [resourcesNote, setResourcesNote] = useState(null);
 
   const notify = (msg) => {
     setToast(msg);
@@ -143,11 +115,82 @@ export default function Config() {
     load(company);
   }, [company]);
 
+  // Provider catalog is global — load on mount, retry via the note's button.
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const rows = await listProviders();
+        if (live) {
+          setProviders(rows);
+          setCatalogNote(null);
+        }
+      } catch {
+        if (live) setCatalogNote("Provider catalog unavailable — model dropdowns may be empty.");
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [catalogReload]);
+
+  // Load the company's gateway resources (vector_index + object_bucket) so the
+  // STORAGE keys can be picked from the catalog instead of typed by hand.
+  useEffect(() => {
+    if (!company) {
+      setVectorResources([]);
+      setStorageResources([]);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const opts = await getKbOptions(company);
+        if (live) {
+          setVectorResources(opts?.vectorResources || []);
+          setStorageResources(opts?.storageResources || []);
+          setResourcesNote(null);
+        }
+      } catch {
+        if (live) {
+          setVectorResources([]);
+          setStorageResources([]);
+          setResourcesNote("Resource catalog unavailable — vector/storage lists may be empty.");
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [company]);
+
+  // When the selected provider changes, load its catalog models.
+  useEffect(() => {
+    const providerKey = draft?.AI_PROVIDER;
+    if (!providerKey) {
+      setCatalogModels([]);
+      return;
+    }
+    let live = true;
+    (async () => {
+      setCatalogNote(null);
+      try {
+        const provider = await getProvider(providerKey);
+        if (live) setCatalogModels(provider?.models || []);
+      } catch {
+        if (live) {
+          setCatalogModels([]);
+          setCatalogNote(`Could not load models for provider '${providerKey}'.`);
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [draft?.AI_PROVIDER]);
+
   const setKey = (key, value) => {
     setDraft((d) => ({ ...d, [key]: value }));
-    if (key === "EMBEDDING_MODEL" && EMBEDDING_DIMENSIONS[value]) {
-      setDraft((d) => ({ ...d, EMBEDDING_DIMENSIONS: EMBEDDING_DIMENSIONS[value] }));
-    }
   };
 
   const save = async () => {
@@ -188,17 +231,55 @@ export default function Config() {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
 
+  // Provider select options: catalog providers + the current value if unknown.
+  const providerOptions = () => {
+    const opts = [{ value: "", label: "— Select provider —" }];
+    const current = draft?.AI_PROVIDER;
+    const known = new Set(providers.map((p) => p.providerKey));
+    if (current && !known.has(current)) opts.push({ value: current, label: current });
+    for (const p of providers) opts.push({ value: p.providerKey, label: p.providerName });
+    return opts;
+  };
+
+  // Model select options for a catalog category, always including the current
+  // stored value (a company may hold a model the catalog doesn't list).
+  const modelOptions = (category, current) => {
+    const list = catalogModels.filter((m) => m.category === category);
+    const seen = new Set(list.map((m) => m.model_key));
+    if (current && !seen.has(current)) list.unshift({ model_key: current, model_name: current });
+    const opts = [{ value: "", label: "— Select model —" }];
+    for (const m of list) {
+      opts.push({ value: m.model_key, label: m.model_name ? `${m.model_name} (${m.model_key})` : m.model_key });
+    }
+    return opts;
+  };
+
+  // Select options for a company resource list (vector index / R2 bucket): the
+  // catalog rows plus the current stored value when it isn't in the catalog.
+  const resourceOptions = (resources, current) => {
+    const seen = new Set(resources.map((r) => r.resource_key));
+    const opts = [{ value: "", label: "— Use company default —" }];
+    for (const r of resources) {
+      const label = r.resource_name ? `${r.resource_name} (${r.resource_key})` : r.resource_key;
+      opts.push({ value: r.resource_key, label });
+    }
+    if (current && !seen.has(current)) {
+      opts.unshift({ value: current, label: `${current} (not in catalog)` });
+    }
+    return opts;
+  };
+
+  // Only @cf/ models are runtime-callable today (Workers AI adapter).
+  const hasNonCfModel = [draft?.LLM_MODEL, draft?.SMALL_LLM, draft?.EMBEDDING_MODEL, draft?.RERANKING_MODEL].some(
+    (m) => m && !m.startsWith("@cf/")
+  );
+  // The saved provider may not exist in the catalog (e.g. default 'cloudflare').
+  const providerKnown = draft?.AI_PROVIDER && providers.some((p) => p.providerKey === draft.AI_PROVIDER);
+  // EMBEDDING_DIMENSIONS only auto-follows models in the built-in map.
+  const embeddingUnknownDims = draft?.EMBEDDING_MODEL && !EMBEDDING_DIMENSIONS[draft.EMBEDDING_MODEL];
+
   useHeaderActions(
     <div className="flex items-center justify-end gap-3">
-      <Select
-        value={company}
-        onChange={(e) => select(e.target.value)}
-        options={[
-          { value: "", label: "Select a company…" },
-          ...companies.map((c) => ({ value: c.name, label: c.COMPANY_NAME || c.name })),
-        ]}
-        className="w-64"
-      />
       {company && (
         <>
           <Button variant="secondary" onClick={reset}>
@@ -245,67 +326,89 @@ export default function Config() {
             </div>
           </Card>
 
-          <Card title="AI Models" subtitle="Models used for retrieval, rewriting, generation, and reranking">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Select
-                label={MODEL_LABELS.EMBEDDING_MODEL}
-                value={draft.EMBEDDING_MODEL || ""}
-                onChange={(e) => setKey("EMBEDDING_MODEL", e.target.value)}
-                options={EMBEDDING_MODELS}
-              />
-              <Input
-                label="Embedding Dimensions"
-                type="number"
-                value={draft.EMBEDDING_DIMENSIONS ?? ""}
-                onChange={(e) => setKey("EMBEDDING_DIMENSIONS", Number(e.target.value))}
-              />
-              <Select
-                label={MODEL_LABELS.LLM_MODEL}
-                value={draft.LLM_MODEL || ""}
-                onChange={(e) => setKey("LLM_MODEL", e.target.value)}
-                options={LLM_MODELS}
-              />
-              <Select
-                label={MODEL_LABELS.SMALL_LLM}
-                value={draft.SMALL_LLM || ""}
-                onChange={(e) => setKey("SMALL_LLM", e.target.value)}
-                options={SMALL_LLMS}
-              />
-              <Select
-                label={MODEL_LABELS.RERANKING_MODEL}
-                value={draft.RERANKING_MODEL || ""}
-                onChange={(e) => setKey("RERANKING_MODEL", e.target.value)}
-                options={RERANKING_MODELS}
-              />
-            </div>
-          </Card>
-
-          <Card title="Storage" subtitle="Cloudflare resources backing this company">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {STORAGE_KEYS.map((key) => (
-                <Input
-                  key={key}
-                  label={STORAGE_LABELS[key]}
-                  value={draft[key] ?? ""}
-                  onChange={(e) => setKey(key, e.target.value)}
-                  placeholder="auto-created on first ingest"
+          <Card
+            title="Models & Provider"
+            subtitle="AI provider and its models, selected from the gateway catalog"
+          >
+            <div className="space-y-4">
+              <div className="max-w-sm">
+                <Select
+                  label="Provider"
+                  options={providerOptions()}
+                  value={draft.AI_PROVIDER ?? ""}
+                  onChange={(e) => setKey("AI_PROVIDER", e.target.value)}
                 />
-              ))}
-            </div>
-          </Card>
-
-          <Card title="Cloudflare Credentials" subtitle="Stored in this company's SQLite database; no environment fallback">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {CREDENTIAL_KEYS.map((key) => (
-                <Input
-                  key={key}
-                  type={SECRET_FIELDS.includes(key) ? "password" : "text"}
-                  label={CREDENTIAL_LABELS[key]}
-                  value={draft[key] ?? ""}
-                  onChange={(e) => setKey(key, e.target.value)}
-                  autoComplete="off"
+                {draft?.AI_PROVIDER && !providerKnown && (
+                  <p className="mt-1.5 text-xs text-slate-500">
+                    Provider '{draft.AI_PROVIDER}' isn't in the catalog — its models aren't available here. Add it via the
+                    Catalog page.
+                  </p>
+                )}
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Select
+                  label="Vector Index"
+                  options={resourceOptions(vectorResources, draft.VECTOR_INDEX ?? "")}
+                  value={draft.VECTOR_INDEX ?? ""}
+                  onChange={(e) => setKey("VECTOR_INDEX", e.target.value)}
                 />
-              ))}
+                <Select
+                  label="Storage (R2) Bucket"
+                  options={resourceOptions(storageResources, draft.R2_BUCKET_NAME ?? "")}
+                  value={draft.R2_BUCKET_NAME ?? ""}
+                  onChange={(e) => setKey("R2_BUCKET_NAME", e.target.value)}
+                />
+                <Select
+                  label="AI Model (large)"
+                  options={modelOptions("chat", draft.LLM_MODEL ?? "")}
+                  value={draft.LLM_MODEL ?? ""}
+                  onChange={(e) => setKey("LLM_MODEL", e.target.value)}
+                />
+                <Select
+                  label="AI Model (small — query rewriting)"
+                  options={modelOptions("chat", draft.SMALL_LLM ?? "")}
+                  value={draft.SMALL_LLM ?? ""}
+                  onChange={(e) => setKey("SMALL_LLM", e.target.value)}
+                />
+                <Select
+                  label="Embedding Model"
+                  options={modelOptions("embedding", draft.EMBEDDING_MODEL ?? "")}
+                  value={draft.EMBEDDING_MODEL ?? ""}
+                  onChange={(e) => setKey("EMBEDDING_MODEL", e.target.value)}
+                />
+                <Select
+                  label="Reranking Model"
+                  options={modelOptions("reranker", draft.RERANKING_MODEL ?? "")}
+                  value={draft.RERANKING_MODEL ?? ""}
+                  onChange={(e) => setKey("RERANKING_MODEL", e.target.value)}
+                />
+              </div>
+              {resourcesNote && <p className="text-xs text-amber-300">{resourcesNote}</p>}
+              {catalogNote && (
+                <p className="flex items-center gap-2 text-xs text-amber-300">
+                  <span>{catalogNote}</span>
+                  <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={() => setCatalogReload((n) => n + 1)}>
+                    Retry
+                  </Button>
+                </p>
+              )}
+              {hasNonCfModel && (
+                <p className="text-xs text-amber-300">
+                  Note: non-Cloudflare models are stored and validated, but the runtime can only execute @cf/ models
+                  today — asks/ingest will fail until a provider adapter ships.
+                </p>
+              )}
+              {embeddingUnknownDims && (
+                <p className="text-xs text-slate-500">
+                  EMBEDDING_DIMENSIONS isn't auto-set for this embedding model (only known @cf/ embeddings are mapped) —
+                  it keeps its current value.
+                </p>
+              )}
+              <p className="text-xs text-slate-500">
+                Vector Index and Storage (R2) Bucket come from the company's provisioned gateway resources — "Use company
+                default" keeps the value from the company config. "AI Model (large)" and "AI Model (small)" both list the
+                provider's chat models — pick the lighter/faster one for query rewriting.
+              </p>
             </div>
           </Card>
 

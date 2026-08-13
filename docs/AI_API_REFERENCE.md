@@ -25,6 +25,8 @@ A machine-readable API reference for the PopularCert RAG API. This document is d
   - [Cloudflare - R2 Buckets](#cloudflare---r2-buckets)
   - [Cloudflare - Config](#cloudflare---config)
   - [Cloudflare - System Prompt](#cloudflare---system-prompt)
+  - [Gateway - Provider Catalog](#gateway---provider-catalog)
+  - [Gateway - Knowledge Bases](#gateway---knowledge-bases)
 
 ---
 
@@ -61,11 +63,15 @@ If `ADMIN_API_KEY` is not set, Cloudflare routes are unprotected (development mo
 
 ## Rate Limiting
 
-| Tier | Routes | Default Limit | Env Var |
-|------|--------|---------------|---------|
-| Global | All routes except `GET /` | 100 req/min | `RATE_LIMIT_GLOBAL` |
-| AI | `POST /ask`, `POST /ask-stream` | 20 req/min | `RATE_LIMIT_AI` |
-| Cloudflare | All `/cloudflare/*` routes | 30 req/min | `RATE_LIMIT_ADMIN` |
+| Tier | Routes | Default Limit |
+|------|--------|---------------|
+| Global | All routes except `GET /` | 100 req/min |
+| AI | `POST /ask`, `POST /ask-stream` | 20 req/min |
+| Login | `POST /auth/login` (brute-force guard) | 10 req/min |
+
+Limits are hardcoded constants in `app.js` / `routes/ask.js` / `routes/auth.js` — there are **no** `RATE_LIMIT_*` env vars.
+
+Admin routes (`/cloudflare/*`, `/gateway/*`, `/logs`, `/api-docs`) are **not** rate-limited — authenticated admin sessions also bypass the global baseline, so heavy portal/catalog work never trips a 429.
 
 Rate-limited responses include standard `RateLimit-*` headers and return HTTP 429 with error message.
 
@@ -528,7 +534,9 @@ x-api-key: YOUR_ADMIN_API_KEY
       "CONSULTANT_NAME": "Sarah",
       "BASE_URL": "https://popularcert.com",
       "VECTOR_INDEX": "popularcert-vectors",
-      "R2_BUCKET_NAME": "popularcert-r2"
+      "R2_BUCKET_NAME": "popularcert-r2",
+      "hasCredentials": true,
+      "hasCloudflareApi": true
     }
   ]
 }
@@ -1293,6 +1301,305 @@ x-company-name: popularcert
 
 ---
 
+## Gateway - Provider Catalog
+
+The MySQL-backed gateway layer (`/gateway/*`) is a multi-tenant catalog of AI providers, endpoints, and pricing. It powers the admin portal's Catalog page. Every gateway route sits behind `requireAdmin` (same auth as `/cloudflare/*`) and returns **503** when the `MYSQL_*` env vars are unset. Admin routes carry no rate limiter.
+
+> For UI walkthroughs, see [docs/providers.md](providers.md) (Catalog wizard) and [docs/credentials.md](credentials.md) (per-company provider connection, encrypted storage, auto-verify, rotation).
+
+**Auth:** `Authorization: Bearer <token>` (or `x-auth-token`) from `POST /auth/login`.
+
+### Provider - Create
+
+**Endpoint:** `POST /gateway/providers`
+
+**Description:** Creates a blank-slate provider row (no auth schema, models, or endpoints yet). `providerKey` must match `/^[a-z0-9_]+$/` (3-50 chars); duplicate keys return 409. Audit-logged as `provider.created`.
+
+**Request:**
+```json
+{
+  "providerKey": "myprovider",
+  "providerName": "My Provider",
+  "category": "ai",
+  "authType": "api_key",
+  "websiteUrl": "https://example.com",
+  "documentationUrl": "https://example.com/docs",
+  "defaultApiBaseUrl": "https://api.example.com/v1"
+}
+```
+
+**Response (201):**
+```json
+{ "success": true, "message": "Provider 'myprovider' created.", "providerId": 16 }
+```
+
+**Errors:** `400` validation (`providerKey` regex/length, `category` must be one of `ai, embedding, vector, storage, graph, image, speech, search, database, email, analytics`, `authType` one of `api_key, bearer_token, oauth2, basic_auth, custom`, URL fields must parse), `409` duplicate key.
+
+### Provider - List
+
+**Endpoint:** `GET /gateway/providers`
+
+**Description:** Catalog rows enriched with the stats the Service Catalog page renders (model/endpoint/capability counts, supported capability keys, pricing flag).
+
+**Response (200):**
+```json
+{ "success": true, "providers": [{ "providerKey": "openai", "providerName": "OpenAI", "category": "ai", "authType": "bearer_token", "models": 5, "endpoints": 0, "capabilities": 7, "capabilityKeys": ["chat", "streaming", "embeddings"], "hasPricing": true }] }
+```
+
+### Provider - Detail
+
+**Endpoint:** `GET /gateway/providers/{key}`
+
+**Description:** Full metadata for one provider, including `capabilities`, `authForm`, and `resourceTemplates` (with their `config` / `config_schema` JSON).
+
+### Provider - Delete
+
+**Endpoint:** `DELETE /gateway/providers/{key}`
+
+**Description:** Hard-deletes a provider from the catalog. Catalog child tables (`provider_models`, `provider_capabilities`, `provider_auth_schemas`, `provider_resource_types`, `provider_endpoints`) cascade; the key becomes immediately reusable. `credentials`/`provider_resources` RESTRICT on `provider_id`, so deleting a provider those rows reference is refused with `409`. Audit-logged (`provider.deleted`).
+
+**Errors:** `404` unknown provider, `409` referenced by tenant credentials/resources.
+
+### Provider Models - CRUD
+
+**Endpoints:** `GET /gateway/providers/{key}/models` · `POST /gateway/providers/{key}/models` · `PUT /gateway/providers/{key}/models/{id}` · `DELETE /gateway/providers/{key}/models/{id}`
+
+**Description:** Models belong to the **provider catalog** (never to a company — tenant access is granted separately via `POST /gateway/credentials/:id/models`). The category is one of `chat`, `embedding`, `reranker`, `image`, `tts`, `stt`, `vision`; the model key is the unique key per provider and **can be renamed** via `PUT` (renaming onto a key already used by another model on the same provider is refused with 409). Pricing is a child of the model and cascades away with it. All three write routes invalidate the registry cache and are audit-logged (`provider.model.upserted` / `updated` / `deleted`).
+
+**UI flow (same walkthrough as [docs/providers.md](providers.md)):** models are managed from the provider's **Models** tab on the Catalog detail page — the wizard never touches models. Click **Add Model**; the first field is the **model name**, and the **model key auto-generates** from it (lowercased, dots and any `@`/`/` preserved, spaces/other chars → `-`; typing in the key manually stops the auto-sync). `category` drives which Config-page dropdown a model appears in (`chat` → LLM/small LLM, `embedding` → embedding, `reranker` → reranker). Optional capability toggles (`streaming`/`functionCalling`/`vision`) and context/output windows are stored as row flags. A **starting price** (input/output `$ / 1M`) creates the first pricing row immediately; otherwise pricing is managed inline on the Models tab (time-bucketed `effectiveAt`/`expiresAt` history, add/edit/delete via `/gateway/pricing`). **Edit** opens the same modal prefilled with the key editable (rename is supported — pricing + tenant `credential_model_access` grants follow the model row; renaming onto an existing key on the same provider is refused); **delete** is a hard delete that cascades pricing + tenant `credential_model_access` grants. After every create/update/delete the **registry cache is invalidated**, so the model appears in the provider's Models tab **and** every company Config-page model dropdown immediately.
+
+> **Cloudflare model IDs (`@cf/…`):** the runtime passes config model values **verbatim** to Workers AI (`/ai/run/{model}`), so full IDs like `@cf/meta/llama-3.3-70b-instruct-fp8` work end-to-end once set on the Config page. The catalog accepts these as model keys too — the key charset includes `@`, `/` and mixed case (e.g. `@cf/moondream/moondream3.1-9B-A2B`) — and the Add Model modal's auto-key preserves `@`/`/`.
+
+#### Model - List
+
+**Endpoint:** `GET /gateway/providers/{key}/models`
+
+**Description:** Models for a provider; each entry carries its current price row (from `pricing`).
+
+**Example (curl):**
+```bash
+curl http://localhost:3000/gateway/providers/openai/models \
+  -H "Authorization: Bearer <token>"
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "providerKey": "openai",
+  "models": [
+    {
+      "id": 42,
+      "model_key": "gpt-4o-mini",
+      "model_name": "GPT-4o Mini",
+      "model_family": "gpt-4o",
+      "category": "chat",
+      "supports_streaming": true,
+      "supports_function_calling": true,
+      "supports_vision": false,
+      "max_context_window": 128000,
+      "max_output_tokens": 16384,
+      "pricing": [
+        { "effective_at": "2025-01-01", "input_price_per_million": "0.150", "output_price_per_million": "0.600", "currency": "USD", "is_current": true }
+      ]
+    }
+  ]
+}
+```
+
+**Errors:** `404` unknown provider.
+
+#### Model - Upsert (create or refresh)
+
+**Endpoint:** `POST /gateway/providers/{key}/models`
+
+**Description:** Upserts a single model for a provider — the importer only runs full definitions, so this is the UI's way to add one model at a time. Upsert semantics: the same `provider_id + model_key` refreshes the row in place (no duplicate). An optional `pricing` array adds price rows (`effectiveFrom` defaults to today, `priceCurrency` to `USD`).
+
+**Request:**
+```json
+{
+  "key": "gpt-4o-mini",
+  "name": "GPT-4o Mini",
+  "category": "chat",
+  "family": "gpt-4o",
+  "streaming": true,
+  "functionCalling": true,
+  "vision": false,
+  "maxContextWindow": 128000,
+  "maxOutputTokens": 16384,
+  "pricing": [
+    { "inputPricePerMillion": 0.15, "outputPricePerMillion": 0.6 }
+  ]
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` (or `modelKey`) | string | Yes | Model key: 1-100 chars, `/^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/` — plain slugs (`gpt-4o-mini`) or vendor-prefixed IDs (`@cf/baai/bge-base-en-v1.5`, `xai/grok-4.6`, `@cf/moondream/moondream3.1-9B-A2B`) |
+| `name` (or `modelName`) | string | Yes | Display name (max 200 chars) |
+| `category` | string | Yes | One of `chat`, `embedding`, `reranker`, `image`, `tts`, `stt`, `vision` |
+| `family` | string | No | Model family label |
+| `streaming` / `functionCalling` / `vision` | boolean | No | Capability flags (default `false`) |
+| `maxContextWindow` | integer | No | Context window in tokens |
+| `maxOutputTokens` | integer | No | Max output tokens |
+| `pricing` | array | No | Price rows: `{ effectiveFrom?, inputPricePerMillion?, outputPricePerMillion?, priceCurrency? }` — note these keys use `inputPricePerMillion`/`outputPricePerMillion`, **not** the `pricePerMillionInput`/`pricePerMillionOutput` shape of `POST /gateway/pricing`; unknown keys are silently stored as `null` |
+
+**Example (curl):**
+```bash
+curl -X POST http://localhost:3000/gateway/providers/openai/models \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "gpt-4o-mini",
+    "name": "GPT-4o Mini",
+    "category": "chat",
+    "family": "gpt-4o",
+    "streaming": true,
+    "functionCalling": true,
+    "vision": false,
+    "maxContextWindow": 128000,
+    "maxOutputTokens": 16384,
+    "pricing": [
+      { "inputPricePerMillion": 0.15, "outputPricePerMillion": 0.6 }
+    ]
+  }'
+```
+
+Cloudflare-prefixed keys work the same way — vendor IDs are passed through verbatim:
+```bash
+curl -X POST http://localhost:3000/gateway/providers/cloudflare_worker_ai/models \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "@cf/baai/bge-base-en-v1.5",
+    "name": "BGE Base (English) v1.5",
+    "category": "embedding",
+    "maxContextWindow": 512
+  }'
+```
+
+**Response (201):**
+```json
+{ "success": true, "message": "Model 'gpt-4o-mini' upserted for 'openai'. 1 price row(s) added.", "modelId": 42 }
+```
+
+**Errors:** `400` bad key regex/length, missing name, or category not in the ENUM; `404` unknown provider.
+
+#### Model - Update
+
+**Endpoint:** `PUT /gateway/providers/{key}/models/{id}`
+
+**Description:** Partial update of a model's metadata. Present fields are merged over the stored row; `name`/`category` are re-validated. The **model key is editable** — sending a different `key` renames the model (pricing and credential model-access grants follow the row); a rename that collides with an existing key on the same provider returns **409**. Pass an explicit `null` to clear optional fields (`family`, `maxContextWindow`, `maxOutputTokens`). Pricing is managed via `/gateway/pricing`, not here.
+
+**Request:**
+```json
+{ "name": "GPT-4o Mini (fast)", "streaming": true, "maxContextWindow": 128000 }
+```
+
+**Example (curl):**
+```bash
+curl -X PUT http://localhost:3000/gateway/providers/openai/models/42 \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "GPT-4o Mini (fast)",
+    "streaming": true,
+    "maxContextWindow": 128000
+  }'
+```
+
+**Response (200):**
+```json
+{ "success": true, "message": "Model 'gpt-4o-mini' updated for 'openai'.", "modelId": 42 }
+```
+
+**Errors:** `400` empty name, bad category, or invalid key format; `404` unknown provider or model id not owned by that provider; `409` rename onto an existing key on the same provider.
+
+#### Model - Delete
+
+**Endpoint:** `DELETE /gateway/providers/{key}/models/{id}`
+
+**Description:** Hard-deletes a model. Pricing rows and `credential_model_access` grants for it CASCADE (`schema/v5.sql` FKs), so tenant grants disappear with the model.
+
+**Example (curl):**
+```bash
+curl -X DELETE http://localhost:3000/gateway/providers/openai/models/42 \
+  -H "Authorization: Bearer <token>"
+```
+
+**Response (200):**
+```json
+{ "success": true, "message": "Model 'gpt-4o-mini' deleted for 'openai'." }
+```
+
+**Errors:** `404` unknown provider or model id not owned by that provider.
+
+### Endpoints - CRUD
+
+**Endpoints:** `GET /gateway/endpoints` · `POST /gateway/endpoints` · `PUT /gateway/endpoints/{id}` · `DELETE /gateway/endpoints/{id}`
+
+**Description:** Catalog of API endpoints per provider. `endpointKey` must match `/^[a-z0-9_-]+$/` (2-100 chars); `method` one of `GET/POST/PUT/DELETE/PATCH`; `pathTemplate` like `/v1/chat/completions`; `bodyParams` is a JSON-encoded string. Creating an endpoint that overlaps an existing one on the same provider+method is rejected (409). Deleting an endpoint referenced by a pricing row is refused (409). Audit-logged (`endpoint.created/updated/deleted`).
+
+**Create request:**
+```json
+{
+  "providerKey": "openai",
+  "endpointKey": "chat_completions",
+  "method": "POST",
+  "pathTemplate": "/v1/chat/completions",
+  "description": "Create a chat completion",
+  "category": "ai"
+}
+```
+
+### Pricing - CRUD
+
+**Endpoints:** `GET /gateway/pricing` · `POST /gateway/pricing` · `PUT /gateway/pricing/{id}` · `DELETE /gateway/pricing/{id}`
+
+**Description:** Price rows per model (optionally per endpoint). `pricePerMillionInput` / `pricePerMillionOutput` are DECIMAL values; `effectiveAt` / `expiresAt` are `YYYY-MM-DD`. `GET /gateway/pricing` accepts `?modelId=` and `?provider=` filters. Audit-logged (`pricing.created/updated/deleted`).
+
+**Create request:**
+```json
+{
+  "modelId": 3,
+  "endpointId": 5,
+  "pricePerMillionInput": 2.5,
+  "pricePerMillionOutput": 10,
+  "currency": "USD",
+  "effectiveAt": "2026-08-01"
+}
+```
+
+---
+
+### Gateway - Knowledge Bases
+
+**Endpoints:** `GET /gateway/kbs/options` · `GET /gateway/kbs` · `POST /gateway/kbs` · `GET /gateway/kbs/{key}` · `PUT /gateway/kbs/{key}` · `DELETE /gateway/kbs/{key}` · `POST /gateway/kbs/{key}/ingest` · `GET /gateway/kbs/{key}/status`
+
+**Description:** Tenant-scoped RAG knowledge bases (rows in the `knowledge_bases` table). All routes require the `x-company-name` header (or `?company=` / `body.company`) and resolve the tenant via the gateway `companies` table. KBs can bind `provider_resources` rows (vector index / storage bucket) and a catalog embedding model, falling back to the company's RAG config when unset. Ingestion uploads chunks under the R2 `kb/<kbKey>/` prefix, tracks progress in a per-KB registry (`processed-<company>-<kbKey>.json`), and flips the KB `status` (`indexing` → `active` / `error`). Graph RAG is stored disabled in M2.
+
+**Create request:**
+```json
+{
+  "kbKey": "popularcert-kb",
+  "kbName": "PopularCert KB",
+  "description": "Certification docs",
+  "chunkSize": 512,
+  "chunkOverlap": 50,
+  "retrievalTopK": 10,
+  "retrievalScoreThreshold": 0.7,
+  "enableHybridSearch": true,
+  "enableGraphRag": false,
+  "isActive": true
+}
+```
+
+**Responses:** `POST /gateway/kbs` → `201 { success, message, kbId, kbKey }`. `GET /gateway/kbs` → `{ success, kbs: [...] }` (each row denormalized with `vector_resource_name` / `vector_external_id` / `storage_resource_name` / `storage_external_id` / `embedding_model_key` / `embedding_model_name` from the KB_SELECT join). `GET /gateway/kbs/{key}/status` → `{ success, status: { kbKey, status, inProgress, lastSyncAt, documentCount, vectorCount, lastError } }` — `vectorCount` is best-effort (null when Vectorize is unreachable), `lastSyncAt` maps to the row `updated_at` (last status flip), `lastError` comes from the live job state. `POST /gateway/kbs/{key}/ingest` → `409` when an ingest for the same KB is already running; success → `{ success, message, startedAt }`. Audit actions: `kb.created`, `kb.updated`, `kb.deleted`, `kb.ingest.started`, `kb.ingest.failed`. Errors: `400` validation / resource ownership, `404` unknown company or KB, `409` duplicate key / KB limit reached / ingest already running.
+
+---
+
 ## RAG Pipeline Overview
 
 For AI agents understanding the data flow:
@@ -1342,9 +1649,6 @@ User Question (with x-company-name header)
 | `LLM_MODEL` | Primary LLM | `@cf/meta/llama-3.1-8b-instruct-fp8` |
 | `SMALL_LLM` | Query rewriting LLM | `@cf/meta/llama-3.2-3b-instruct` |
 | `RERANKING_MODEL` | Reranking model | `@cf/baai/bge-reranker-base` |
-| `RATE_LIMIT_GLOBAL` | Global rate limit | `100` |
-| `RATE_LIMIT_AI` | AI rate limit | `20` |
-| `RATE_LIMIT_ADMIN` | Admin rate limit | `30` |
 | `DELAY_MS` | Ingestion delay | Optional |
 | `BATCH_SIZE` | Ingestion batch size | Optional |
 | `CONTACT_US_URL` | Contact page URL | `https://popularcert.com/contact-us/` |

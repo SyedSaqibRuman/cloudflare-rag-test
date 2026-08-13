@@ -1,6 +1,6 @@
 # API: Config
 
-Manage runtime configuration such as the WordPress domain URL, AI model settings, Cloudflare resource selection (vector indexes, R2 buckets), and the system prompt. All config endpoints require the `x-company-name` header to specify which company's config to read or modify.
+Manage runtime configuration such as the WordPress domain URL, AI model settings, Cloudflare resource selection (vector indexes, R2 buckets), and the system prompt. All config endpoints require the `x-company-name` header to specify which company's config to read or modify, and sit behind admin auth — attach the token from `POST /auth/login` via `Authorization: Bearer <token>` (required when `ADMIN_USERNAME` / `ADMIN_PASSWORD` are set in `.env`).
 
 ## Get Current Config
 
@@ -16,15 +16,15 @@ Returns the current runtime configuration for the specified company.
 ```bash
 curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/config
 
-# With API key
-curl -H "x-api-key: YOUR_ADMIN_API_KEY" -H "x-company-name: popularcert" http://localhost:3000/cloudflare/config
+# With admin token
+curl -H "Authorization: Bearer <token>" -H "x-company-name: popularcert" http://localhost:3000/cloudflare/config
 ```
 
 **Response (400 — missing header):**
 ```json
 {
   "success": false,
-  "error": "x-company-name header is required."
+  "error": "Company is required (x-company-name header, ?company=, or body.company)."
 }
 ```
 
@@ -142,14 +142,14 @@ Resource keys (`VECTOR_INDEX`, `R2_BUCKET_NAME`) can be updated using the `key`/
 POST /cloudflare/config/reset
 ```
 
-Resets the entire runtime config to environment defaults, removes all companies, recreates a single default company, and deletes the persisted `runtime-config.json` file. This is a nuclear reset.
+Resets the **entire** config store: removes all companies and recreates a single default company. This is a nuclear reset — use it carefully. To reset just one company, use `POST /cloudflare/companies/:name/reset` instead.
 
 **Example:**
 ```bash
 curl -X POST http://localhost:3000/cloudflare/config/reset
 
-# With API key
-curl -X POST -H "x-api-key: YOUR_ADMIN_API_KEY" http://localhost:3000/cloudflare/config/reset
+# With admin token
+curl -X POST -H "Authorization: Bearer <token>" http://localhost:3000/cloudflare/config/reset
 ```
 
 **Response (200):**
@@ -195,8 +195,8 @@ AI models are configurable at runtime without restarting the server. Changes tak
 
 - Model values are validated against an allowlist before being applied
 - When `EMBEDDING_MODEL` changes, `EMBEDDING_DIMENSIONS` is automatically updated to match
-- Changes are persisted to `runtime-config.json` on disk and survive server restarts
-- Use `POST /cloudflare/config/reset` to revert to environment defaults
+- Changes are persisted per company in the config store (MySQL `company_config` or `db/<company>.db`) and survive server restarts
+- Use `POST /cloudflare/companies/:name/reset` to revert one company to defaults
 
 ### Example: Switch to a Larger LLM
 
@@ -204,7 +204,7 @@ AI models are configurable at runtime without restarting the server. Changes tak
 # Switch primary LLM to 70B parameter model
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -d '{"key": "LLM_MODEL", "value": "@cf/meta/llama-3.3-70b-instruct-fp8"}'
 ```
 
@@ -214,7 +214,7 @@ curl -X PUT http://localhost:3000/cloudflare/config \
 # Switch to multilingual embedding model (dimensions auto-update to 1024)
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -d '{"key": "EMBEDDING_MODEL", "value": "@cf/baai/bge-m3"}'
 ```
 
@@ -230,17 +230,17 @@ Vector indexes and R2 buckets are configurable at runtime without restarting the
 
 | Key | Purpose | Default | Validation |
 |-----|---------|---------|------------|
-| `VECTOR_INDEX` | Vectorize index for semantic search | From `VECTOR_INDEX` env var | Lowercase letters, numbers, hyphens only; 3–63 characters |
-| `R2_BUCKET_NAME` | R2 bucket storing chunk data | From `R2_BUCKET_NAME` env var | Lowercase letters, numbers, hyphens only; 3–63 characters |
+| `VECTOR_INDEX` | Vectorize index for semantic search | Empty — set per company | Lowercase letters, numbers, hyphens only; 3–63 characters |
+| `R2_BUCKET_NAME` | R2 bucket storing chunk data | Empty — set per company | Lowercase letters, numbers, hyphens only; 3–63 characters |
 
 ### How It Works
 
 - Resource names are validated against Cloudflare naming rules before being applied
 - Changes take effect immediately — no server restart required
 - Each request reads the current config, so you can switch resources on the fly
-- Values fall back to environment variables if not set in runtime config
-- Changes are persisted to `runtime-config.json` on disk and survive server restarts
-- Use `POST /cloudflare/config/reset` to revert to environment defaults
+- Values fall back to the hardcoded defaults in `config/schema.js` when unset (nothing is seeded from env)
+- Changes are persisted per company in the config store (MySQL `company_config` or `db/<company>.db`) and survive server restarts
+- Use `POST /cloudflare/companies/:name/reset` to revert one company to defaults
 
 ### Example: Switch Vector Index
 
@@ -248,7 +248,7 @@ Vector indexes and R2 buckets are configurable at runtime without restarting the
 # Switch to a different vector index
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -H "x-company-name: popularcert" \
   -d '{"key": "VECTOR_INDEX", "value": "production-index"}'
 ```
@@ -259,7 +259,7 @@ curl -X PUT http://localhost:3000/cloudflare/config \
 # Switch to a different R2 bucket
 curl -X PUT http://localhost:3000/cloudflare/config \
   -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_ADMIN_API_KEY" \
+  -H "Authorization: Bearer <token>" \
   -H "x-company-name: popularcert" \
   -d '{"key": "R2_BUCKET_NAME", "value": "production-bucket"}'
 ```
@@ -269,11 +269,11 @@ curl -X PUT http://localhost:3000/cloudflare/config \
 Before switching, you can discover available resources:
 
 ```bash
-# List all vector indexes
-curl http://localhost:3000/cloudflare/indexes
+# List all vector indexes (company required)
+curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/indexes
 
-# List all R2 buckets
-curl http://localhost:3000/cloudflare/buckets
+# List all R2 buckets (company required)
+curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/buckets
 ```
 
 > **Warning:** Ensure the selected vector index and R2 bucket contain matching data. Switching to an index that was not populated from the same bucket will produce incorrect or empty results.
@@ -380,7 +380,7 @@ curl -X PUT http://localhost:3000/cloudflare/prompt \
 
 ### How It Works
 
-- The template is stored in `runtime-config.json` as `SYSTEM_PROMPT`
+- The template is stored per company as `SYSTEM_PROMPT` in the config store (MySQL `company_config` or `db/<company>.db`)
 - Variables like `{{CONSULTANT_NAME}}` are replaced with live config values at request time
 - If a config value changes (e.g., consultant name), the prompt updates automatically without restarting
 - Use `POST /cloudflare/prompt/reset` to revert to the default template
