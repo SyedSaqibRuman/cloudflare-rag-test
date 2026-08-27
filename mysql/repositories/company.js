@@ -35,9 +35,24 @@ export const CompanyRepository = {
     return rows[0] || null;
   },
 
+  /** Fetch one company by numeric id (credential routes need it from a row's company_id). */
+  async findById(id) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, company_key, company_name, legal_name, email, billing_email,
+              website, plan_tier, status, is_active,
+              max_credentials, max_storage_gb, max_monthly_requests,
+              max_knowledge_bases, max_assistants, created_at
+         FROM companies
+        WHERE id = ? AND deleted_at IS NULL`,
+      [id]
+    );
+    return rows[0] || null;
+  },
+
   async create(input) {
     const pool = await getPool();
-    const [result] = await pool.query(
+    await pool.query(
       `INSERT INTO companies
          (company_key, company_name, email, plan_tier, max_knowledge_bases, max_assistants)
        VALUES (?, ?, ?, ?, ?, ?)`,

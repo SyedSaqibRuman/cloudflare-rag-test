@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   listGatewayCompanies,
-  getGatewayCompany,
   listCredentials,
   listProviderModels,
   listKbs,
@@ -9,11 +8,13 @@ import {
   createAssistant,
   updateAssistant,
   deleteAssistant,
+  api,
 } from "../api";
-import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton } from "../components/ui";
+import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton, Toggle } from "../components/ui";
 import { useCompanies } from "../context";
 import { timeAgo } from "../util";
 import { useHeaderActions } from "../components/Layout";
+import { useToast, usePagination } from "../hooks";
 
 // -------- helpers -----------------------------------------------------------
 
@@ -50,17 +51,39 @@ function IconTrash() {
   );
 }
 
+/** Simple client-side prompt preview: resolves {{KEY}} → value from variables + company config. */
+function renderPromptPreview(template, variables, companyConfig = {}, assistantName = "") {
+  if (!template) return "(no system prompt)";
+  let out = template;
+  const defaults = {
+    COMPANY_NAME: companyConfig.COMPANY_NAME || "",
+    CONSULTANT_NAME: assistantName || companyConfig.CONSULTANT_NAME || companyConfig.COMPANY_NAME || "",
+    CONTACT_US_URL: companyConfig.CONTACT_US_URL || "",
+    LOCATIONS_URL: companyConfig.LOCATIONS_URL || "",
+    SERVICES_URL: companyConfig.SERVICES_URL || "",
+    BASE_URL: companyConfig.BASE_URL || "",
+  };
+  for (const [key, value] of Object.entries(defaults)) {
+    out = out.replaceAll(`{{${key}}}`, value || "");
+  }
+  for (const { key, value } of variables || []) {
+    if (key.trim()) out = out.replaceAll(`{{${key.trim()}}}`, value || "(empty)");
+  }
+  return out;
+}
+
 // -------- page --------------------------------------------------------------
 
 export default function Assistants() {
   const { company } = useCompanies();
   const [companies, setCompanies] = useState([]);
   const [companyKey, setCompanyKey] = useState("");
-  const [detail, setDetail] = useState(null);
   const [assistants, setAssistants] = useState([]);
+  const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { toast, notify } = useToast();
+  const { page, perPage, setPage, setPerPage, paginationParams } = usePagination();
 
   // Modal state
   const [modal, setModal] = useState(null); // null | { assistant }
@@ -74,36 +97,34 @@ export default function Assistants() {
     modelId: "",
     primaryKbId: "",
     systemPrompt: "",
+    variables: [],
     temperature: "0.7",
     maxTokens: "4096",
     enableFunctionCalling: true,
     enableStreaming: true,
     isPublic: false,
   });
+  const [editingVarIndex, setEditingVarIndex] = useState(null);
   const [keyTouched, setKeyTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busy, setBusy] = useState(false);
-
-  const notify = (msg, tone = "green") => {
-    setToast({ msg, tone });
-    setTimeout(() => setToast(null), 3000);
-  };
+  const [modalTab, setModalTab] = useState("general"); // "general" | "prompt"
+  const [companyConfig, setCompanyConfig] = useState({});
 
   const load = async (key) => {
     if (!key) {
       setAssistants([]);
-      setDetail(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const [d, list] = await Promise.all([getGatewayCompany(key), listAssistants(key)]);
-      setDetail(d);
-      setAssistants(list);
+      const result = await listAssistants(key, paginationParams);
+      setAssistants(result.items);
+      setPagination(result.pagination);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -116,7 +137,8 @@ export default function Assistants() {
     (async () => {
       setError(null);
       try {
-        const cs = await listGatewayCompanies();
+        const csResult = await listGatewayCompanies();
+        const cs = csResult.items ?? csResult;
         setCompanies(cs);
         const preferred = company && cs.some((c) => c.company_key === company) ? company : cs[0]?.company_key;
         setCompanyKey(preferred || "");
@@ -136,19 +158,33 @@ export default function Assistants() {
 
   useEffect(() => {
     load(companyKey);
+    // Intentionally keyed on companyKey only — switching assistant reloads;
+    // a changed `load` identity should not retrigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyKey]);
+
+  const closeModal = () => {
+    setModal(null);
+    setEditingVarIndex(null);
+  };
 
   const openModal = async (assistant) => {
     setFormError(null);
     setKeyTouched(false);
     setModels([]);
+    setModalTab("general");
     setModal({ assistant: assistant || null });
     if (!companyKey) return;
     try {
-      const [c, k] = await Promise.all([listCredentials(companyKey), listKbs(companyKey)]);
+      const [c, k, configData] = await Promise.all([
+        listCredentials(companyKey),
+        listKbs(companyKey),
+        api(`/cloudflare/config?company=${encodeURIComponent(companyKey)}`),
+      ]);
       setCreds(c);
       setKbs(k);
+      setCompanyConfig(configData?.config?.GENERAL || {});
+      const companySystemPrompt = configData?.config?.GENERAL?.SYSTEM_PROMPT || "";
       if (assistant) {
         setForm({
           assistantKey: assistant.assistant_key,
@@ -157,6 +193,7 @@ export default function Assistants() {
           modelId: assistant.model_id ? String(assistant.model_id) : "",
           primaryKbId: assistant.primary_kb_id ? String(assistant.primary_kb_id) : "",
           systemPrompt: assistant.system_prompt || "",
+          variables: assistant.assistant_variables?.length ? assistant.assistant_variables : [],
           temperature: String(assistant.temperature ?? 0.7),
           maxTokens: String(assistant.max_tokens ?? 4096),
           enableFunctionCalling: !!assistant.enable_function_calling,
@@ -173,7 +210,8 @@ export default function Assistants() {
           credentialId: "",
           modelId: "",
           primaryKbId: "",
-          systemPrompt: "",
+          systemPrompt: companySystemPrompt,
+          variables: [],
           temperature: "0.7",
           maxTokens: "4096",
           enableFunctionCalling: true,
@@ -203,7 +241,8 @@ export default function Assistants() {
     setForm((f) => ({
       ...f,
       assistantName: v,
-      assistantKey: keyTouched ? f.assistantKey : slugify(v),
+      // Don't touch the key in edit mode — it's the immutable route identity.
+      assistantKey: modal?.assistant ? f.assistantKey : (keyTouched ? f.assistantKey : slugify(v)),
     }));
   };
 
@@ -221,6 +260,7 @@ export default function Assistants() {
         modelId: form.modelId ? Number(form.modelId) : null,
         primaryKbId: form.primaryKbId ? Number(form.primaryKbId) : null,
         systemPrompt: form.systemPrompt.trim() || null,
+        variables: form.variables.filter((v) => v.key.trim()),
         temperature: Number(form.temperature),
         maxTokens: Number(form.maxTokens),
         enableFunctionCalling: form.enableFunctionCalling,
@@ -264,7 +304,7 @@ export default function Assistants() {
       <Button variant="secondary" onClick={() => load(companyKey)} disabled={loading || !companyKey}>
         {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
       </Button>
-      <Button onClick={() => openModal(null)} disabled={!companyKey}>
+      <Button onClick={() => openModal(null)} disabled={!companyKey || !companies.length} className="whitespace-nowrap">
         <IconPlus /> New Assistant
       </Button>
     </div>
@@ -289,7 +329,17 @@ export default function Assistants() {
 
       <Card
         title={`Assistants${companyKey ? ` — ${companyKey}` : ""}`}
-        subtitle={`${assistants.length} assistant${assistants.length === 1 ? "" : "s"} — a persona bound to a credential, a model, and optional knowledge bases (Phase F)`}
+        subtitle={`${pagination?.total ?? assistants.length} assistant${(pagination?.total ?? assistants.length) === 1 ? "" : "s"} — a persona bound to a credential, a model, and optional knowledge bases`}
+        footer={pagination && pagination.total > perPage && (
+          <Pagination
+            page={page}
+            perPage={perPage}
+            total={pagination.total}
+            onPageChange={setPage}
+            onPerPageChange={setPerPage}
+            loading={loading}
+          />
+        )}
       >
         {assistants.length === 0 ? (
           <Empty message="No assistants yet. Create one — pick a credential, a model from its provider, and optional knowledge bases." />
@@ -340,11 +390,11 @@ export default function Assistants() {
       <Modal
         open={modal !== null}
         title={modal?.assistant ? `Edit assistant — ${modal.assistant.assistant_key}` : "New assistant"}
-        onClose={() => setModal(null)}
+        onClose={closeModal}
         wide
         footer={
           <>
-            <Button variant="secondary" onClick={() => setModal(null)}>Cancel</Button>
+            <Button variant="secondary" onClick={closeModal}>Cancel</Button>
             <Button onClick={save} disabled={saving}>
               {saving ? <Spinner className="h-3.5 w-3.5" /> : modal?.assistant ? "Save changes" : "Create assistant"}
             </Button>
@@ -355,115 +405,261 @@ export default function Assistants() {
           {formError && (
             <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{formError}</div>
           )}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input
-              label="Assistant name *"
-              value={form.assistantName}
-              onChange={(e) => onName(e.target.value)}
-              placeholder="e.g. Sarah the Certification Coach"
-              autoFocus
-            />
-            <div>
-              <Input
-                label="Assistant key *"
-                value={form.assistantKey}
-                disabled={!!modal?.assistant}
-                onChange={(e) => {
-                  setKeyTouched(true);
-                  setForm((f) => ({ ...f, assistantKey: e.target.value }));
-                }}
-                placeholder="auto-generated from the name"
+
+          {/* ---- Tabs ---- */}
+          <div className="flex border-b border-slate-800">
+            {["general", "prompt"].map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setModalTab(tab)}
+                className={`-mb-px px-4 py-2 text-sm font-medium transition-colors ${
+                  modalTab === tab
+                    ? "border-b-2 border-indigo-500 text-indigo-300"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}
+              >
+                {tab === "general" ? "General" : "Prompt"}
+              </button>
+            ))}
+          </div>
+
+          {/* ---- General tab ---- */}
+          {modalTab === "general" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Input
+                  label="Assistant name *"
+                  value={form.assistantName}
+                  onChange={(e) => onName(e.target.value)}
+                  placeholder="e.g. Sarah the Certification Coach"
+                  autoFocus
+                />
+                <div>
+                  <Input
+                    label="Assistant key *"
+                    value={form.assistantKey}
+                    disabled={!!modal?.assistant}
+                    onChange={(e) => {
+                      setKeyTouched(true);
+                      setForm((f) => ({ ...f, assistantKey: e.target.value }));
+                    }}
+                    placeholder="auto-generated from the name"
+                  />
+                  {!modal?.assistant && (
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      {keyTouched
+                        ? "Manual value — type in the name field to re-sync it."
+                        : "Auto-generated from the name (lowercase, spaces → -)."}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <Select
+                label="Credential * (supplies the API key at runtime)"
+                options={[
+                  { value: "", label: "— select a credential —" },
+                  ...creds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
+                ]}
+                value={form.credentialId}
+                onChange={(e) => onCredential(e.target.value)}
               />
-              {!modal?.assistant && (
-                <p className="mt-1.5 text-[11px] text-slate-500">
-                  {keyTouched
-                    ? "Manual value — type in the name field to re-sync it."
-                    : "Auto-generated from the name (lowercase, spaces → -)."}
-                </p>
-              )}
+              <Select
+                label="Model (from the credential's provider)"
+                options={[
+                  { value: "", label: "— provider default —" },
+                  ...models.map((m) => ({ value: String(m.id), label: `${m.model_name} · ${m.category}` })),
+                ]}
+                value={form.modelId}
+                onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
+              />
+              <Select
+                label="Primary knowledge base"
+                options={[
+                  { value: "", label: "— none —" },
+                  ...kbs.map((k) => ({ value: String(k.id), label: k.kb_name })),
+                ]}
+                value={form.primaryKbId}
+                onChange={(e) => setForm((f) => ({ ...f, primaryKbId: e.target.value }))}
+              />
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <Input
+                    label="Temperature"
+                    type="number"
+                    step="0.1"
+                    min={0}
+                    max={2}
+                    value={form.temperature}
+                    onChange={(e) => setForm((f) => ({ ...f, temperature: e.target.value }))}
+                  />
+                  <p className="mt-1.5 text-[11px] text-slate-500">Lower = focused and deterministic. Higher = more creative and varied.</p>
+                </div>
+                <div>
+                  <Input
+                    label="Max tokens"
+                    type="number"
+                    min={1}
+                    value={form.maxTokens}
+                    onChange={(e) => setForm((f) => ({ ...f, maxTokens: e.target.value }))}
+                  />
+                  <p className="mt-1.5 text-[11px] text-slate-500">Hard cap on the response length. One token ≈ 0.75 words.</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-slate-300">
+                <span className="flex items-center gap-2">
+                  Enable streaming
+                  <Toggle
+                    checked={form.enableStreaming}
+                    onChange={(v) => setForm((f) => ({ ...f, enableStreaming: v }))}
+                    title="Toggle streaming"
+                  />
+                </span>
+                <span className="flex items-center gap-2">
+                  Function calling
+                  <Toggle
+                    checked={form.enableFunctionCalling}
+                    onChange={(v) => setForm((f) => ({ ...f, enableFunctionCalling: v }))}
+                    title="Toggle function calling"
+                  />
+                </span>
+                <span className="flex items-center gap-2">
+                  Public
+                  <Toggle
+                    checked={form.isPublic}
+                    onChange={(v) => setForm((f) => ({ ...f, isPublic: v }))}
+                    title="Toggle public access"
+                  />
+                </span>
+              </div>
             </div>
-          </div>
-          <Select
-            label="Credential * (supplies the API key at runtime)"
-            options={[
-              { value: "", label: "— select a credential —" },
-              ...creds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
-            ]}
-            value={form.credentialId}
-            onChange={(e) => onCredential(e.target.value)}
-          />
-          <Select
-            label="Model (from the credential's provider)"
-            options={[
-              { value: "", label: "— provider default —" },
-              ...models.map((m) => ({ value: String(m.id), label: `${m.model_name} · ${m.category}` })),
-            ]}
-            value={form.modelId}
-            onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
-          />
-          <Select
-            label="Primary knowledge base"
-            options={[
-              { value: "", label: "— none —" },
-              ...kbs.map((k) => ({ value: String(k.id), label: k.kb_name })),
-            ]}
-            value={form.primaryKbId}
-            onChange={(e) => setForm((f) => ({ ...f, primaryKbId: e.target.value }))}
-          />
-          <TextArea
-            label="System prompt"
-            rows={4}
-            value={form.systemPrompt}
-            onChange={(e) => setForm((f) => ({ ...f, systemPrompt: e.target.value }))}
-            placeholder="You are a helpful certification coach…"
-          />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input
-              label="Temperature"
-              type="number"
-              step="0.1"
-              min={0}
-              max={2}
-              value={form.temperature}
-              onChange={(e) => setForm((f) => ({ ...f, temperature: e.target.value }))}
-            />
-            <Input
-              label="Max tokens"
-              type="number"
-              min={1}
-              value={form.maxTokens}
-              onChange={(e) => setForm((f) => ({ ...f, maxTokens: e.target.value }))}
-            />
-          </div>
-          <label className="flex items-center gap-5 text-sm text-slate-300">
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.enableStreaming}
-                onChange={(e) => setForm((f) => ({ ...f, enableStreaming: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
+          )}
+
+          {/* ---- Prompt tab ---- */}
+          {modalTab === "prompt" && (
+            <div className="space-y-4">
+              <TextArea
+                label="System prompt"
+                rows={6}
+                value={form.systemPrompt}
+                onChange={(e) => setForm((f) => ({ ...f, systemPrompt: e.target.value }))}
+                placeholder="You are a helpful certification coach…"
               />
-              Enable streaming
-            </span>
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.enableFunctionCalling}
-                onChange={(e) => setForm((f) => ({ ...f, enableFunctionCalling: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
-              />
-              Function calling
-            </span>
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.isPublic}
-                onChange={(e) => setForm((f) => ({ ...f, isPublic: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
-              />
-              Public
-            </span>
-          </label>
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-slate-300">Built-in variables</p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { key: "COMPANY_NAME", value: companyConfig.COMPANY_NAME || "", label: "Company Display Name" },
+                    { key: "CONSULTANT_NAME", value: companyConfig.CONSULTANT_NAME || "", label: "Assistant Name" },
+                    { key: "CONTACT_US_URL", value: companyConfig.CONTACT_US_URL || "", label: "Contact Us URL" },
+                    { key: "LOCATIONS_URL", value: companyConfig.LOCATIONS_URL || "", label: "Locations URL" },
+                    { key: "SERVICES_URL", value: companyConfig.SERVICES_URL || "", label: "Services URL" },
+                    { key: "BASE_URL", value: companyConfig.BASE_URL || "", label: "Base URL" },
+                  ].map((v) => (
+                    <span
+                      key={v.key}
+                      title={`${v.label}: ${v.value || "not set"}`}
+                      onClick={() => { navigator.clipboard?.writeText(`{{${v.key}}}`); notify(`Copied {{${v.key}}}`, "green"); }}
+                      className="cursor-pointer rounded-md border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                    >
+                      {`{{${v.key}}}`}
+                    </span>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500">Click a variable to copy it, then paste it into the system prompt above.</p>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-slate-300">Custom Variables</p>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingVarIndex(null); setForm((f) => ({ ...f, variables: [...f.variables, { key: "", value: "" }] })); }}
+                    className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                  >
+                    + Add variable
+                  </button>
+                </div>
+                {form.variables.length === 0 && (
+                  <p className="text-[11px] text-slate-500">No variables. Use {'{{KEY}}'} in the system prompt and add key-value pairs here to inject values at runtime.</p>
+                )}
+                <div className="space-y-1.5">
+                  {form.variables.map((v, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      {editingVarIndex === i ? (
+                        <>
+                          <Input
+                            value={v.key}
+                            onChange={(e) => setForm((f) => ({ ...f, variables: f.variables.map((x, j) => j === i ? { ...x, key: e.target.value } : x) }))}
+                            placeholder="KEY"
+                            className="flex-1 py-1.5 text-xs"
+                          />
+                          <span className="text-slate-500">=</span>
+                          <Input
+                            value={v.value}
+                            onChange={(e) => setForm((f) => ({ ...f, variables: f.variables.map((x, j) => j === i ? { ...x, value: e.target.value } : x) }))}
+                            placeholder="value"
+                            className="flex-1 py-1.5 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setEditingVarIndex(null)}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-emerald-300 transition-colors hover:border-emerald-500 hover:text-emerald-200"
+                            title="Save"
+                          >
+                            ✓
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => { navigator.clipboard?.writeText(`{{${v.key}}}`); notify(`Copied {{${v.key}}}`, "green"); }}
+                            className="flex items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                            title={`Copy {{${v.key}}}`}
+                          >
+                            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                          </button>
+                          <div className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-left text-xs text-slate-300">
+                            <span className="font-medium text-slate-200">{v.key || "KEY"}</span>
+                            <span className="text-slate-500"> = </span>
+                            <span className="text-slate-400">{v.value || "(empty)"}</span>
+                            <span className="ml-2 font-mono text-indigo-400">{`{{${v.key}}}`}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setEditingVarIndex(i)}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                            title="Edit variable"
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setForm((f) => ({ ...f, variables: f.variables.filter((_, j) => j !== i) }))}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-rose-300 transition-colors hover:border-rose-500 hover:text-rose-200"
+                            title="Remove variable"
+                          >
+                            ×
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Prompt preview */}
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">Prompt preview</p>
+                <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">
+                  {renderPromptPreview(form.systemPrompt, form.variables, companyConfig, form.assistantName)}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </Modal>
 

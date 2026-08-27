@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { listLogs, readLog, clearLog, downloadLog, downloadAllLogs } from "../api";
-import { Card, Button, Spinner, Empty, Badge, Select } from "../components/ui";
+import { Card, Button, Spinner, Empty, Badge, Select, Skeleton, Toast } from "../components/ui";
 import { useHeaderActions } from "../components/Layout";
-import { usePoll } from "../hooks";
+import { usePoll, useToast } from "../hooks";
 import { cx, timeAgo } from "../util";
 
 function formatSize(bytes) {
@@ -50,6 +50,11 @@ const FILE_META = {
     tone: "cyan",
     desc: "R2 object upload tracking",
   },
+  "UI.logs": {
+    label: "UI Toasts",
+    tone: "indigo",
+    desc: "Toast notifications shown in the admin portal",
+  },
 };
 
 const metaFor = (name) => FILE_META[name] || { label: "Log", tone: "slate", desc: "Server log file" };
@@ -71,18 +76,13 @@ export default function Logs() {
   const [loadingContent, setLoadingContent] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
-
-  const notify = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2500);
-  };
+  const { toast, notify } = useToast(2500);
 
   const load = async () => {
     setError(null);
     try {
       const res = await listLogs();
-      const list = res.files || [];
+      const list = (res.files || []).slice(0, 5);
       setFiles(list);
       setActive((prev) => {
         if (prev && list.some((f) => f.name === prev)) return prev;
@@ -212,22 +212,20 @@ export default function Logs() {
                 : undefined
             }
           >
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
               {files.map((f) => {
                 const meta = metaFor(f.name);
                 const preview = previews[f.name] || { lineCount: 0, lines: [] };
                 const isActive = active === f.name;
 
                 return (
-                  <div
+                  <button
                     key={f.name}
-                    role="button"
-                    tabIndex={0}
+                    type="button"
                     aria-pressed={isActive}
                     onClick={() => setActive(f.name)}
-                    onKeyDown={(e) => e.key === "Enter" && setActive(f.name)}
                     className={cx(
-                      "group flex cursor-pointer flex-col rounded-xl border bg-slate-950/60 p-4 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400",
+                      "group flex cursor-pointer flex-col rounded-xl border bg-slate-950/60 p-4 text-left transition-all focus-visible:ring-2 focus-visible:ring-indigo-400",
                       isActive
                         ? "border-indigo-500/60 ring-1 ring-indigo-500/40"
                         : "border-slate-800 hover:border-indigo-500/40 hover:bg-slate-900"
@@ -294,7 +292,7 @@ export default function Logs() {
                         </svg>
                       </button>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -330,8 +328,10 @@ export default function Logs() {
               }
             >
               {loadingContent ? (
-                <div className="flex items-center justify-center py-16">
-                  <Spinner className="h-6 w-6" />
+                <div className="space-y-2 py-4">
+                  {Array.from({ length: 8 }, (_, i) => (
+                    <Skeleton key={i} className={cx("h-3.5 rounded", i % 3 === 2 ? "w-3/5" : i % 2 === 0 ? "w-full" : "w-4/5")} />
+                  ))}
                 </div>
               ) : data?.error ? (
                 <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{data.error}</div>
@@ -352,11 +352,7 @@ export default function Logs() {
         </div>
       )}
 
-      {toast && (
-        <div role="status" aria-live="polite" className="fixed bottom-6 right-6 z-50">
-          <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm text-emerald-200 shadow-xl">{toast}</div>
-        </div>
-      )}
+      <Toast message={toast?.msg} tone={toast?.tone} />
     </div>
   );
 }

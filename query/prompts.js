@@ -9,20 +9,23 @@ export const generateUrl = (url, label = "") =>
 // --------------------------
 // SYSTEM MESSAGE
 // --------------------------
-export function getSystemMessage(companyName) {
+export function getSystemMessage(companyName, systemPromptOverride = null, assistantName = null, variables = []) {
   const config = getConfig(companyName);
-  const template = config.SYSTEM_PROMPT || "";
-  const content = resolvePromptVariables(template, config);
+  // The selected assistant's system prompt replaces the company default; the
+  // {{VARIABLES}} templating resolves with the assistant name overriding
+  // CONSULTANT_NAME when one is selected.
+  const template = systemPromptOverride || config.SYSTEM_PROMPT || "";
+  const content = resolvePromptVariables(template, config, { assistantName, variables });
   return { role: "system", content };
 }
 
 // --------------------------
 // STATIC RESPONSES
 // --------------------------
-export function buildResponses(companyName) {
+export function buildResponses(companyName, assistantName = null) {
   const config = getConfig(companyName);
   const companyNameStr = config.COMPANY_NAME || "the company";
-  const consultantName = config.CONSULTANT_NAME || "Assistant";
+  const consultantName = assistantName || config.CONSULTANT_NAME || "Assistant";
   const contactUsUrl = config.CONTACT_US_URL || "#";
   const locationsUrl = config.LOCATIONS_URL || "#";
   const servicesUrl = config.SERVICES_URL || "#";

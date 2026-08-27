@@ -1,0 +1,11 @@
+{
+  "post-alpha": "2026-01-01T00:00:00Z",
+  "__meta": {
+    "chunkSize": 512
+  },
+  "__metaFingerprint": "{\"chunkSize\":512}",
+  "post-beta": "2026-01-01T00:00:00Z",
+  "post-gamma": "2026-01-02T00:00:00Z",
+  "post-1": "2026-01-01T00:00:00Z",
+  "post-2": "2026-01-02T00:00:00Z"
+}

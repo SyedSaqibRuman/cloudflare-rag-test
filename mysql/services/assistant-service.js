@@ -6,7 +6,6 @@
 // router can map them to 4xx.
 // --------------------------
 import {
-  CompanyRepository,
   CredentialRepository,
   ModelRepository,
   ResourceRepository,
@@ -17,10 +16,13 @@ import {
 
 export const ASSISTANT_KEY_RE = /^[a-z0-9-]+$/;
 
-export class HttpError extends Error {
+// Backward-compatible HttpError — extends AppError so the error handler
+// middleware recognizes it and the test suite's `instanceof HttpError` checks pass.
+import { AppError } from "../../shared/errors.js";
+
+export class HttpError extends AppError {
   constructor(status, message) {
-    super(message);
-    this.status = status;
+    super(message, status);
   }
 }
 
@@ -73,6 +75,23 @@ export function validateAssistantInput(input = {}) {
     errors.systemPrompt = "systemPrompt must be at most 65535 characters.";
   }
 
+  if (input.variables !== undefined && input.variables !== null) {
+    if (!Array.isArray(input.variables)) {
+      errors.variables = "variables must be an array of {key, value} objects.";
+    } else {
+      for (const v of input.variables) {
+        if (!v?.key || !String(v.key).trim()) {
+          errors.variables = "Each variable must have a non-empty key.";
+          break;
+        }
+        if (typeof v.value !== "string") {
+          errors.variables = "Each variable value must be a string.";
+          break;
+        }
+      }
+    }
+  }
+
   if (input.temperature !== undefined && input.temperature !== null) {
     const t = Number(input.temperature);
     if (!Number.isFinite(t) || t < 0 || t > 2) {
@@ -97,6 +116,7 @@ export function validateAssistantInput(input = {}) {
       credentialId: Number(input.credentialId),
       modelId: input.modelId ? Number(input.modelId) : null,
       systemPrompt: input.systemPrompt?.trim() || null,
+      variables: input.variables == null ? [] : Array.isArray(input.variables) ? input.variables.map((v) => ({ key: String(v.key).trim(), value: String(v.value) })) : [],
       temperature: input.temperature === undefined || input.temperature === null ? 0.7 : Number(input.temperature),
       maxTokens: input.maxTokens === undefined || input.maxTokens === null ? 4096 : Number(input.maxTokens),
       enableFunctionCalling: input.enableFunctionCalling !== false,

@@ -172,7 +172,7 @@ export async function upsertVectors(
       const vectorIndex = indexName;
       if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
-      const res = await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
+      await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
         account_id: accountId(companyName),
         "unparsable-behavior": "error",
         body: ndjson,
@@ -196,9 +196,9 @@ export async function upsertVectors(
 // --------------------------
 // 🔹 Vector Query
 // --------------------------
-export async function vectorQuery(vector, topK, companyName) {
+export async function vectorQuery(vector, topK, companyName, { indexName = null } = {}) {
   try {
-    const vectorIndex = getVectorIndex(companyName);
+    const vectorIndex = indexName || getVectorIndex(companyName);
     if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
     const res = await getCFClient(companyName).vectorize.indexes.query(vectorIndex, {

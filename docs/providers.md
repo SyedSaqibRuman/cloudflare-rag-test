@@ -1,144 +1,98 @@
-# Providers — Adding & Editing
+# Providers — 9Router-style Connect & Manage
 
-A **provider** is the top-level entry in the AI gateway catalog (admin portal → **Catalog** page). It describes an AI/infrastructure service (OpenAI, Cloudflare Workers AI, a vector database, object storage, …) so that the rest of the platform can reference it: the **Credentials** page collects API keys per provider, the **Config** page lets a company pick its models/resources from this catalog, and knowledge bases can bind provider resources.
+A **provider** is the top-level entry in the AI gateway catalog (admin portal → **Providers** page, nav label "Providers" → `#catalog`). It describes an AI/infrastructure service (OpenAI, Cloudflare Workers AI, a vector database, object storage, …) so the rest of the platform can reference it: the **Connections** page collects API keys per provider, the **Config** page lets a company pick its models/resources from this catalog, and knowledge bases can bind provider resources.
 
-All provider management happens through the **5-step wizard** in the admin portal — there is no raw SQL needed.
+The page is modeled on **9Router's providers page**: a searchable grid of provider cards grouped by **how they authenticate** (Custom / OAuth / API Key), each card showing the selected company's live connection state, with per-section **Test All** batch verification and a hover toggle that disables every connection at once.
 
----
-
-## Where providers live (data model)
-
-| Table | Holds |
-|-------|-------|
-| `providers` | key, name, category, auth type, URLs, logo |
-| `provider_auth_schemas` | the **credential form fields** (what the Credentials page asks for) |
-| `provider_endpoints` | API endpoints for this provider |
-| `provider_resource_types` | resource templates (vector index, object bucket, …) |
-| `provider_capabilities` / `provider_models` / `pricing` | capabilities + models + prices — **not** managed by the wizard |
-
-> Models, pricing, and capabilities are added afterward from the **provider detail page**, not from the wizard.
+> **No provider-creation wizard.** The catalog is seeded via migrations (`migrations/010_seed_9router_catalog.sql`); new providers are added as **Custom (OpenAI/Anthropic Compatible)** endpoints from the page itself. Provider management is limited to connections + models on the detail page — endpoints, pricing, and capabilities are managed via the API/imports, not the portal.
 
 ---
 
-## Adding a provider (New Provider wizard)
+## The Providers page (list view)
 
-Click **New Provider** — it's the button in the Catalog header, inside the provider dropdown, and on a provider's detail page. A 5-step wizard opens; the current step is highlighted in indigo and completed steps are clickable back-links. A collapsible **"How to add a provider"** help panel (open by default) sits under the step indicator, and its highlighted tip follows the step you're on.
+### Sections
 
-### Step 1 — Basics
-- **Provider name\*** — e.g. "Cloudflare Workers AI". The **provider key auto-generates** from it: lowercased, spaces → `_` → `cloudflare_workers_ai`.
-- **Provider key\*** — the stable route ID. Must match `/^[a-z0-9_]+$/`, 3–50 chars. Once you type in it manually it stops auto-syncing with the name. **This can never be changed later.**
-- **Service category\*** — `ai`, `embedding`, `vector`, `storage`, `graph`, `image`, `speech`, `search`, `database`, `email`, or `analytics`. Drives the card color/group on the Catalog grid and whether the provider is treated as AI (models/pricing) or infrastructure (capabilities).
-- **Website / Docs / Logo URLs** — optional; must be valid URLs (logo persists to `providers.logo_url`).
+| Section | Contains | Header action |
+|---------|----------|---------------|
+| **Custom Providers** | OpenAI/Anthropic-compatible endpoints added via the quick-add modal (provider keys prefixed `oc_` / `ac_`) | **Add Anthropic Compatible** / **Add OpenAI Compatible** |
+| **OAuth Providers** | Providers whose auth type is `oauth2` | **Test All** |
+| **API Key Providers** | Everything else (`api_key`, `bearer_token`, `basic_auth`, `custom`) | **Test All** + **Show all N providers** (first 20 shown) |
 
-### Step 2 — Auth defaults
-- **Auth type\*** — `api_key`, `bearer_token`, `oauth2`, `basic_auth`, or `custom`. Stored on the provider row.
-- **Auth header name** — default `Authorization`; where the credential is attached when making calls.
-- **Default API base URL** — the base endpoint callers hit.
-- **API key format regex** — optional; validated live as you type (must be a valid RegExp). Used later on the Credentials page to sanity-check the format of entered values — it validates entry format, not access at request time.
+### Provider cards
 
-### Step 3 — Credential form fields (→ `provider_auth_schemas`)
-This is what end users see on the **Credentials** page when connecting this provider. Each row becomes one input on that form:
-- **Field name\*** (e.g. `api_key`), **Field label\*** (e.g. "API Key"), **Field type** — `text`, `password`, `textarea`, `select`, `url`, `email`, `numeric`, `json`, `file`.
-- **Required** / **Encrypted at rest** toggles.
-- Placeholder, help text, validation regex, display order, group (`main`/`advanced`), width (`full`/`half`/`third`/`quarter`).
-- **Storage path (in blob)** — defaults to the field name. ⚠ Renaming a field later changes where values are stored: previously-saved credential values keyed by the old path get **orphaned**. The wizard warns about this inline and suggests pinning the storage path to the original value.
+Each card (9Router layout):
 
-### Step 4 — Endpoints & resource types
-- **Endpoints** (→ `provider_endpoints`): **Name first** (e.g. "Chat Completions"), and the **endpoint key auto-generates** from it — lowercased, spaces → `-` → `chat-completions` (matches `/^[a-z0-9-]+$/`). Typing in the key manually stops the auto-sync; editing an existing endpoint keeps its key. Also: HTTP method, URL (valid `http`/`https`), timeout, and a **default** flag.
-- **Resource types** (→ `provider_resource_types`): **Display name first** (e.g. "Vectorize Index"), and the **resource type auto-matches** from it (e.g. `vector_index`; `object_bucket`, `sql_database`, `graph_database`, `kv_namespace`, … are picked up from the name keywords). Choosing the type from the dropdown manually stops the auto-match; editing an existing one keeps its type. Also: description, required, `config_schema` (the dynamic fields the provisioning form renders), and max-per-credential. These drive the **Resources** card on the Credentials page: once a company connects a credential for this provider, it can provision actual resources (vector index, bucket, …) whose type must match one of these templates.
+- **Icon tile** — the provider's `logo_url` on a category-colored background, falling back to the first two letters of the key.
+- **Name**.
+- **Status badges**, computed from the selected company's credentials:
+  - `N Connected` (green dot) — active credentials with `last_verification_status = success`.
+  - `N Error (CODE)` (red dot) — active credentials whose last verification failed, with a short diagnosis tag (`AUTH` / `429` / `5XX` / `NET` / `RUNTIME` / `ERR`) plus the relative time of the latest error.
+  - `No connections` — when the company has no credential for this provider.
+  - `Disabled` (⏸) — every credential for this provider is inactive.
+- **Disable toggle** (appears on hover when the provider has connections) — flips `is_active` on all of the company's credentials for that provider (`PUT /gateway/credentials/:id` with `{ isActive }`).
+- Clicking the card opens the **provider detail page**.
 
-### Step 5 — Review & confirm
-- Shows the key/name/category/auth type, the field/endpoint/resource lists, and the exact **row counts** that will be written per table.
-- A **"No models attached"** warning reminds you models are added afterward from the detail page.
-- **Save as Draft** stores the whole wizard state in `localStorage` (a restore/discard banner appears next time); **Create Provider** submits.
+### Search & company scope
 
----
+- The **search box** filters by provider name or key across all sections.
+- Connection state is **per company** — the page follows the sidebar's company picker (falling back to the first gateway company).
 
-## Editing a provider
+### Test All (batch verification)
 
-Click the **pencil** icon on a catalog row, or **Edit Provider** on the detail page. The **same 5-step wizard** opens, but:
+Each non-custom section has a **Test All** button that runs the same decrypt → auth-schema validation → live-probe pipeline as the per-credential verify endpoint over every **active** credential in that section (`POST /gateway/credentials/test-batch`, body `{ companyKey, group }`). The results modal shows:
 
-- **Everything is prefilled** from the provider's current state (`authForm`, `endpoints`, `resourceTemplates` are mapped back into the wizard).
-- The **provider key is locked** — it is the route identity and cannot be changed.
-- Title reads **EDIT PROVIDER**, the footer button reads **Save Changes**, and there is no Save-as-Draft.
-- **Removals actually apply**: saving uses `replaceChildren: true`, which deletes any field/endpoint/resource-type row **not** in your new definition — the sections become exactly what you see. Removing a whole section deletes all of that provider's rows for it. Capabilities, models, and pricing are **never** touched by the wizard.
+- A summary (`N passed` / `N failed` / `N tested`).
+- One row per credential: name, provider, latency, and an OK / diagnosis badge.
 
----
+### Adding a custom provider (OpenAI/Anthropic Compatible)
 
-## What happens under the hood (both flows)
+The **Add OpenAI Compatible** / **Add Anthropic Compatible** buttons open a small modal (mirrors 9Router's `AddCompatibleModal`):
 
-1. The wizard builds a **flat provider definition** and POSTs it to `POST /gateway/providers/import` with `{ replaceChildren: true|false }`.
-2. `validateProviderDefinition` normalizes both the wrapped (`{ provider, authentication }`) and flat (`{ providerKey, authFields }`) shapes and rejects bad keys/categories/URLs with a **400** before any DB work.
-3. `importProviderDefinition` runs inside **one transaction**:
-   - `upsertProvider` → `INSERT … ON DUPLICATE KEY UPDATE` on `providers` (including `logo_url`)
-   - then upserts each auth field, endpoint, capability, resource type, and (if provided) model + pricing
-   - if `replaceChildren`, the three `delete*NotIn` repository methods run **after** the upserts — `NOT IN (…)` with your keep-list, or a plain `DELETE … WHERE provider_id = ?` when a section is empty
-   - commit (or full rollback on any failure — e.g. an FK error from pricing rows referencing a removed endpoint aborts the whole save)
-4. The provider **registry cache is invalidated and reloaded**, so the list/detail views reflect the change immediately.
+1. **Name** — the provider key auto-generates as `oc_<name>` / `ac_<name>` (lowercase, spaces → `_`; the key charset is `/^[a-z0-9_]+$/`, so the compatible prefixes use underscores).
+2. **Base URL** — defaulted to `https://api.openai.com/v1` / `https://api.anthropic.com/v1`; this becomes `default_api_base_url`.
+3. **API Key (for Check)** — optional; a **Check** button probes `{baseUrl}/models` with `Authorization: Bearer <key>` to prove the endpoint is reachable before creating.
+
+On create the provider is stored via `POST /gateway/providers` (category `ai`, auth type `bearer_token`) and the page navigates to its detail page. The card appears under **Custom Providers**.
 
 ---
 
-## Models — adding, editing & pricing
+## Provider detail page
 
-Models are owned by a **provider** (catalog-level, not tenant-level) and are managed from the provider's detail page: click a provider card on the Catalog grid, then open the **Models** tab. The wizard never touches models — they're added here, one at a time, or in bulk by re-importing provider JSON.
+The detail page is intentionally slim — **connections + models only** (the 9Router model):
 
-### Adding a model (Add Model modal)
+### Connections card
 
-Click **Add Model** on the Models tab. The modal's first field is the **model name**, and the **model key auto-generates** from it:
+Lists every credential the selected company has for this provider (including disabled ones):
 
-| Field | Notes |
-|-------|-------|
-| **Model name** * | Display name, e.g. `GPT-4o` or `Claude 3.5 Sonnet`. Autofocused. |
-| **Model key** * | **Auto-generates from the name**: lowercased, dots and any `@`/`/` preserved, spaces/other chars → `-` (`Claude 3.5 Sonnet` → `claude-3.5-sonnet`). Typing in the key manually stops the auto-sync. Must match `/^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/` (≤ 100 chars) — plain slugs (`gpt-4o`) or vendor-prefixed IDs (`@cf/baai/bge-base-en-v1.5`, `xai/grok-4.6`). **Editable after creation** (rename in the edit modal; collisions with an existing key on the same provider are refused). |
-| **Family** (optional) | e.g. `gpt-4`, `llama` — groups related models. |
-| **Category** * | One of `chat`, `embedding`, `reranker`, `image`, `tts`, `stt`, `vision`. Drives which Config-page dropdown a model appears in (chat → LLM/small LLM, embedding → embedding, reranker → reranker). |
-| **Streaming / Function calling / Vision** | Capability toggles stored as flags on the row. |
-| **Max context window / Max output tokens** | Optional numbers (e.g. `128000` / `4096`). |
-| **Starting price** (optional) | Input + Output `$ / 1M` tokens — creates the first pricing row immediately. Leave both blank to add pricing later via the inline table. |
+- Each row: name, status badge (`verified` / `error` / `untested` / `disabled`), environment, default flag, and the latest verification error.
+- Actions per row: **Verify** (re-runs the probe), **Edit**, **Delete**, and an enable/disable toggle.
+- **Add Connection** opens the credential modal (auth schema from the provider, **Check Connection** pre-save probe, secrets encrypted at rest), and newly saved credentials are **auto-verified** (result shown in a toast).
 
-### Editing & deleting a model
+### Models card
 
-- **Edit** — pencil icon on a model row → the same modal opens **prefilled** (name, key, family, category, flags, context/output). The **key is now editable too** — type a new key and save to rename it (`PUT /gateway/providers/{key}/models/{id}`); pricing and credential model-access grants follow the model row. Pricing fields stay hidden in edit mode (pricing has its own inline flow).
-- **Delete** — trash icon → `DELETE /gateway/providers/{key}/models/{id}`. This is a **hard delete**: pricing rows and any tenant `credential_model_access` grants **cascade away** with the model.
-- ⚠ **Renaming onto an existing key is refused** — the key is the unique key per provider (`provider_id, model_key`), so a rename that collides with another model on the same provider returns `409`.
+Lists the provider's catalog models (key, name, category, stream/tools/vision flags, context window):
 
-### Pricing (inline on the Models tab)
+- **Add Model** / edit / delete via the model modal (`POST|PUT|DELETE /gateway/providers/{key}/models[/{id}]`).
+- **Test** (flask icon) runs a live chat completion through the company's credential via the executor (`POST /gateway/companies/:key/execute/chat`) and shows the latency or upstream error — the 9Router per-model test.
 
-Every model row shows its **price history inline** — no expand needed. Each price row carries `effectiveAt`/`expiresAt` (time-bucketed history, so old prices stay queryable):
+### Header actions
 
-- A **current** price (no expiry) is green-badged; **past** prices (expired) are muted.
-- **Add price** (small button in the model's price area) → `POST /gateway/pricing` with input/output `$ / 1M` + currency + effective date.
-- **Pencil / trash** on a row → `PUT /gateway/pricing/{id}` / `DELETE /gateway/pricing/{id}` (a price referenced as the model's current price is protected).
-- Rows refresh automatically after every add/edit/delete — no manual reload.
-
-### Under the hood (model CRUD)
-
-| Route | What it does |
-|-------|-------------|
-| `GET /gateway/providers/{key}/models` | List the provider's models, each with its current price row (from `pricing`). |
-| `POST /gateway/providers/{key}/models` | **Upsert** a single model — same `provider_id + model_key` refreshes the row in place; body may include `pricing: [{ inputPricePerMillion, outputPricePerMillion, … }]` to create the first price row. Validates key format, required name, and category. |
-| `PUT /gateway/providers/{key}/models/{id}` | Update metadata — **including the model key (rename)**. `key` in the body may differ from the stored key; renaming onto an existing key on the same provider returns 409. |
-| `DELETE /gateway/providers/{key}/models/{id}` | Hard delete; pricing + `credential_model_access` cascade (see `schema/v5.sql`). |
-
-After every create/update/delete the **registry cache is invalidated**, so the model shows up immediately in the provider's Models tab **and** in every company Config-page model dropdown.
-
-> **Cloudflare model IDs (`@cf/…`):** the runtime passes config model values **verbatim** to Workers AI (`/ai/run/{model}`), so full IDs like `@cf/meta/llama-3.3-70b-instruct-fp8` work end-to-end once set on the Config page. The catalog accepts these IDs as model keys too (the key charset includes `@`, `/` and mixed case, e.g. `@cf/moondream/moondream3.1-9B-A2B`) — add them through the Add Model modal (the auto-key preserves `@`/`/`) and they flow straight into the company Config dropdowns.
+- **Test Provider** — the catalog-level probe modal (`POST /gateway/providers/{key}/test`): format-validate + live probe, or a bare base-URL connectivity check.
+- **Delete Provider** — removes the provider (refused with 409 while tenant credentials/resources reference it unless forced).
 
 ---
 
 ## After you've added a provider
 
-- **Provider detail page** — add **models** and **pricing** rows on the Models tab (see [Models — adding, editing & pricing](#models--adding-editing--pricing)), plus endpoints/capabilities per tab.
-- **Credentials page** — "New credentials → select provider" renders the form defined in Step 3; type the name (auto-lowercased into the key), paste the API key, save, and it **auto-verifies** the credential with an inline probe result. Full walkthrough: [docs/credentials.md](credentials.md).
-- **Resources (Credentials page)** — with a credential saved, the **Resources** card provisions infrastructure under it (`POST /gateway/companies/:key/resources`): pick the provider's resource type from Step 4, fill its `config_schema` fields, and save. `max_per_credential` caps how many of each type a single credential can hold. Full walkthrough: [docs/credentials.md](credentials.md).
-- **Assistants page** — once a credential (and optionally a knowledge base) exists, an assistant binds them into a runtime persona (`/gateway/assistants` CRUD): credential + model from that credential's provider + KBs + system prompt + temperature/tokens.
-- **Config page** — the company's provider/model dropdowns (large/small LLM, embedding, reranker, vector, object storage) can now reference this provider.
-- **Knowledge bases** — KBs can bind this provider's resource types (vector index / object bucket) and catalog embedding models.
+- **Provider detail → Connections card** — "Add Connection" renders the form defined by the provider's auth schema; type the name (auto-lowercased into the key), paste the API key, save, and it **auto-verifies** with an inline probe result. Full walkthrough: [docs/credentials.md](credentials.md).
+- **Config page** — the company's provider/model dropdowns (large/small LLM, embedding, reranker, vector, object storage) can reference this provider.
+- **Assistants / Knowledge Bases** — bind the provider's credentials, models, and resource types.
 
 ---
 
 ## Related
 
-- Gateway API routes: `docs/AI_API_REFERENCE.md` → **Gateway - Provider Catalog**. The wizard saves through `POST /gateway/providers/import` (body `{ definition, replaceChildren }`).
-- Provider wizard implementation: `web/src/pages/catalog/` (`page.jsx` list/detail view, `wizard.jsx` 5-step `ProviderWizardModal`, `modals/` one file per modal).
-- Import/validation logic: `mysql/services/catalog-importer.js`; persistence: `mysql/repositories/catalog-import.js` (`CatalogImportRepository`); registry cache: `mysql/services/provider-registry.js`.
+- Gateway API routes: `docs/AI_API_REFERENCE.md` → **Gateway - Provider Catalog** / credentials endpoints.
+- Batch testing + probes: `mysql/routes/credentials.js` (`POST /gateway/credentials/test-batch`), `mysql/routes/probes.js` (`PROBES` + generic OpenAI-compatible fallback).
+- Portal implementation: `web/src/pages/catalog/` (`page.jsx` list/detail, `components.jsx` cards, `connections-card.jsx`, `models-card.jsx`, `modals/add-compatible-modal.jsx`).
+- Registry cache: `mysql/services/provider-registry.js`; persistence: `mysql/repositories/provider.js`.

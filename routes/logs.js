@@ -1,11 +1,14 @@
 import { Router } from "express";
 import fs from "fs";
 import path from "path";
+import { logToFile } from "../utils/logger.js";
 
 // --------------------------
 // 🔹 Log viewer endpoints (admin-protected via requireAdmin in app.js)
 // Serves the file list in logs/ and the tail of individual log files so the
 // admin portal can display them without exposing the directory statically.
+// Also receives UI toast notifications from the portal and appends them to
+// logs/UI.logs (POST /logs/ui).
 // --------------------------
 const router = Router();
 
@@ -14,6 +17,12 @@ const LOG_DIR = path.resolve(process.cwd(), "logs");
 // Ensure the log directory exists (matches utils/logger.js behavior).
 if (!fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+// A log-viewable file: the server's *.log files plus the portal's UI.logs
+// (toast notifications), which uses the .logs extension by request.
+function isLogFile(name) {
+  return name.endsWith(".log") || name.endsWith(".logs");
 }
 
 function statLog(name) {
@@ -25,12 +34,26 @@ function statLog(name) {
 // 🔹 GET /logs/export — download every log file concatenated
 // Registered before /:name so "export" isn't treated as a file name.
 // --------------------------
+// --------------------------
+// 🔹 POST /logs/ui — record a UI toast notification from the admin portal
+// into logs/UI.logs. Fire-and-forget from the frontend; appends via the same
+// async-batched logger the ingestion pipeline uses (never blocks the caller).
+// --------------------------
+router.post("/ui", (req, res) => {
+  const { message, tone } = req.body || {};
+  if (!message || typeof message !== "string" || !message.trim()) {
+    return res.status(400).json({ success: false, error: "message is required." });
+  }
+  logToFile("UI.logs", `[${tone === "red" ? "error" : "info"}] ${message.trim()}`);
+  res.json({ success: true });
+});
+
 router.get("/export", (req, res) => {
-  let names = [];
+  let names;
   try {
     names = fs
       .readdirSync(LOG_DIR)
-      .filter((name) => name.endsWith(".log") && fs.statSync(path.join(LOG_DIR, name)).isFile())
+      .filter((name) => isLogFile(name) && fs.statSync(path.join(LOG_DIR, name)).isFile())
       .sort();
   } catch (err) {
     return res.status(500).json({ success: false, error: `Failed to read logs: ${err.message}` });
@@ -57,7 +80,7 @@ router.get("/export", (req, res) => {
 // --------------------------
 router.get("/:name/download", (req, res) => {
   const name = path.basename(req.params.name);
-  if (name !== req.params.name || !name.endsWith(".log")) {
+  if (name !== req.params.name || !isLogFile(name)) {
     return res.status(400).json({ success: false, error: "Invalid log file name." });
   }
   const filePath = path.join(LOG_DIR, name);
@@ -78,7 +101,7 @@ router.delete("/", (req, res) => {
   try {
     const names = fs
       .readdirSync(LOG_DIR)
-      .filter((name) => name.endsWith(".log") && fs.statSync(path.join(LOG_DIR, name)).isFile());
+      .filter((name) => isLogFile(name) && fs.statSync(path.join(LOG_DIR, name)).isFile());
     for (const name of names) {
       fs.writeFileSync(path.join(LOG_DIR, name), "");
       cleared += 1;
@@ -94,7 +117,7 @@ router.delete("/", (req, res) => {
 // --------------------------
 router.delete("/:name", (req, res) => {
   const name = path.basename(req.params.name);
-  if (name !== req.params.name || !name.endsWith(".log")) {
+  if (name !== req.params.name || !isLogFile(name)) {
     return res.status(400).json({ success: false, error: "Invalid log file name." });
   }
   const filePath = path.join(LOG_DIR, name);
@@ -114,11 +137,11 @@ router.delete("/:name", (req, res) => {
 // 🔹 GET /logs — list log files (newest first)
 // --------------------------
 router.get("/", (req, res) => {
-  let files = [];
+  let files;
   try {
     files = fs
       .readdirSync(LOG_DIR)
-      .filter((name) => name.endsWith(".log") && fs.statSync(path.join(LOG_DIR, name)).isFile())
+      .filter((name) => isLogFile(name) && fs.statSync(path.join(LOG_DIR, name)).isFile())
       .map(statLog)
       .sort((a, b) => b.mtime.localeCompare(a.mtime));
   } catch (err) {
@@ -133,7 +156,7 @@ router.get("/", (req, res) => {
 // --------------------------
 router.get("/:name", (req, res) => {
   const name = path.basename(req.params.name);
-  if (name !== req.params.name || !name.endsWith(".log")) {
+  if (name !== req.params.name || !isLogFile(name)) {
     return res.status(400).json({ success: false, error: "Invalid log file name." });
   }
   const filePath = path.join(LOG_DIR, name);

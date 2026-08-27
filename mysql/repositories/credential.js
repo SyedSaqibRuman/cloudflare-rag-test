@@ -3,11 +3,16 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 export const CredentialRepository = {
-  async listByCompany(companyId, { includeInactive = false } = {}) {
+  /**
+   * List a company's credentials. With `includeStored` the encrypted blob is
+   * also selected so the route can decrypt NON-SECRET fields for the edit form
+   * (password/secret values never leave the server — the route strips them).
+   */
+  async listByCompany(companyId, { includeInactive = false, includeStored = false } = {}) {
     const pool = await getPool();
     const [rows] = await pool.query(
       `SELECT c.id, c.provider_id, p.provider_key, p.provider_name,
@@ -19,6 +24,7 @@ export const CredentialRepository = {
               c.last_test_latency_ms, c.last_rotated_at, c.next_rotation_at,
               c.rotation_policy, c.auto_rotate_enabled, c.expires_at,
               c.created_at, c.updated_at
+              ${includeStored ? ", c.encrypted_credentials, c.encryption_version" : ""}
          FROM credentials c
          JOIN providers p  ON p.id = c.provider_id
          LEFT JOIN company_environments ce ON ce.id = c.environment_id
@@ -119,9 +125,12 @@ export const CredentialRepository = {
   },
 
   /**
-   * Update credential metadata (name, environment, flags). An optional
-   * `encryptedCredentials` blob is swapped in WITHOUT bumping the rotation
-   * version (unlike `rotate`) — used for in-place edits of secret values.
+   * Update credential metadata (name, environment, flags, is_active). An
+   * optional `encryptedCredentials` blob is swapped in WITHOUT bumping the
+   * rotation version (unlike `rotate`) — used for in-place edits of secret
+   * values. Undefined inputs keep the stored value (is_active included), so
+   * the 9Router-style enable/disable toggle only flips when the caller
+   * actually passes a boolean.
    */
   async update(id, input) {
     const pool = await getPool();
@@ -132,6 +141,7 @@ export const CredentialRepository = {
               config = ?,
               priority = ?,
               is_default = ?,
+              is_active = COALESCE(?, is_active),
               rotation_policy = ?,
               auto_rotate_enabled = ?,
               encrypted_credentials = COALESCE(?, encrypted_credentials),
@@ -143,6 +153,7 @@ export const CredentialRepository = {
         input.config ? JSON.stringify(input.config) : null,
         input.priority ?? null,
         input.isDefault ?? null,
+        input.isActive ?? null,
         input.rotationPolicy ?? null,
         input.autoRotateEnabled ?? null,
         input.encryptedCredentials ?? null,

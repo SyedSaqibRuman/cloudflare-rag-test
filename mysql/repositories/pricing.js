@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 const PRICING_SELECT = `SELECT pmp.id, pmp.provider_model_id, pm.model_key, pm.model_name,

@@ -21,6 +21,11 @@ const PROMPT_KEYS = ["SYSTEM_PROMPT"];
 
 const RESOURCE_KEYS = ["VECTOR_INDEX", "R2_BUCKET_NAME"];
 
+/** Selected chatbot assistant (gateway assistants.assistant_key) — the ask
+ * pipeline resolves this assistant and uses its system prompt / model /
+ * temperature / KB / graph settings instead of the raw company defaults. */
+const ASSISTANT_KEYS = ["ASSISTANT_KEY"];
+
 const CREDENTIAL_KEYS = [
   "CLOUDFLARE_ACCOUNT_ID",
   "CLOUDFLARE_API_TOKEN",
@@ -28,6 +33,13 @@ const CREDENTIAL_KEYS = [
   "R2_SECRET_ACCESS_KEY",
   "R2_TOKEN_VALUE",
   "R2_JURISDICTION_END_POINT",
+  // Neo4j graph connection (GraphRAG). Populated automatically from the
+  // company's neo4j gateway credential (uri/username/password) + its
+  // graph_database resource (database_name) via rag-sync.
+  "NEO4J_URI",
+  "NEO4J_USERNAME",
+  "NEO4J_PASSWORD",
+  "NEO4J_DATABASE",
 ];
 
 /** Per-company API keys that gate the /ask and /ask-stream endpoints. */
@@ -41,12 +53,13 @@ export const COMPANY_KEYS = [
   ...STRING_KEYS,
   ...PROMPT_KEYS,
   ...RESOURCE_KEYS,
+  ...ASSISTANT_KEYS,
   ...CREDENTIAL_KEYS,
   ...SECRET_KEYS,
   ...PROVIDER_KEY,
 ];
 
-export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, ASSISTANT_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
 
 /**
  * Sectioned grouping of company config keys, used by the API (GET /config) and
@@ -57,6 +70,7 @@ export const CONFIG_SECTIONS = [
   { section: "GENERAL", keys: [...URL_KEYS, ...STRING_KEYS] },
   { section: "MODELS", keys: [...PROVIDER_KEY, ...MODEL_KEYS, ...DIMENSION_KEYS] },
   { section: "STORAGE", keys: RESOURCE_KEYS },
+  { section: "ASSISTANT", keys: ASSISTANT_KEYS },
   { section: "CREDENTIALS", keys: CREDENTIAL_KEYS },
 ];
 

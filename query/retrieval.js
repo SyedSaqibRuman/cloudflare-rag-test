@@ -3,7 +3,7 @@ import { vectorQuery } from "../services/vectorize.js";
 import { getChunk } from "../services/r2.js";
 import { rerankMatches } from "./reranker.js";
 import { buildContext } from "./context.js";
-import { keywordScore, hybridScore, dedupeMatches } from "./scoring.js";
+import { hybridScore, dedupeMatches } from "./scoring.js";
 
 // --------------------------
 // CONFIGURATION
@@ -24,11 +24,11 @@ const ABSOLUTE_MIN_SCORE = 0.5;
 //   4. rerankMatches — skips itself when < MIN_RERANK_MATCHES
 //   5. slice top 5 → fetch chunks → buildContext
 // --------------------------
-export async function retrieveContext(question, companyName) {
+export async function retrieveContext(question, companyName, { indexName = null } = {}) {
   const embeddings = await generateEmbeddings([question], companyName);
   if (!embeddings?.[0]) return { context: null, matches: [] };
 
-  const res = await vectorQuery(embeddings[0], VECTOR_LIMIT, companyName);
+  const res = await vectorQuery(embeddings[0], VECTOR_LIMIT, companyName, { indexName });
   let matches = res?.matches || [];
   if (!matches.length) return { context: null, matches: [] };
 

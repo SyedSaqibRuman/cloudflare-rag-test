@@ -4,20 +4,16 @@ import { Card, Button, Input, Badge, Empty, Spinner, Modal, Toast } from "../com
 import { useCompanies } from "../context";
 import { shorten, companyStatus } from "../util";
 import { useHeaderActions } from "../components/Layout";
+import { useToast } from "../hooks";
 
 export default function Companies({ navigate }) {
   const { companies, refresh, select, company } = useCompanies();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { toast, notify } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ name: "", baseUrl: "" });
   const [busy, setBusy] = useState(false);
-
-  const notify = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
 
   const load = async () => {
     setLoading(true);
@@ -81,7 +77,7 @@ export default function Companies({ navigate }) {
       <Button variant="secondary" onClick={load} disabled={loading}>
         {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
       </Button>
-      <Button onClick={() => setCreateOpen(true)}>New Company</Button>
+      <Button onClick={() => setCreateOpen(true)} className="whitespace-nowrap">New Company</Button>
     </div>
   );
 
@@ -141,7 +137,7 @@ export default function Companies({ navigate }) {
                       </div>
                     </td>
                     <td className="py-3"><Badge tone={st.tone}>{st.label}</Badge></td>
-                    <td className="py-3">{c.CONSULTANT_NAME || "—"}</td>
+                    <td className="py-3">{c.assistantName || c.CONSULTANT_NAME || "—"}</td>
                     <td className="py-3">{shorten(c.BASE_URL, 32)}</td>
                     <td className="py-3">
                       {c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-600">—</span>}
@@ -207,7 +203,7 @@ export default function Companies({ navigate }) {
         </div>
       </Modal>
 
-      <Toast message={toast} />
+      <Toast message={toast?.msg} tone={toast?.tone} />
     </div>
   );
 }

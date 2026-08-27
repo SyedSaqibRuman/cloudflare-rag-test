@@ -5,11 +5,13 @@
 import express from "express";
 import {
   AssistantRepository,
-  AuditRepository,
 } from "../repositories.js";
 import * as AssistantService from "../services/assistant-service.js";
 import { requireGatewayCompany } from "../services/company-scope.js";
 import { wrap } from "./helpers.js";
+import { parsePagination, paginate } from "./pagination.js";
+import { actorFromReq } from "./shared-helpers.js";
+import { NotFoundError } from "../../shared/errors.js";
 
 const router = express.Router();
 
@@ -20,7 +22,8 @@ router.get(
   "/assistants",
   wrap(async (req, res) => {
     const assistants = await AssistantRepository.listByCompany(req.company.id);
-    return res.json({ success: true, assistants });
+    const pagination = parsePagination(req);
+    return paginate(res, assistants, pagination, "assistants", "/gateway/assistants");
   })
 );
 
@@ -31,11 +34,10 @@ router.get(
 router.post(
   "/assistants",
   wrap(async (req, res) => {
-    const actor = { actorType: "admin", actorId: req.auth?.user || null, actorIp: req.ip };
     const { assistantId, assistantKey } = await AssistantService.saveAssistant(
       req.company,
       req.body || {},
-      actor
+      actorFromReq(req)
     );
     return res.status(201).json({
       success: true,
@@ -51,9 +53,7 @@ router.get(
   "/assistants/:key",
   wrap(async (req, res) => {
     const assistant = await AssistantRepository.findByKey(req.company.id, req.params.key);
-    if (!assistant) {
-      return res.status(404).json({ success: false, error: `Assistant '${req.params.key}' not found.` });
-    }
+    if (!assistant) throw new NotFoundError(`Assistant '${req.params.key}' not found.`);
     return res.json({ success: true, assistant });
   })
 );
@@ -62,12 +62,11 @@ router.get(
 router.put(
   "/assistants/:key",
   wrap(async (req, res) => {
-    const actor = { actorType: "admin", actorId: req.auth?.user || null, actorIp: req.ip };
     const { assistantId, assistantKey } = await AssistantService.updateAssistant(
       req.company,
       req.params.key,
       req.body || {},
-      actor
+      actorFromReq(req)
     );
     return res.json({
       success: true,
@@ -82,8 +81,7 @@ router.put(
 router.delete(
   "/assistants/:key",
   wrap(async (req, res) => {
-    const actor = { actorType: "admin", actorId: req.auth?.user || null, actorIp: req.ip };
-    await AssistantService.removeAssistant(req.company, req.params.key, actor);
+    await AssistantService.removeAssistant(req.company, req.params.key, actorFromReq(req));
     return res.json({ success: true, message: `Assistant '${req.params.key}' deleted.` });
   })
 );

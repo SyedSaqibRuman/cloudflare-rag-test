@@ -67,12 +67,11 @@ export function rotateCredential(existing, updates = {}, encryptMap = {}) {
 /**
  * Validate plaintext fields against the provider's auth schema.
  * @param {Object<string,string>} fields
- * @param {Array} authSchema  rows from ProviderRepository.authForm()
+ * @param {Array} authSchema  rows from the registry provider entry (authForm)
  * @returns {{ ok: boolean, errors: Object<string,string> }}
  */
 export function validateFieldsAgainstSchema(fields, authSchema) {
   const errors = {};
-  const byName = new Map(authSchema.map((f) => [f.field_name, f]));
   for (const field of authSchema) {
     const value = fields[field.field_name];
     if (field.is_required && (value === undefined || value === null || value === "")) {

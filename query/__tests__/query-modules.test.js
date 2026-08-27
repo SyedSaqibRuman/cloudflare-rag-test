@@ -1,4 +1,4 @@
-import { describe, it, before } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 // Ensure default company config is loaded before tests that need it
@@ -179,7 +179,7 @@ describe("scoring", () => {
 // --------------------------
 // CACHE TESTS
 // --------------------------
-import { getCacheKey, getCached, setCache } from "../cache.js";
+import { getCacheKey, getCached, setCache, clearCompanyCache } from "../cache.js";
 
 describe("cache", () => {
   describe("getCacheKey", () => {
@@ -210,6 +210,15 @@ describe("cache", () => {
       const key = getCacheKey("test", "co");
       assert.match(key, /^[a-f0-9]{32}$/);
     });
+
+    it("scopes the key by assistant so switching assistants misses the cache", () => {
+      const plain = getCacheKey("hello", "company1");
+      const asstA = getCacheKey("hello", "company1", "support-bot");
+      const asstB = getCacheKey("hello", "company1", "sales-bot");
+      assert.notEqual(plain, asstA);
+      assert.notEqual(asstA, asstB);
+      assert.equal(getCacheKey("hello", "company1", "support-bot"), asstA); // deterministic
+    });
   });
 
   describe("getCached / setCache", () => {
@@ -239,6 +248,30 @@ describe("cache", () => {
       setCache(key, "first");
       setCache(key, "second");
       assert.equal(getCached(key), "second");
+    });
+  });
+
+  describe("clearCompanyCache", () => {
+    it("removes only the target company's entries", () => {
+      const keyA = getCacheKey("q-a", "acme");
+      const keyB = getCacheKey("q-b", "acme");
+      const keyOther = getCacheKey("q-c", "globex");
+      setCache(keyA, "a", "acme");
+      setCache(keyB, "b", "acme");
+      setCache(keyOther, "c", "globex");
+
+      const removed = clearCompanyCache("acme");
+      assert.equal(removed, 2);
+      assert.equal(getCached(keyA), null);
+      assert.equal(getCached(keyB), null);
+      assert.deepEqual(getCached(keyOther), "c");
+    });
+
+    it("returns 0 when the company has no entries", () => {
+      const key = getCacheKey("q-d", "acme");
+      setCache(key, "d", "acme");
+      assert.equal(clearCompanyCache("nobody"), 0);
+      assert.deepEqual(getCached(key), "d");
     });
   });
 });

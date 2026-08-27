@@ -37,11 +37,11 @@ export function createRegistry(companyName, kbKey = null, meta = null) {
 
   return {
     isStale(key, modifiedDate) {
-      return (
-        !data[key] ||
-        data[key] !== modifiedDate ||
-        (meta && data.__metaFingerprint !== metaFingerprint)
-      );
+      const recordedDate = data[key];
+      if (!recordedDate) return true; // never recorded
+      if (meta && data.__metaFingerprint !== metaFingerprint) return true; // settings changed
+      // Stale only if recorded date is older than modified date
+      return new Date(recordedDate) < new Date(modifiedDate);
     },
     record(key, modifiedDate) {
       data[key] = modifiedDate;

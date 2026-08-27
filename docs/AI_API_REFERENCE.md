@@ -204,6 +204,10 @@ x-company-name: popularcert
 **Response:** `text/event-stream`
 
 ```
+data: {"token":"__START_RESPONSE__"}
+
+data: {"sources":[{"title":"ISO 9001 in Angola","score":0.86},{"title":"ISO Certification in Seoul","score":0.85}]}
+
 data: {"token":"ISO"}
 
 data: {"token":" 9001"}
@@ -218,6 +222,8 @@ data: [DONE]
 **Event Types:**
 | Event | Format | Description |
 |-------|--------|-------------|
+| Start sentinel | `data: {"token":"__START_RESPONSE__"}` | Sent before the first real token; clears the client's "Thinking..." state |
+| Sources | `data: {"sources":[{title, score}]}` | Retrieval sources for RAG answers (same shape as the non-streaming `/ask` response); emitted before tokens |
 | Token | `data: {"token":"..."}` | Each streamed token |
 | Done | `data: [DONE]` | Stream completed successfully |
 | Error | `data: {"error":"..."}` | Error occurred |
@@ -1305,7 +1311,7 @@ x-company-name: popularcert
 
 The MySQL-backed gateway layer (`/gateway/*`) is a multi-tenant catalog of AI providers, endpoints, and pricing. It powers the admin portal's Catalog page. Every gateway route sits behind `requireAdmin` (same auth as `/cloudflare/*`) and returns **503** when the `MYSQL_*` env vars are unset. Admin routes carry no rate limiter.
 
-> For UI walkthroughs, see [docs/providers.md](providers.md) (Catalog wizard) and [docs/credentials.md](credentials.md) (per-company provider connection, encrypted storage, auto-verify, rotation).
+> For UI walkthroughs, see [docs/providers.md](providers.md) (9Router-style Providers page: status cards, Test All, custom compatible providers) and [docs/credentials.md](credentials.md) (per-company provider connection, encrypted storage, auto-verify, rotation).
 
 **Auth:** `Authorization: Bearer <token>` (or `x-auth-token`) from `POST /auth/login`.
 

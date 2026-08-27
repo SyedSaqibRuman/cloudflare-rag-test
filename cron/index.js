@@ -2,6 +2,7 @@ export {
   startJob,
   stopJob,
   getRunningJobs,
+  standaloneJobs,
   startCron,
   stopCron,
   getJobs,

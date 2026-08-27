@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 process.env.APP_ENCRYPTION_KEY = process.env.APP_ENCRYPTION_KEY || "test-master-key-for-encryption";
 
-const { encryptSecret, decryptSecret, hasEncryptionKey, SENSITIVE_KEYS, SENSITIVE_KEY_SET } =
+const { encryptSecret, decryptSecret, hasEncryptionKey, SENSITIVE_KEY_SET } =
   await import("../encryption.js");
 
 test("SENSITIVE_KEYS covers provider credentials and the ask API key", () => {

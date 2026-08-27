@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 const KB_SELECT = `SELECT k.*,
@@ -57,8 +57,8 @@ export const KbRepository = {
           vector_resource_id, graph_resource_id, storage_resource_id,
           embedding_model_id, embedding_model_provider,
           chunk_size, chunk_overlap, retrieval_top_k, retrieval_score_threshold,
-          enable_graph_rag, enable_hybrid_search, status, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          enable_graph_rag, enable_hybrid_search, source_type, status, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.kbKey,
@@ -75,6 +75,7 @@ export const KbRepository = {
         input.retrievalScoreThreshold ?? 0.7,
         input.enableGraphRag ?? false,
         input.enableHybridSearch ?? true,
+        input.sourceType ?? "wordpress",
         input.status ?? "active",
         input.isActive ?? true,
       ]
@@ -98,6 +99,11 @@ export const KbRepository = {
       retrievalScoreThreshold: "retrieval_score_threshold",
       enableGraphRag: "enable_graph_rag",
       enableHybridSearch: "enable_hybrid_search",
+      sourceType: "source_type",
+      sourceConfig: "source_config",
+      webhookUrl: "webhook_url",
+      webhookSecret: "webhook_secret",
+      webhookEvents: "webhook_events",
       status: "status",
       isActive: "is_active",
     };
@@ -106,7 +112,8 @@ export const KbRepository = {
     for (const [key, column] of Object.entries(columnByKey)) {
       if (input[key] !== undefined) {
         sets.push(`\`${column}\` = ?`);
-        args.push(input[key]);
+        // source_config is a JSON column — must be stringified
+        args.push(key === "sourceConfig" && input[key] != null ? JSON.stringify(input[key]) : input[key]);
       }
     }
     if (sets.length === 0) return;
@@ -126,6 +133,48 @@ export const KbRepository = {
   async setStatus(kbId, status) {
     const pool = await getPool();
     await pool.query(`UPDATE knowledge_bases SET status = ? WHERE id = ?`, [status, kbId]);
+  },
+
+  /** Persist ingestion statistics from the last completed run. */
+  /** Update source_config (JSON blob for URL/file sources). */
+  async setSourceConfig(kbId, config) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET source_config = ? WHERE id = ?`,
+      [config ? JSON.stringify(config) : null, kbId]
+    );
+  },
+
+  async setIngestionStats(kbId, stats) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET
+         last_ingestion_at = NOW(),
+         last_ingestion_duration_ms = ?,
+         last_ingestion_documents_processed = ?,
+         last_ingestion_documents_skipped = ?,
+         last_ingestion_chunks_created = ?,
+         last_ingestion_mode = ?,
+         last_error = NULL
+       WHERE id = ?`,
+      [
+        stats.durationMs ?? null,
+        stats.documentsProcessed ?? null,
+        stats.documentsSkipped ?? null,
+        stats.chunksCreated ?? null,
+        stats.mode ?? null,
+        kbId,
+      ]
+    );
+  },
+
+  /** Record an ingestion error on the KB row. */
+  async setIngestionError(kbId, errorMessage) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET last_error = ? WHERE id = ?`,
+      [errorMessage, kbId]
+    );
   },
 };
 

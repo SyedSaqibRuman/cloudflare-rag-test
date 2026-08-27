@@ -175,3 +175,39 @@ test("API key gate: correct key passes without an origin", async () => {
     server.close();
   }
 });
+
+test("POST /ask/reset requires the company header and API key", async () => {
+  const server = await listen(makeApp());
+  try {
+    const missing = await post(server, "/ask/reset", {});
+    assert.equal(missing.res.status, 400);
+
+    const noKey = await post(server, "/ask/reset", {}, { "x-company-name": "testco" });
+    assert.equal(noKey.res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test("POST /ask/reset clears the company's cache and reports the count", async () => {
+  const { getCacheKey, setCache, getCached } = await import("../../query/cache.js");
+  // Prime the cache with one entry for testco (the API-key gate was enabled in
+  // an earlier test, so send the key) and one for a different company.
+  setCache(getCacheKey("reset-me", "testco"), { answer: "stale" }, "testco");
+  setCache(getCacheKey("keep-me", "otherco"), { answer: "fresh" }, "otherco");
+
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await post(server, "/ask/reset", {}, {
+      "x-company-name": "testco",
+      "x-api-key": "pk_testkey123456",
+    });
+    assert.equal(res.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(json.cleared, 1);
+    assert.equal(getCached(getCacheKey("reset-me", "testco")), null);
+    assert.deepEqual(getCached(getCacheKey("keep-me", "otherco")), { answer: "fresh" });
+  } finally {
+    server.close();
+  }
+});

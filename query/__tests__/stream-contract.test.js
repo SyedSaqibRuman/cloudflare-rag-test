@@ -4,6 +4,9 @@ import {
   START_SENTINEL,
   DONE_FRAME,
   frameToken,
+  frameSources,
+  frameStart,
+  framePossibleQuestions,
   frameError,
   createStreamTransport,
   createSseParser,
@@ -15,16 +18,71 @@ function makeTransport(opts = {}) {
   return { frames, transport };
 }
 
-test("frameToken/frameError produce the documented SSE frames", () => {
+test("frameToken/frameSources/frameStart/framePossibleQuestions/frameError produce the documented SSE frames", () => {
   assert.equal(frameToken("x"), 'data: {"token":"x"}\n\n');
+  assert.equal(
+    frameSources([{ title: "Doc", score: 0.9 }]),
+    'data: {"sources":[{"title":"Doc","score":0.9}]}\n\n'
+  );
+  assert.deepEqual(
+    JSON.parse(frameStart({ sources: [], matches: [], graph: null }).slice(6)),
+    { __start: true, sources: [], matches: [], graph: null }
+  );
+  assert.deepEqual(
+    JSON.parse(framePossibleQuestions(["Q1", "Q2"]).slice(6)),
+    { possibleQuestions: ["Q1", "Q2"] }
+  );
   assert.equal(frameError("boom"), 'data: {"error":"boom"}\n\n');
 });
 
-test("sendStart emits the sentinel token frame", () => {
+test("sendSources emits the sources frame", () => {
+  const { frames, transport } = makeTransport();
+  transport.sendSources([{ title: "Doc", score: 0.9 }]);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0].slice(6)), { sources: [{ title: "Doc", score: 0.9 }] });
+});
+
+test("sendStart emits the structured start frame by default", () => {
   const { frames, transport } = makeTransport();
   transport.sendStart();
   assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0].slice(6)), { __start: true, sources: [], matches: [], graph: null });
+});
+
+test("sendStart emits the legacy sentinel when __start is false", () => {
+  const { frames, transport } = makeTransport();
+  transport.sendStart({ __start: false });
+  assert.equal(frames.length, 1);
   assert.deepEqual(JSON.parse(frames[0].slice(6)), { token: START_SENTINEL });
+});
+
+test("sendStart carries sources, matches, and graph metadata", () => {
+  const { frames, transport } = makeTransport();
+  transport.sendStart({
+    sources: [{ title: "Doc", score: 0.9 }],
+    matches: [{ id: "m1", score: 0.9 }],
+    graph: { cypher: "MATCH", context: "ctx" },
+  });
+  assert.equal(frames.length, 1);
+  const parsed = JSON.parse(frames[0].slice(6));
+  assert.equal(parsed.__start, true);
+  assert.deepEqual(parsed.sources, [{ title: "Doc", score: 0.9 }]);
+  assert.deepEqual(parsed.matches, [{ id: "m1", score: 0.9 }]);
+  assert.deepEqual(parsed.graph, { cypher: "MATCH", context: "ctx" });
+});
+
+test("sendPossibleQuestions emits the possibleQuestions frame", () => {
+  const { frames, transport } = makeTransport();
+  transport.sendPossibleQuestions(["Q1", "Q2"]);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0].slice(6)), { possibleQuestions: ["Q1", "Q2"] });
+});
+
+test("sendPossibleQuestions normalizes non-array input to empty array", () => {
+  const { frames, transport } = makeTransport();
+  transport.sendPossibleQuestions(null);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(JSON.parse(frames[0].slice(6)), { possibleQuestions: [] });
 });
 
 test("finish writes [DONE] and freezes the transport", () => {
@@ -60,14 +118,19 @@ test("external signal abort propagates to transport.signal", () => {
 test("timeout aborts transport.signal when nothing else does", async () => {
   const { transport } = makeTransport({ timeoutMs: 20 });
   assert.equal(transport.signal.aborted, false);
-  await new Promise((resolve) => transport.signal.addEventListener("abort", resolve, { once: true }));
+  // Poll instead of await event listener — AbortSignal abort events don't
+  // reliably resolve inside node:test's microtask timing.
+  const start = Date.now();
+  while (!transport.signal.aborted && Date.now() - start < 200) {
+    await new Promise((r) => setTimeout(r, 2));
+  }
   assert.equal(transport.signal.aborted, true);
 });
 
 test("close cancels the timeout", async () => {
   const { transport } = makeTransport({ timeoutMs: 5 });
   transport.close();
-  await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 30));
   assert.equal(transport.signal.aborted, false);
 });
 

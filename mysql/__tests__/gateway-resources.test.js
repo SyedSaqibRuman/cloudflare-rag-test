@@ -70,11 +70,13 @@ function stub(obj, method, impl) {
 async function seedRegistry({ provider = PROVIDER, templates = [VECTOR_TEMPLATE] } = {}) {
   const restores = [
     stub(ProviderRepository, "list", async () => [provider]),
-    stub(ProviderRepository, "capabilities", async () => []),
-    stub(ProviderRepository, "authForm", async () => []),
-    stub(ProviderRepository, "resourceTemplates", async () => templates),
-    stub(ModelRepository, "listByProvider", async () => []),
-    stub(EndpointRepository, "list", async () => []),
+    stub(ProviderRepository, "capabilitiesByProviderIds", async () => []),
+    stub(ProviderRepository, "authFormsByProviderIds", async () => []),
+    stub(ProviderRepository, "resourceTemplatesByProviderIds", async () =>
+      templates.map((r) => ({ ...r, provider_id: provider.id }))
+    ),
+    stub(ModelRepository, "listByProviderIds", async () => []),
+    stub(EndpointRepository, "listByProviderIds", async () => []),
   ];
   Registry.invalidateRegistry();
   await Registry.refreshRegistry();

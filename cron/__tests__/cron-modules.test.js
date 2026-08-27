@@ -76,16 +76,6 @@ describe("cron/state", () => {
 // --------------------------
 import { startJob, stopJob, getRunningJobs } from "../lifecycle.js";
 
-// Helper: a job handler that blocks until signal fires (never completes on its own)
-function blockingHandler({ signal } = {}) {
-  return new Promise((resolve) => {
-    if (signal) {
-      signal.addEventListener("abort", () => resolve(), { once: true });
-    }
-    // If no signal, just hang forever (test cleanup will handle it)
-  });
-}
-
 // Helper: clean up all standalone job state and abort controllers
 function cleanupStandalone() {
   for (const [, state] of standaloneJobs) {

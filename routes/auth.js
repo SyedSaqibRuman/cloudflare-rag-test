@@ -16,7 +16,7 @@ const loginLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: true,
   validate: { trustProxy: false },
   message: { success: false, error: "Too many login attempts. Try again in a minute." },
 });

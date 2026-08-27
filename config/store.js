@@ -10,6 +10,7 @@ import {
 } from "./sqlite.js";
 import * as mysqlStore from "./mysql-store.js";
 import { isMysqlConfigured } from "../mysql/pool.js";
+import { AppError } from "../shared/errors.js";
 
 // --------------------------
 // STORAGE BACKEND
@@ -163,7 +164,7 @@ export async function deleteCompanyDb(name) {
       await mysqlStore.deleteCompanyDb(name);
     } catch {
       // MySQL is the source of truth here; failures propagate to the caller.
-      throw new Error(`Failed to delete company '${name}' from MySQL`);
+      throw new AppError(`Failed to delete company '${name}' from MySQL`, 500, "DB_DELETE_FAILED");
     }
   }
   deleteSqliteCompany(name);

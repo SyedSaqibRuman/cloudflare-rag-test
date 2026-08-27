@@ -63,4 +63,38 @@ Return ONLY the rewritten search query or INVALID. No explanation.
   }
 }
 
+// --------------------------
+// POSSIBLE QUESTIONS GENERATOR
+// --------------------------
+/**
+ * Generate 3-5 concise follow-up questions based on the answer.
+ * Best-effort: returns [] on any failure.
+ * @param {string} answer — the LLM answer text
+ * @param {string} companyName — for model resolution
+ * @returns {Promise<string[]>}
+ */
+export async function generatePossibleQuestions(answer, companyName) {
+  if (!answer || !answer.trim()) return [];
+
+  const prompt = `
+You are a helpful assistant for a certification services company. Based on the answer below, suggest 3-5 concise follow-up questions a user might ask next. Return ONLY the questions, one per line, no numbering, no explanation.
+
+Answer:
+${answer.slice(0, 4000)}
+`.trim();
+
+  try {
+    const res = await runCloudflareAI(companyName, getSmallLlm(companyName), {
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 200,
+    });
+    const text = res.response?.trim();
+    if (!text) return [];
+    return text.split("\n").filter((q) => q.trim()).slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
 export { MAX_HISTORY };

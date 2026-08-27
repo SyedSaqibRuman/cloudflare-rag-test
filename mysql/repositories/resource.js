@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 export const ResourceRepository = {
@@ -172,6 +172,28 @@ export const ResourceRepository = {
       ]
     );
     return Number(result.insertId);
+  },
+
+  /**
+   * Bulk-enable/disable every model-access grant of a company's credentials
+   * for one provider (9Router "Disable All" on the Available Models card).
+   * Rows that don't exist yet have nothing to disable — grants are created
+   * by grantModelAccess on first grant.
+   * @returns {Promise<number>} affected grant rows
+   */
+  async setModelAccessByProvider(companyId, providerId, { enabled }) {
+    const pool = await getPool();
+    const [result] = await pool.query(
+      `UPDATE credential_model_access cma
+          JOIN credentials c ON c.id = cma.credential_id
+         SET cma.is_enabled = ?
+       WHERE cma.company_id = ?
+         AND c.provider_id = ?
+         AND c.deleted_at IS NULL
+         AND cma.deleted_at IS NULL`,
+      [enabled ? 1 : 0, companyId, providerId]
+    );
+    return result.affectedRows ?? 0;
   },
 
   async listModelAccess(credentialId) {

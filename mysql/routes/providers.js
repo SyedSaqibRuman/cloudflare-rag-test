@@ -7,11 +7,23 @@ import {
   ProviderRepository,
   ModelRepository,
   PricingRepository,
+  CredentialRepository,
+  ResourceRepository,
+  AssistantRepository,
   AuditRepository,
 } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
+import { previousDay } from "../services/catalog-service.js";
 import * as CatalogImporter from "../services/catalog-importer.js";
+import { getPool } from "../pool.js";
+import * as Fetcher from "../services/provider-model-fetcher.js";
+import * as CredentialService from "../services/credential-service.js";
+import { getProbe } from "./probes.js";
 import { wrap } from "./helpers.js";
+import { parsePagination, paginate } from "./pagination.js";
+import { MODEL_CATEGORIES, PROVIDER_AUTH_TYPES, PROVIDER_CATEGORIES } from "../../shared/catalog-enums.js";
+import { MODEL_KEY_RE } from "../../shared/patterns.js";
+import { actorFromReq } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -19,9 +31,10 @@ const router = express.Router();
 // GET /gateway/providers
 router.get(
   "/providers",
-  wrap(async (_req, res) => {
+  wrap(async (req, res) => {
     const providers = await Registry.listProviders();
-    return res.json({ success: true, providers });
+    const pagination = parsePagination(req);
+    return paginate(res, providers, pagination, "providers", "/gateway/providers");
   })
 );
 
@@ -69,18 +82,29 @@ router.get(
     if (models === null) {
       return res.status(404).json({ success: false, error: `Unknown provider '${req.params.key}'.` });
     }
-    return res.json({ success: true, providerKey: req.params.key, models });
+    const pagination = parsePagination(req);
+    const total = models.length;
+    const { page, perPage } = pagination;
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const offset = (page - 1) * perPage;
+    const pageModels = models.slice(offset, offset + perPage);
+    res.set("X-Total-Count", String(total));
+    res.set("X-Page-Count", String(totalPages));
+    return res.json({
+      success: true,
+      providerKey: req.params.key,
+      models: pageModels,
+      pagination: { page, perPage, total, totalPages, hasNextPage: page < totalPages, hasPrevPage: page > 1 },
+    });
   })
 );
 
-// Model category ENUM in schema/v5.sql — must stay in sync.
-const MODEL_CATEGORIES = ["chat", "embedding", "reranker", "image", "tts", "stt", "vision"];
-
-// Model keys mirror the config-layer contract (config/validation.js allows the
-// same charset) so catalog values are always settable as company config values.
-// Vendor-prefixed IDs like @cf/baai/bge-base-en-v1.5 or xai/grok-4.6 carry @/:
-// and letters/digits of either case — e.g. @cf/moondream/moondream3.1-9B-A2B.
-const MODEL_KEY_RE = /^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/;
+// Model category ENUM lives in shared/catalog-enums.js (mirrors the MySQL
+// provider_models.category column). Model keys use the shared MODEL_KEY_RE
+// (shared/patterns.js), mirroring the config-layer contract
+// (config/validation.js) so catalog values are always settable as company
+// config values — vendor-prefixed IDs like @cf/baai/bge-base-en-v1.5 or
+// xai/grok-4.6 carry @/: and letters/digits of either case.
 
 // POST /gateway/providers/:key/models — upsert a single provider model
 // (with optional pricing rows). The importer only runs full definitions, so
@@ -118,19 +142,37 @@ router.post(
       supportsVision: b.vision ?? b.supportsVision ?? false,
       maxContextWindow: b.maxContextWindow ? Number(b.maxContextWindow) : null,
       maxOutputTokens: b.maxOutputTokens ? Number(b.maxOutputTokens) : null,
+      thinkingMode: b.thinkingMode ?? b.thinking ?? "auto",
     });
 
     let pricingCount = 0;
     if (Array.isArray(b.pricing) && b.pricing.length > 0) {
       const today = new Date().toISOString().slice(0, 10);
-      for (const p of b.pricing) {
-        await PricingRepository.create(modelId, {
-          effectiveFrom: p.effectiveFrom ?? today,
-          inputPricePerMillion: p.inputPricePerMillion ?? null,
-          outputPricePerMillion: p.outputPricePerMillion ?? null,
-          priceCurrency: p.priceCurrency ?? "USD",
-        });
-        pricingCount += 1;
+      // D3 one-open-price invariant (same rule as catalog-service.savePricing):
+      // each new open-ended row closes the previous current row first. The
+      // whole batch runs in ONE transaction so a mid-way failure can't leave
+      // half-updated price history behind.
+      const pool = await getPool();
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        for (const p of b.pricing) {
+          const effectiveFrom = p.effectiveFrom ?? today;
+          await PricingRepository.closeCurrent(modelId, previousDay(effectiveFrom), conn);
+          await PricingRepository.create(modelId, {
+            effectiveFrom,
+            inputPricePerMillion: p.inputPricePerMillion ?? null,
+            outputPricePerMillion: p.outputPricePerMillion ?? null,
+            priceCurrency: p.priceCurrency ?? "USD",
+          }, conn);
+          pricingCount += 1;
+        }
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        throw err;
+      } finally {
+        conn.release();
       }
     }
 
@@ -139,8 +181,7 @@ router.post(
 
     await AuditRepository.log({
       companyId: null,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.model.upserted",
       entityType: "provider_model",
       entityId: modelId,
@@ -186,11 +227,15 @@ router.put(
     const b = req.body || {};
     const modelName = b.name !== undefined ? String(b.name).trim() : model.model_name;
     const category = b.category !== undefined ? String(b.category).trim() : model.category;
+    const thinkingMode = b.thinkingMode !== undefined ? String(b.thinkingMode).trim() : model.thinking_mode || "auto";
     if (!modelName || modelName.length > 200) {
       return res.status(400).json({ success: false, error: "Model name is required (max 200 chars)." });
     }
     if (!MODEL_CATEGORIES.includes(category)) {
       return res.status(400).json({ success: false, error: `Category must be one of: ${MODEL_CATEGORIES.join(", ")}.` });
+    }
+    if (!["auto", "on", "off"].includes(thinkingMode)) {
+      return res.status(400).json({ success: false, error: "thinkingMode must be one of: auto, on, off." });
     }
     // model_key is editable — validate it when the body carries one (an absent
     // or blank key keeps the stored value; the DB enforces (provider_id,
@@ -213,6 +258,7 @@ router.put(
         supportsVision: b.vision ?? b.supportsVision ?? !!model.supports_vision,
         maxContextWindow: b.maxContextWindow !== undefined ? Number(b.maxContextWindow) || null : model.max_context_window,
         maxOutputTokens: b.maxOutputTokens !== undefined ? Number(b.maxOutputTokens) || null : model.max_output_tokens,
+        thinkingMode,
       });
     } catch (err) {
       if (err?.code === "ER_DUP_ENTRY") {
@@ -224,8 +270,7 @@ router.put(
 
     await AuditRepository.log({
       companyId: null,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.model.updated",
       entityType: "provider_model",
       entityId: model.id,
@@ -255,8 +300,7 @@ router.delete(
 
     await AuditRepository.log({
       companyId: null,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.model.deleted",
       entityType: "provider_model",
       entityId: model.id,
@@ -272,20 +316,8 @@ router.delete(
   })
 );
 
-const PROVIDER_CATEGORIES = [
-  "ai",
-  "embedding",
-  "vector",
-  "storage",
-  "graph",
-  "image",
-  "speech",
-  "search",
-  "database",
-  "email",
-  "analytics",
-];
-const PROVIDER_AUTH_TYPES = ["api_key", "bearer_token", "oauth2", "basic_auth", "custom"];
+// Provider category/auth-type ENUMs live in shared/catalog-enums.js (mirror
+// the providers.primary_service_category + providers.auth_type columns).
 
 // POST /gateway/providers — create a provider (blank slate: no auth schema,
 // models, or endpoints yet — those come from later catalog phases/UI).
@@ -353,8 +385,7 @@ router.post(
     });
     Registry.invalidateRegistry();
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.created",
       entityType: "provider",
       entityId: id,
@@ -419,6 +450,7 @@ router.put(
       ["documentationUrl", body.documentationUrl],
       ["defaultApiBaseUrl", body.defaultApiBaseUrl],
       ["isActive", body.isActive],
+      ["roundRobinEnabled", body.roundRobinEnabled],
     ]) {
       if (value !== undefined) patch[key] = typeof value === "string" ? value.trim() : value;
     }
@@ -431,8 +463,7 @@ router.put(
     Registry.invalidateRegistry();
     const updated = await Registry.getProvider(req.params.key);
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.updated",
       entityType: "provider",
       entityId: existing.id,
@@ -476,8 +507,7 @@ router.post(
       definition.providerKey || definition.provider?.key || definition.key
     );
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.imported",
       entityType: "provider",
       entityId: result.providerId,
@@ -538,12 +568,41 @@ router.delete(
       // Purge the blocked rows: all of them when force is passed, otherwise
       // just the soft-deleted (already logically removed) leftovers.
       const credsToPurge = force ? creds : creds.filter((c) => c.deleted_at);
+
+      // assistants.credential_id is a NOT-NULL RESTRICT FK, so a credential
+      // referenced by an assistant can never be hard-deleted underneath it.
+      // Without force that's a refusal with a clear message; with force the
+      // referencing assistants are hard-deleted first (audited per row —
+      // chatbots cascade on assistant delete).
+      const assistantBlockers = credsToPurge.length
+        ? await AssistantRepository.listByCredentialIds(credsToPurge.map((c) => c.id))
+        : [];
+      if (assistantBlockers.length > 0 && !force) {
+        const detail = assistantBlockers
+          .map((a) => `assistant '${a.assistant_key}'`)
+          .join(", ");
+        return res.status(409).json({
+          success: false,
+          error: `${detail} still reference ${assistantBlockers.length > 1 ? "credentials" : "a credential"} of provider '${req.params.key}'. Delete ${assistantBlockers.length > 1 ? "those assistants" : "that assistant"} first, or pass force=true to remove them.`,
+        });
+      }
+      for (const row of assistantBlockers) {
+        await AssistantRepository.removePermanent(row.id);
+        await AuditRepository.log({
+          companyId: row.company_id,
+          ...actorFromReq(req),
+          action: "assistant.deleted",
+          entityType: "assistant",
+          entityId: row.id,
+          afterState: { assistant_key: row.assistant_key, provider_key: req.params.key, forced: true },
+          reason: "force provider delete (assistant references purged credential)",
+        });
+      }
       for (const row of credsToPurge) {
         await CredentialRepository.removePermanent(row.id);
         await AuditRepository.log({
           companyId: row.company_id,
-          actorType: "admin",
-          actorId: req.auth?.user || null,
+          ...actorFromReq(req),
           action: "credential.deleted",
           entityType: "credential",
           entityId: row.id,
@@ -559,8 +618,7 @@ router.delete(
         await ResourceRepository.removePermanent(row.id);
         await AuditRepository.log({
           companyId: row.company_id,
-          actorType: "admin",
-          actorId: req.auth?.user || null,
+          ...actorFromReq(req),
           action: "resource.deleted",
           entityType: "provider_resource",
           entityId: row.id,
@@ -574,8 +632,7 @@ router.delete(
     }
     Registry.invalidateRegistry();
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "provider.deleted",
       entityType: "provider",
       entityId: existing.id,
@@ -583,6 +640,147 @@ router.delete(
       reason: "admin action",
     });
     return res.json({ success: true, message: `Provider '${req.params.key}' deleted.` });
+  })
+);
+
+// POST /gateway/providers/:key/models/fetch — pull the provider's live model
+// list through the company's stored credential (providerKey or credentialId
+// in the body; falls back to the company's default credential for the
+// provider) and upsert the models into the catalog. Read-only on the
+// provider metadata; only provider_models rows are touched.
+router.post(
+  "/providers/:key/models/fetch",
+  wrap(async (req, res) => {
+    const { companyKey, credentialId } = req.body || {};
+    if (!companyKey) {
+      return res.status(400).json({ success: false, error: "companyKey is required (models are fetched through a company credential)." });
+    }
+    const provider = await Registry.getProvider(req.params.key);
+    if (!provider) {
+      return res.status(404).json({ success: false, error: `Unknown provider '${req.params.key}'.` });
+    }
+    const result = await Fetcher.fetchProviderModels({
+      companyKey,
+      providerKey: req.params.key,
+      credentialId: credentialId || null,
+    });
+    Registry.invalidateRegistry();
+    await AuditRepository.log({
+      companyId: null,
+      ...actorFromReq(req),
+      action: "provider.model.fetched",
+      entityType: "provider",
+      entityId: provider.id,
+      afterState: {
+        provider_key: req.params.key,
+        company_key: companyKey,
+        fetched: result.fetched,
+        skipped: !!result.skipped,
+        models: result.models.map((m) => m.modelKey),
+      },
+      reason: "admin action",
+      isSensitive: false,
+    });
+    return res.json({ success: true, ...result });
+  })
+);
+
+// POST /gateway/providers/:key/test — test a provider right after adding it to
+// the catalog (same contract as the company-scoped connections/test):
+//  - body.fields (optional): UNSAVED credential fields — format-validated
+//    against the auth schema, then run through the provider's live probe.
+//  - no probe available: bare connectivity check against the default API base
+//    URL (any HTTP response = host is up; a network-level error = failed).
+// Read-only: never persists, never creates anything.
+router.post(
+  "/providers/:key/test",
+  wrap(async (req, res) => {
+    const provider = await Registry.getProvider(req.params.key);
+    if (!provider) {
+      return res.status(404).json({ success: false, error: `Unknown provider '${req.params.key}'.` });
+    }
+
+    const authSchema = provider.authForm || [];
+    const fields = req.body?.fields || {};
+
+    // Format-level validation of supplied fields (200 + status failed so the
+    // UI shows the per-field errors inline, like connections/test).
+    if (Object.keys(fields).length > 0 && authSchema.length > 0) {
+      const validation = CredentialService.validateFieldsAgainstSchema(fields, authSchema);
+      if (!validation.ok) {
+        return res.json({
+          success: false,
+          status: "failed",
+          mode: "format",
+          error: Object.values(validation.errors).join(" "),
+          errors: validation.errors,
+          latencyMs: null,
+          checkedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    const probe = getProbe(req.params.key, provider);
+    let mode = "none";
+    let latencyMs = null;
+    let error = null;
+    let warning = null;
+
+    if (probe) {
+      mode = "probe";
+      const result = await probe(fields);
+      if (!result.ok) {
+        error = result.error;
+      } else {
+        latencyMs = result.latencyMs ?? null;
+        warning = result.warning ?? null;
+      }
+    } else if (provider.default_api_base_url) {
+      // Bare connectivity: any HTTP response means the endpoint is live — most
+      // API roots answer 404/405 for GET, which is still a reachable host.
+      mode = "connectivity";
+      const start = Date.now();
+      try {
+        await fetch(provider.default_api_base_url, { method: "GET", redirect: "manual" });
+        latencyMs = Date.now() - start;
+      } catch (err) {
+        latencyMs = Date.now() - start;
+        error = `Base URL unreachable: ${err.message}`;
+      }
+    } else {
+      warning = "No probe and no default API base URL — catalog-only provider; nothing to test.";
+    }
+
+    const ok = !error;
+    try {
+      await AuditRepository.log({
+        ...actorFromReq(req),
+        action: "provider.test",
+        entityType: "provider",
+        entityId: provider.id,
+        afterState: {
+          provider_key: req.params.key,
+          mode,
+          status: ok ? "success" : "failed",
+          error: error || undefined,
+        },
+        reason: "admin action",
+        isSensitive: false,
+      });
+    } catch (err) {
+      // audit is best-effort — never mask the test result
+      console.warn("Audit logging failed:", err.message);
+    }
+
+    return res.json({
+      success: ok,
+      status: ok ? "success" : "failed",
+      mode,
+      error,
+      latencyMs,
+      checkedAt: new Date().toISOString(),
+      warning: warning || undefined,
+    });
   })
 );
 

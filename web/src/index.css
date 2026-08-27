@@ -125,33 +125,9 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Dropdown menu enter/exit (used via data-[state=open|closed]:menu-enter/exit).
-   Reduced-motion users get no animation (media query below zeroes durations). */
-@keyframes ui-zoom-in {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-@keyframes ui-zoom-out {
-  from {
-    opacity: 1;
-    transform: scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-}
-@utility menu-enter {
-  animation: ui-zoom-in 0.12s ease-out;
-}
-@utility menu-exit {
-  animation: ui-zoom-out 0.1s ease-in forwards;
+/* Native <select> needs explicit bg/color for Windows dark mode */
+select {
+  color-scheme: dark;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -6,19 +6,24 @@
 // can map them to 4xx. Mirrors catalog-service.js (F4 pattern).
 // --------------------------
 import {
-  CompanyRepository,
   ModelRepository,
   ResourceRepository,
   KbRepository,
   AuditRepository,
 } from "../repositories.js";
 
-export const KB_KEY_RE = /^[a-z0-9-]+$/;
+import { KB_SOURCE_TYPES } from "../../shared/catalog-enums.js";
 
-export class HttpError extends Error {
+export const KB_KEY_RE = /^[a-z0-9-]+$/;
+export const SOURCE_TYPES = KB_SOURCE_TYPES;
+
+// Backward-compatible HttpError — extends AppError so the error handler
+// middleware recognizes it and the test suite's `instanceof HttpError` checks pass.
+import { AppError } from "../../shared/errors.js";
+
+export class HttpError extends AppError {
   constructor(status, message) {
-    super(message);
-    this.status = status;
+    super(message, status);
   }
 }
 
@@ -92,6 +97,11 @@ export function validateKbInput(input = {}) {
     }
   }
 
+  const sourceType = input.sourceType ?? "wordpress";
+  if (sourceType && !SOURCE_TYPES.includes(sourceType)) {
+    errors.sourceType = `sourceType must be one of: ${SOURCE_TYPES.join(", ")}.`;
+  }
+
   if (Object.keys(errors).length > 0) return { ok: false, errors };
 
   return {
@@ -110,6 +120,11 @@ export function validateKbInput(input = {}) {
       retrievalScoreThreshold: Number(threshold),
       enableGraphRag: Boolean(input.enableGraphRag),
       enableHybridSearch: input.enableHybridSearch !== false,
+      sourceType: sourceType || "wordpress",
+      sourceConfig: input.sourceConfig || null,
+      webhookUrl: input.webhookUrl || null,
+      webhookSecret: input.webhookSecret || null,
+      webhookEvents: input.webhookEvents || null,
       isActive: input.isActive !== false,
     },
   };
@@ -220,6 +235,11 @@ export async function updateKb(company, kbKey, input, actor = {}) {
     retrievalScoreThreshold: Number(existing.retrieval_score_threshold),
     enableGraphRag: Boolean(existing.enable_graph_rag),
     enableHybridSearch: Boolean(existing.enable_hybrid_search),
+    sourceType: existing.source_type || "wordpress",
+    sourceConfig: existing.source_config ?? null,
+    webhookUrl: existing.webhook_url ?? null,
+    webhookSecret: existing.webhook_secret ?? null,
+    webhookEvents: existing.webhook_events ?? null,
     isActive: Boolean(existing.is_active),
     ...input,
   };
@@ -245,7 +265,12 @@ export async function updateKb(company, kbKey, input, actor = {}) {
     entityType: "kb",
     entityId: existing.id,
     beforeState: { kb_key: existing.kb_key, status: existing.status },
-    afterState: { kb_key: value.kbKey, ...value },
+    // Secrets are never persisted into audit logs — record presence only.
+    afterState: {
+      kb_key: value.kbKey,
+      ...value,
+      webhookSecret: value.webhookSecret ? "[set]" : null,
+    },
     reason: actor.reason ?? "admin action",
   });
   return { kbId: existing.id, kbKey: existing.kb_key };

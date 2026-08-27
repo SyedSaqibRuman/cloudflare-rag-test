@@ -9,6 +9,8 @@ import {
   AuditRepository,
 } from "../repositories.js";
 import { wrap } from "./helpers.js";
+import { parsePagination, paginate } from "./pagination.js";
+import { actorFromReq, requireCompany } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -16,9 +18,10 @@ const router = express.Router();
 // GET /gateway/companies
 router.get(
   "/companies",
-  wrap(async (_req, res) => {
+  wrap(async (req, res) => {
     const companies = await CompanyRepository.list();
-    return res.json({ success: true, companies });
+    const pagination = parsePagination(req);
+    return paginate(res, companies, pagination, "companies", "/gateway/companies");
   })
 );
 
@@ -51,8 +54,7 @@ router.post(
     const environments = await CompanyRepository.ensureDefaultEnvironments(company.id);
     await AuditRepository.log({
       companyId: company.id,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "company.created",
       entityType: "company",
       entityId: company.id,
@@ -67,10 +69,7 @@ router.post(
 router.get(
   "/companies/:key",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
+    const company = await requireCompany(req.params.key);
     const environments = await CompanyRepository.environments(company.id);
     return res.json({ success: true, company: { ...company, environments } });
   })
@@ -91,11 +90,7 @@ const envKeyFromBody = (body, res) => {
 router.post(
   "/companies/:key/environments",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
-
+    const company = await requireCompany(req.params.key);
     const envKey = envKeyFromBody(req.body, res);
     if (!envKey) return;
     const envName = String(req.body?.envName || "").trim();
@@ -118,8 +113,7 @@ router.post(
       });
       await AuditRepository.log({
         companyId: company.id,
-        actorType: "admin",
-        actorId: req.auth?.user || null,
+        ...actorFromReq(req),
         action: "environment.created",
         entityType: "environment",
         entityId: id,
@@ -140,10 +134,7 @@ router.post(
 router.put(
   "/companies/:key/environments/:envKey",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
+    const company = await requireCompany(req.params.key);
     const envKey = String(req.params.envKey || "");
     if (!ENV_KEY_RE.test(envKey)) {
       return res.status(400).json({ success: false, error: `Invalid environment key '${envKey}'.` });
@@ -163,8 +154,7 @@ router.put(
     }
     await AuditRepository.log({
       companyId: company.id,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "environment.updated",
       entityType: "environment",
       entityId: null,
@@ -181,10 +171,7 @@ router.put(
 router.delete(
   "/companies/:key/environments/:envKey",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
+    const company = await requireCompany(req.params.key);
     const envKey = String(req.params.envKey || "");
     if (!ENV_KEY_RE.test(envKey)) {
       return res.status(400).json({ success: false, error: `Invalid environment key '${envKey}'.` });
@@ -195,8 +182,7 @@ router.delete(
     }
     await AuditRepository.log({
       companyId: company.id,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "environment.deleted",
       entityType: "environment",
       entityId: null,
@@ -211,10 +197,7 @@ router.delete(
 router.get(
   "/companies/:key/resources",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
+    const company = await requireCompany(req.params.key);
     const resources = await ResourceRepository.listByCompany(company.id, {
       resourceType: req.query.type || null,
     });
@@ -228,10 +211,7 @@ router.get(
 router.get(
   "/companies/:key/audit",
   wrap(async (req, res) => {
-    const company = await CompanyRepository.findByKey(req.params.key);
-    if (!company) {
-      return res.status(404).json({ success: false, error: `Company '${req.params.key}' not found.` });
-    }
+    const company = await requireCompany(req.params.key);
     const entries = await AuditRepository.listByCompany(company.id, {
       limit: req.query.limit || 100,
     });

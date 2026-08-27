@@ -5,6 +5,7 @@ import {
   STRING_KEYS,
   PROMPT_KEYS,
   RESOURCE_KEYS,
+  ASSISTANT_KEYS,
   CREDENTIAL_KEYS,
   SECRET_KEYS,
   ALLOWED_MODELS,
@@ -66,6 +67,15 @@ export function validateConfigKey(key, value) {
 
   // Resource names (vector indexes, R2 buckets)
   if (RESOURCE_KEYS.includes(key)) {
+    const normalized = value.trim();
+    if (!normalized) return `${key} must be a non-empty string.`;
+    if (!/^[a-z0-9-]+$/.test(normalized)) return `${key} must contain only lowercase letters, numbers, and hyphens.`;
+    if (normalized.length < 3 || normalized.length > 63) return `${key} must be between 3 and 63 characters.`;
+    return null;
+  }
+
+  // Selected assistant key (gateway assistants.assistant_key — same charset).
+  if (ASSISTANT_KEYS.includes(key)) {
     const normalized = value.trim();
     if (!normalized) return `${key} must be a non-empty string.`;
     if (!/^[a-z0-9-]+$/.test(normalized)) return `${key} must contain only lowercase letters, numbers, and hyphens.`;

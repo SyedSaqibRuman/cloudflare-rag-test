@@ -84,3 +84,11 @@ dist/
 build/
 tmp/
 temp/
+
+# --------------------------
+
+# 🔹 Graphify knowledge-graph artifacts (regenerable)
+
+# --------------------------
+
+.graphify/

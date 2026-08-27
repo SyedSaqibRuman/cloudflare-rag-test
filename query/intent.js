@@ -73,6 +73,7 @@ export const isDiscoveryQuery = (q) => DISCOVERY_PATTERNS.some((p) => p.test(q))
 export function isVagueQuery(question) {
   const stripped = question.replace(GREETING_PREFIX_REGEX, "").trim();
   if (!stripped) return false;
+  // Intentional ASCII-range check (non-Latin scripts bypass).
   if (/[^\u0000-\u007F]/.test(stripped)) return false;
   return stripped.length <= 30 && !QUESTION_WORDS_REGEX.test(stripped);
 }
@@ -80,8 +81,8 @@ export function isVagueQuery(question) {
 // --------------------------
 // FAST PATH CHECK
 // --------------------------
-export function checkFastPath(question, companyName) {
-  const R = buildResponses(companyName);
+export function checkFastPath(question, companyName, assistantName = null) {
+  const R = buildResponses(companyName, assistantName);
   if (!question || question.length <= 1) return R.invalid;
   if (PLAIN_GREETING_REGEX.test(question)) return R.greeting;
 

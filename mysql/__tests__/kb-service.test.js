@@ -142,6 +142,11 @@ test("accepts a fully valid input and returns the normalized value", () => {
     retrievalScoreThreshold: 0.65,
     enableGraphRag: true,
     enableHybridSearch: false,
+    sourceType: "wordpress",
+    sourceConfig: null,
+    webhookUrl: null,
+    webhookSecret: null,
+    webhookEvents: null,
     isActive: false,
   });
 });

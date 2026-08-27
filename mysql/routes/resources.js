@@ -10,7 +10,9 @@ import {
   AuditRepository,
 } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
+import { syncRagResource, clearRagResource } from "../services/rag-sync.js";
 import { wrap } from "./helpers.js";
+import { actorFromReq } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -127,8 +129,7 @@ router.post(
       });
       await AuditRepository.log({
         companyId: company.id,
-        actorType: "admin",
-        actorId: req.auth?.user || null,
+        ...actorFromReq(req),
         action: "resource.created",
         entityType: "provider_resource",
         entityId: id,
@@ -139,6 +140,12 @@ router.post(
           credential_key: credential.credential_key,
         },
         reason: "admin action",
+      });
+      // Mirror RAG-relevant resource config (graph_database database_name →
+      // NEO4J_DATABASE) into the config store — best-effort.
+      await syncRagResource(company.company_key, {
+        resourceType: body.resourceType,
+        config: body.config,
       });
       return res.status(201).json({
         success: true,
@@ -187,10 +194,19 @@ router.put(
       if (value !== undefined) patch[key] = value;
     }
     await ResourceRepository.update(Number(req.params.id), patch);
+    // Mirror the updated config (e.g. a new database_name) into the RAG store.
+    if (patch.config !== undefined) {
+      const company = await CompanyRepository.findById(existing.company_id);
+      if (company) {
+        await syncRagResource(company.company_key, {
+          resourceType: existing.resource_type,
+          config: patch.config,
+        });
+      }
+    }
     await AuditRepository.log({
       companyId: existing.company_id,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "resource.updated",
       entityType: "provider_resource",
       entityId: Number(req.params.id),
@@ -211,10 +227,11 @@ router.delete(
       return res.status(404).json({ success: false, error: "Resource not found." });
     }
     await ResourceRepository.remove(Number(req.params.id));
+    // Clear the RAG keys this resource provided (if none remain).
+    await clearRagResource(existing.company_id, existing);
     await AuditRepository.log({
       companyId: existing.company_id,
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "resource.deleted",
       entityType: "provider_resource",
       entityId: Number(req.params.id),

@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, listProviders, getProvider, getKbOptions } from "../api";
-import { Card, Button, Input, Select, Spinner, Badge, Toast } from "../components/ui";
+import { api, listProviders, getProvider, getKbOptions, listCredentials, listAssistants } from "../api";
+import AskApiKeyCard from "./config/AskApiKeyCard.jsx";
+import ChatPlaygroundCard from "./config/ChatPlaygroundCard.jsx";
+import { Card, Button, Input, Select, Spinner, Toast, SkeletonCard, Tabs, TabPanel } from "../components/ui";
 import { useCompanies } from "../context";
 import { useHeaderActions } from "../components/Layout";
+import { useToast } from "../hooks";
 import { GENERAL_KEYS, EMBEDDING_DIMENSIONS } from "../models";
 
 const GENERAL_LABELS = {
@@ -10,9 +13,12 @@ const GENERAL_LABELS = {
   CONTACT_US_URL: "Contact Us URL",
   LOCATIONS_URL: "Locations URL",
   SERVICES_URL: "Services URL",
-  CONSULTANT_NAME: "Consultant Name",
   COMPANY_NAME: "Company Display Name",
 };
+
+// CONSULTANT_NAME is removed from the UI — the assistant's name + system
+// prompt now serve the same purpose. The key stays in the backend schema
+// for backward compat (Dashboard, Companies tables still display it).
 
 export default function Config() {
   const { company, refresh } = useCompanies();
@@ -21,24 +27,28 @@ export default function Config() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
-  const [apiKeyEnabled, setApiKeyEnabled] = useState(false);
-  const [generatedKey, setGeneratedKey] = useState(null);
-  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const { toast, notify } = useToast();
+  // Initial enabled flag from the fetched AUTH section — the Ask API Key card
+  // owns everything else about the key lifecycle.
+  const [apiKeyInitial, setApiKeyInitial] = useState(false);
   // Gateway provider catalog — drives the Models & Provider card dropdowns.
   const [providers, setProviders] = useState([]);
   const [catalogModels, setCatalogModels] = useState([]);
   const [catalogNote, setCatalogNote] = useState(null);
   const [catalogReload, setCatalogReload] = useState(0);
-  // Company resource catalog (provider_resources rows) — vector index + R2 bucket selectors.
+  // Provider keys this company has an ACTIVE connection for — the provider
+  // dropdown only lists AI providers the company actually configured.
+  const [configuredProviders, setConfiguredProviders] = useState(new Set());
+  // Company resource catalog (provider_resources rows) — vector index + R2
+  // bucket + graph DB selectors.
   const [vectorResources, setVectorResources] = useState([]);
   const [storageResources, setStorageResources] = useState([]);
+  const [graphResources, setGraphResources] = useState([]);
   const [resourcesNote, setResourcesNote] = useState(null);
-
-  const notify = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
+  // Company's gateway assistants — the selected one drives the chatbot.
+  const [assistants, setAssistants] = useState([]);
+  const [assistantsNote, setAssistantsNote] = useState(null);
+  const [activeTab, setActiveTab] = useState("general");
 
   const load = async (name) => {
     if (!name) {
@@ -48,7 +58,6 @@ export default function Config() {
     }
     setLoading(true);
     setError(null);
-    setGeneratedKey(null);
     try {
       const data = await api(`/cloudflare/config?company=${encodeURIComponent(name)}`);
       const cfg = data.config || {};
@@ -58,56 +67,16 @@ export default function Config() {
         ...(cfg.GENERAL || {}),
         ...(cfg.MODELS || {}),
         ...(cfg.STORAGE || {}),
+        ...(cfg.ASSISTANT || {}),
         ...(cfg.CREDENTIALS || {}),
       };
       setConfig(flat);
       setDraft(flat);
-      setApiKeyEnabled(!!cfg.AUTH?.API_KEY_ENABLED);
+      setApiKeyInitial(!!cfg.AUTH?.API_KEY_ENABLED);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const generateApiKey = async () => {
-    if (!company) return;
-    setApiKeyBusy(true);
-    setError(null);
-    try {
-      const data = await api(`/cloudflare/companies/${encodeURIComponent(company)}/apikey`, { method: "POST" });
-      setGeneratedKey(data.apiKey);
-      setApiKeyEnabled(true);
-      notify("API key generated — copy it now.");
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setApiKeyBusy(false);
-    }
-  };
-
-  const revokeApiKey = async () => {
-    if (!window.confirm(`Revoke '${company}'s API key? /ask and /ask-stream will become open for this company again.`)) return;
-    setApiKeyBusy(true);
-    setError(null);
-    try {
-      await api(`/cloudflare/companies/${encodeURIComponent(company)}/apikey`, { method: "DELETE" });
-      setGeneratedKey(null);
-      setApiKeyEnabled(false);
-      notify("API key revoked.");
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setApiKeyBusy(false);
-    }
-  };
-
-  const copyApiKey = async () => {
-    try {
-      await navigator.clipboard.writeText(generatedKey);
-      notify("API key copied to clipboard.");
-    } catch {
-      notify("Could not copy — select the key manually.");
     }
   };
 
@@ -120,9 +89,9 @@ export default function Config() {
     let live = true;
     (async () => {
       try {
-        const rows = await listProviders();
+        const result = await listProviders();
         if (live) {
-          setProviders(rows);
+          setProviders(result.items ?? result);
           setCatalogNote(null);
         }
       } catch {
@@ -134,12 +103,37 @@ export default function Config() {
     };
   }, [catalogReload]);
 
-  // Load the company's gateway resources (vector_index + object_bucket) so the
-  // STORAGE keys can be picked from the catalog instead of typed by hand.
+  // Which providers does this company actually use? The dropdown only shows AI
+  // providers with at least one active connection (listCredentials defaults to
+  // active-only), so "configured" = saved + enabled.
+  useEffect(() => {
+    if (!company) {
+      setConfiguredProviders(new Set());
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const creds = await listCredentials(company);
+        if (live) setConfiguredProviders(new Set(creds.map((c) => c.provider_key)));
+      } catch {
+        if (live) setConfiguredProviders(new Set());
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [company]);
+
+  // Load the company's resources for the STORAGE key selectors: the live
+  // Cloudflare account resources first (real Vectorize indexes / R2 buckets,
+  // from the same source as the provider page cards), then registry-provisioned
+  // rows as a fallback for anything not on the account.
   useEffect(() => {
     if (!company) {
       setVectorResources([]);
       setStorageResources([]);
+      setGraphResources([]);
       return;
     }
     let live = true;
@@ -147,14 +141,16 @@ export default function Config() {
       try {
         const opts = await getKbOptions(company);
         if (live) {
-          setVectorResources(opts?.vectorResources || []);
-          setStorageResources(opts?.storageResources || []);
+          setVectorResources(mergeResources(opts?.liveVectorResources || [], opts?.vectorResources || []));
+          setStorageResources(mergeResources(opts?.liveStorageResources || [], opts?.storageResources || []));
+          setGraphResources(opts?.graphResources || []);
           setResourcesNote(null);
         }
       } catch {
         if (live) {
           setVectorResources([]);
           setStorageResources([]);
+          setGraphResources([]);
           setResourcesNote("Resource catalog unavailable — vector/storage lists may be empty.");
         }
       }
@@ -163,6 +159,43 @@ export default function Config() {
       live = false;
     };
   }, [company]);
+
+  // Company's gateway assistants — the Config selection is saved as
+  // ASSISTANT_KEY and the ask pipeline uses that assistant's persona.
+  useEffect(() => {
+    if (!company) {
+      setAssistants([]);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const result = await listAssistants(company);
+        if (live) {
+          setAssistants(result.items ?? result ?? []);
+          setAssistantsNote(null);
+        }
+      } catch {
+        if (live) {
+          setAssistants([]);
+          setAssistantsNote("Could not load assistants — the chatbot will use the company defaults.");
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [company]);
+
+  // Live Cloudflare rows ({ id, name, … }) → the { resource_key, resource_name }
+  // shape the selectors expect, deduped against the registry rows by name.
+  const mergeResources = (live, registry) => {
+    const seen = new Set(registry.map((r) => r.resource_key));
+    const liveRows = live
+      .filter((r) => r.name && !seen.has(r.name))
+      .map((r) => ({ resource_key: r.name, resource_name: r.name, live: true }));
+    return [...liveRows, ...registry];
+  };
 
   // When the selected provider changes, load its catalog models.
   useEffect(() => {
@@ -231,13 +264,16 @@ export default function Config() {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
 
-  // Provider select options: catalog providers + the current value if unknown.
+  // Provider select options: ONLY AI-category providers this company has an
+  // active connection for (configured). The saved value always stays in the
+  // list even if it's missing/filtered out, so nothing is silently dropped.
   const providerOptions = () => {
     const opts = [{ value: "", label: "— Select provider —" }];
     const current = draft?.AI_PROVIDER;
-    const known = new Set(providers.map((p) => p.providerKey));
+    const list = providers.filter((p) => p.category === "ai" && configuredProviders.has(p.providerKey));
+    const known = new Set(list.map((p) => p.providerKey));
     if (current && !known.has(current)) opts.push({ value: current, label: current });
-    for (const p of providers) opts.push({ value: p.providerKey, label: p.providerName });
+    for (const p of list) opts.push({ value: p.providerKey, label: p.providerName });
     return opts;
   };
 
@@ -254,13 +290,16 @@ export default function Config() {
     return opts;
   };
 
-  // Select options for a company resource list (vector index / R2 bucket): the
-  // catalog rows plus the current stored value when it isn't in the catalog.
+  // Select options for a company resource list (vector index / R2 bucket / any
+  // provider): the catalog rows plus the current stored value when it isn't in
+  // the catalog. Labels carry the owning provider so resources from different
+  // providers are distinguishable (e.g. Pinecone vs Cloudflare Vectorize).
   const resourceOptions = (resources, current) => {
     const seen = new Set(resources.map((r) => r.resource_key));
     const opts = [{ value: "", label: "— Use company default —" }];
     for (const r of resources) {
-      const label = r.resource_name ? `${r.resource_name} (${r.resource_key})` : r.resource_key;
+      const provider = r.provider_name ? ` · ${r.provider_name}` : r.live ? " · Cloudflare (live)" : "";
+      const label = r.resource_name ? `${r.resource_name} (${r.resource_key})${provider}` : `${r.resource_key}${provider}`;
       opts.push({ value: r.resource_key, label });
     }
     if (current && !seen.has(current)) {
@@ -269,23 +308,59 @@ export default function Config() {
     return opts;
   };
 
+  // Graph DB (Neo4j) options — the pipeline reads NEO4J_DATABASE, so the select
+  // value is the resource's config.database_name (falls back to resource_key).
+  const graphResourceOptions = (resources, current) => {
+    const seen = new Set();
+    const opts = [{ value: "", label: "— No graph database —" }];
+    for (const r of resources) {
+      const db = r.config?.database_name || r.resource_key;
+      seen.add(db);
+      const provider = r.provider_name ? ` · ${r.provider_name}` : "";
+      const label = r.resource_name ? `${r.resource_name} (${db})${provider}` : `${db}${provider}`;
+      opts.push({ value: db, label });
+    }
+    if (current && !seen.has(current)) {
+      opts.unshift({ value: current, label: `${current} (not in catalog)` });
+    }
+    return opts;
+  };
+
+  // Assistant select options — the selected assistant drives the chatbot's
+  // persona (system prompt / model / KB / graph) on the ask endpoints.
+  const assistantOptions = () => {
+    const opts = [{ value: "", label: "— No assistant (company defaults) —" }];
+    for (const a of assistants) {
+      opts.push({
+        value: a.assistant_key,
+        label: a.assistant_name ? `${a.assistant_name} (${a.assistant_key})` : a.assistant_key,
+      });
+    }
+    return opts;
+  };
+
   // Only @cf/ models are runtime-callable today (Workers AI adapter).
   const hasNonCfModel = [draft?.LLM_MODEL, draft?.SMALL_LLM, draft?.EMBEDDING_MODEL, draft?.RERANKING_MODEL].some(
     (m) => m && !m.startsWith("@cf/")
   );
-  // The saved provider may not exist in the catalog (e.g. default 'cloudflare').
-  const providerKnown = draft?.AI_PROVIDER && providers.some((p) => p.providerKey === draft.AI_PROVIDER);
+  // The saved provider may not exist in the catalog (e.g. default 'cloudflare'),
+  // or may exist but have no active connection — the dropdown note below
+  // distinguishes the two so the admin knows how to fix it.
+  const providerRow = providers.find((p) => p.providerKey === draft?.AI_PROVIDER);
+  const providerInCatalog = !!providerRow;
+  const providerIsAi = providerRow?.category === "ai";
+  const providerConfigured = providerIsAi && configuredProviders.has(draft.AI_PROVIDER);
   // EMBEDDING_DIMENSIONS only auto-follows models in the built-in map.
   const embeddingUnknownDims = draft?.EMBEDDING_MODEL && !EMBEDDING_DIMENSIONS[draft.EMBEDDING_MODEL];
 
   useHeaderActions(
-    <div className="flex items-center justify-end gap-3">
+    <div className="flex items-center justify-end gap-2">
       {company && (
         <>
           <Button variant="secondary" onClick={reset}>
             Reset
           </Button>
-          <Button onClick={save} disabled={!dirty || saving}>
+          <Button onClick={save} disabled={!dirty || saving} className="whitespace-nowrap">
             {saving ? <Spinner className="h-3.5 w-3.5" /> : "Save Changes"}
           </Button>
         </>
@@ -307,15 +382,24 @@ export default function Config() {
         </Card>
       ) : loading || !draft ? (
         <Card>
-          <div className="flex items-center justify-center py-10">
-            <Spinner className="h-6 w-6" />
-          </div>
+          <SkeletonCard rows={4} />
         </Card>
       ) : (
         <div className="space-y-6">
+          <Tabs
+            tabs={[
+              { id: "general", label: "General" },
+              { id: "models", label: "Models" },
+              { id: "playground", label: "Playground" },
+              { id: "security", label: "Security" },
+            ]}
+            active={activeTab}
+            onChange={setActiveTab}
+          >
+          <TabPanel id="general" active={activeTab}>
           <Card title="General" subtitle="Branding and company links used in the system prompt">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {GENERAL_KEYS.map((key) => (
+              {GENERAL_KEYS.filter((k) => k !== "CONSULTANT_NAME").map((key) => (
                 <Input
                   key={key}
                   label={GENERAL_LABELS[key]}
@@ -325,25 +409,47 @@ export default function Config() {
               ))}
             </div>
           </Card>
+          </TabPanel>
 
+          <TabPanel id="models" active={activeTab}>
           <Card
             title="Models & Provider"
             subtitle="AI provider and its models, selected from the gateway catalog"
           >
             <div className="space-y-4">
-              <div className="max-w-sm">
-                <Select
-                  label="Provider"
-                  options={providerOptions()}
-                  value={draft.AI_PROVIDER ?? ""}
-                  onChange={(e) => setKey("AI_PROVIDER", e.target.value)}
-                />
-                {draft?.AI_PROVIDER && !providerKnown && (
-                  <p className="mt-1.5 text-xs text-slate-500">
-                    Provider '{draft.AI_PROVIDER}' isn't in the catalog — its models aren't available here. Add it via the
-                    Catalog page.
-                  </p>
-                )}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <Select
+                    label="Provider"
+                    options={providerOptions()}
+                    value={draft.AI_PROVIDER ?? ""}
+                    onChange={(e) => setKey("AI_PROVIDER", e.target.value)}
+                  />
+                  {draft?.AI_PROVIDER && !providerConfigured && (
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      {!providerInCatalog
+                        ? `Provider '${draft.AI_PROVIDER}' isn't in the catalog — its models aren't available here. Add it via the Catalog page.`
+                        : !providerIsAi
+                          ? `Provider '${draft.AI_PROVIDER}' isn't an AI provider — only AI providers are listed here. Pick one from the dropdown.`
+                          : `Provider '${draft.AI_PROVIDER}' has no active connection for this company — add one on the Providers page to use its models here.`}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <Select
+                    label="Assistant"
+                    options={assistantOptions()}
+                    value={draft.ASSISTANT_KEY ?? ""}
+                    onChange={(e) => setKey("ASSISTANT_KEY", e.target.value)}
+                  />
+                  {assistantsNote && <p className="mt-1.5 text-xs text-amber-300">{assistantsNote}</p>}
+                  {draft?.ASSISTANT_KEY && (
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      The chatbot will use this assistant's system prompt, model, knowledge bases and graph settings
+                      instead of the company defaults below.
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <Select
@@ -357,6 +463,12 @@ export default function Config() {
                   options={resourceOptions(storageResources, draft.R2_BUCKET_NAME ?? "")}
                   value={draft.R2_BUCKET_NAME ?? ""}
                   onChange={(e) => setKey("R2_BUCKET_NAME", e.target.value)}
+                />
+                <Select
+                  label="Graph Database (Neo4j)"
+                  options={graphResourceOptions(graphResources, draft.NEO4J_DATABASE ?? "")}
+                  value={draft.NEO4J_DATABASE ?? ""}
+                  onChange={(e) => setKey("NEO4J_DATABASE", e.target.value)}
                 />
                 <Select
                   label="AI Model (large)"
@@ -405,47 +517,36 @@ export default function Config() {
                 </p>
               )}
               <p className="text-xs text-slate-500">
-                Vector Index and Storage (R2) Bucket come from the company's provisioned gateway resources — "Use company
-                default" keeps the value from the company config. "AI Model (large)" and "AI Model (small)" both list the
-                provider's chat models — pick the lighter/faster one for query rewriting.
+                Vector Index, Storage (R2) Bucket and Graph Database (Neo4j) come from the company's provisioned gateway
+                resources across every provider (Pinecone, Weaviate, S3, …) plus the live Cloudflare account — "Use company
+                default"/"No graph database" keeps the stored value. "AI Model (large)" and "AI Model (small)" both list the
+                provider's chat models — pick the lighter/faster one for query rewriting. When an Assistant is selected it
+                overrides the system prompt, model, KBs and graph database; GraphRAG runs only when the assistant has graph
+                context enabled and a Neo4j connection is configured.
               </p>
             </div>
           </Card>
+          </TabPanel>
 
-          <Card
-            title="Ask API Key"
-            subtitle="When enabled, POST /ask and /ask-stream require x-api-key and must originate from <company>.com or a subdomain"
-          >
-            <div className="flex flex-wrap items-center gap-3">
-              <Badge tone={apiKeyEnabled ? "green" : "amber"}>{apiKeyEnabled ? "Enabled" : "Disabled"}</Badge>
-              {generatedKey ? (
-                <Input
-                  readOnly
-                  label="Generated API key"
-                  value={generatedKey}
-                  onFocus={(e) => e.target.select()}
-                  className="w-96 font-mono text-xs"
-                />
-              ) : null}
-              {apiKeyEnabled ? (
-                <Button variant="danger" onClick={revokeApiKey} disabled={apiKeyBusy}>
-                  {apiKeyBusy ? <Spinner className="h-3.5 w-3.5" /> : "Revoke"}
-                </Button>
-              ) : (
-                <Button onClick={generateApiKey} disabled={apiKeyBusy}>
-                  {apiKeyBusy ? <Spinner className="h-3.5 w-3.5" /> : "Generate API Key"}
-                </Button>
-              )}
-              {generatedKey && (
-                <Button variant="secondary" onClick={copyApiKey}>
-                  Copy
-                </Button>
-              )}
-            </div>
-            {generatedKey && (
-              <p className="mt-2 text-xs text-amber-300">Shown once — copy it now. Regenerating invalidates the previous key.</p>
-            )}
-          </Card>
+          <TabPanel id="playground" active={activeTab}>
+          <ChatPlaygroundCard
+            company={company}
+            aiProvider={draft?.AI_PROVIDER || ""}
+            llmModel={draft?.LLM_MODEL}
+            options={modelOptions("chat", draft?.LLM_MODEL ?? "")}
+          />
+          </TabPanel>
+
+          <TabPanel id="security" active={activeTab}>
+          <AskApiKeyCard
+            company={company}
+            initialEnabled={apiKeyInitial}
+            onError={setError}
+            notify={notify}
+          />
+          </TabPanel>
+
+          </Tabs>
 
           {dirty && (
             <div className="flex items-center justify-between rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200">
@@ -463,7 +564,7 @@ export default function Config() {
         </div>
       )}
 
-      <Toast message={toast} />
+      <Toast message={toast?.msg} tone={toast?.tone} />
     </div>
   );
 }

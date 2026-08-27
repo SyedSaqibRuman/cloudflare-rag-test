@@ -29,30 +29,51 @@ export function invalidateRegistry() {
 
 /**
  * Load (or refresh) the provider catalog into memory.
+ *
+ * BULK-loaded: the five child tables are fetched with one query each (IN
+ * clause over all provider ids) and grouped in memory, instead of the old
+ * per-provider N+1 (122 providers × 5 queries = 610 round trips that took
+ * ~4s against a remote MySQL). Six queries total now — the first load and
+ * every post-invalidate rebuild are equally fast.
  * @returns {Promise<Array>} providers with nested capabilities/auth form/resource templates/models
  */
 export async function refreshRegistry() {
   const providers = await ProviderRepository.list();
+  const ids = providers.map((p) => p.id);
+  const [capabilities, authForms, resourceTemplates, models, endpoints] = await Promise.all([
+    ProviderRepository.capabilitiesByProviderIds(ids),
+    ProviderRepository.authFormsByProviderIds(ids),
+    ProviderRepository.resourceTemplatesByProviderIds(ids),
+    ModelRepository.listByProviderIds(ids),
+    EndpointRepository.listByProviderIds(ids),
+  ]);
+  const byProvider = (rows) => {
+    const map = new Map();
+    for (const row of rows) {
+      const list = map.get(row.provider_id);
+      if (list) list.push(row);
+      else map.set(row.provider_id, [row]);
+    }
+    return map;
+  };
+  const capByProvider = byProvider(capabilities);
+  const formByProvider = byProvider(authForms);
+  const tmplByProvider = byProvider(resourceTemplates);
+  const modelsByProvider = byProvider(models);
+  const endpointsByProvider = byProvider(endpoints);
   const entries = [];
   cache = {
     providers: entries,
     byKey: new Map(),
   };
   for (const provider of providers) {
-    const [capabilities, authForm, resourceTemplates, models, endpoints] = await Promise.all([
-      ProviderRepository.capabilities(provider.id),
-      ProviderRepository.authForm(provider.id),
-      ProviderRepository.resourceTemplates(provider.id),
-      ModelRepository.listByProvider(provider.id),
-      EndpointRepository.list({ providerId: provider.id }),
-    ]);
     const entry = {
       ...provider,
-      capabilities,
-      authForm,
-      resourceTemplates,
-      models,
-      endpoints,
+      capabilities: capByProvider.get(provider.id) || [],
+      authForm: formByProvider.get(provider.id) || [],
+      resourceTemplates: tmplByProvider.get(provider.id) || [],
+      models: modelsByProvider.get(provider.id) || [],
+      endpoints: endpointsByProvider.get(provider.id) || [],
     };
     entries.push(entry);
     cache.byKey.set(provider.provider_key, entry);
@@ -85,6 +106,11 @@ export async function listProviders() {
       providerName: provider_name,
       category: primary_service_category,
       authType: auth_type,
+      logoUrl: entry.logo_url ?? null,
+      websiteUrl: entry.website_url ?? null,
+      documentationUrl: entry.documentation_url ?? null,
+      isActive: entry.is_active,
+      roundRobinEnabled: !!entry.round_robin_enabled,
       models: entry.models.length,
       endpoints: entry.endpoints.length,
       capabilities: capabilityKeys.length,

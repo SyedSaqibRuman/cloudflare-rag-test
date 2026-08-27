@@ -30,6 +30,367 @@ Final Answer
 
 ---
 
+## End-to-End Setup Flow
+
+This section walks through the complete journey from creating a company to asking questions — the path every new tenant follows.
+
+### Step 1 — Create Company
+
+```
+#companies → [Create Company]
+
+  Company name: [ popularcert ]
+  Company key:  [ popularcert ] (auto-generated, /^[a-z0-9-]+$/)
+
+  POST /cloudflare/companies
+  Body: { name: "popularcert" }
+
+  → MySQL: companies row + 3 default environments (Development, Staging, Production)
+  → Credentials: EMPTY (no Cloudflare keys yet)
+
+  Note: SQLite (db/<company>.db) is a legacy compatibility backend. The
+  canonical v5 flow uses MySQL exclusively (CONFIG_STORE=mysql in .env).
+```
+
+### Step 2 — Add Provider (Catalog)
+
+```
+#catalog → [Add OpenAI Compatible]
+
+  Provider key:  cloudflare
+  Provider name: Cloudflare AI
+  Category:      ai
+  Auth type:     bearer_token
+  Base URL:      https://api.cloudflare.com/client/v4
+
+  POST /gateway/providers
+  Body: { providerKey, providerName, category, authType }
+
+  → MySQL: providers + auth_schemas + capabilities + models
+  → Registry cache invalidated
+```
+
+### Step 3 — Add Credential (Gateway Connection)
+
+```
+#catalog/cloudflare → Connections → [Add Connection]
+
+  Provider:     Cloudflare AI (pre-selected)
+  Name:         Production Cloudflare
+  Key:          cloudflare-prod
+  Environment:  Production
+  API Token:    ********************************
+  Account ID:   ********************************
+
+  POST /gateway/companies/popularcert/credentials
+  Body: { providerKey, credentialKey, fields: { api_token, account_id } }
+
+  → MySQL: credentials row (encrypted_credentials = AES-256-GCM blob)
+  → RAG config store (synced by rag-sync.js):
+      CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+      R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+```
+
+### Step 4 — Provision Resources (Vector Index + R2 Bucket)
+
+```
+#catalog/cloudflare → Resources Card
+
+  Vector Index: [+ Create "popularcert-vectors"]
+  R2 Bucket:    [+ Create "popularcert-docs"]
+
+  POST /gateway/companies/popularcert/resources
+  Body: { resourceType, resourceName, config }
+
+  → MySQL: provider_resources
+  → Live Cloudflare API: Vectorize index + R2 bucket created
+```
+
+### Step 5 — Create Knowledge Base
+
+```
+#kbs → [Create Knowledge Base]
+
+  KB Key:          iso-docs
+  KB Name:         ISO Certification Docs
+  Embedding Model: bge-base-en-v1.5 (from catalog)
+  Vector Store:    popularcert-vectors (from resources)
+  Object Storage:  popularcert-docs (from resources)
+  Chunk Size:      512
+  Retrieval Top-K: 10
+
+  POST /gateway/kbs
+  Body: { kbKey, kbName, embeddingModelId, vectorResourceId,
+          storageResourceId, chunkSize, retrievalTopK }
+
+  → MySQL: knowledge_bases
+     embedding_model_id → provider_models row
+     vector_resource_id → provider_resources row (vector_index)
+     storage_resource_id → provider_resources row (object_bucket)
+     status: "ready"
+
+  Authorization chain (enforced at runtime):
+     Embedding Model
+         ↓
+     Provider Model
+         ↓
+     Credential Model Access  ← prevents unauthorized model usage
+         ↓
+     Credential
+         ↓
+     Provider
+```
+
+### Step 6 — Create Assistant
+
+```
+#assistants → [Create Assistant]
+
+  Assistant Key:   iso-assistant
+  Assistant Name:  ISO Certification Bot
+  Credential:      cloudflare-prod (from Step 3)
+  Model:           @cf/meta/llama-3.1-8b-instruct
+  Primary KB:      iso-docs (from Step 5)
+  System Prompt:   "You are an ISO certification expert..."
+  Temperature:     0.3
+  Max Tokens:      4096
+
+  POST /gateway/assistants
+  Body: { assistantKey, credentialId, modelId, primaryKbId,
+          systemPrompt, temperature, maxTokens }
+
+  → MySQL: assistants
+     credential_id → credentials row (API keys)
+     model_id → provider_models row (LLM model)
+     primary_kb_id → knowledge_bases row
+     model_key (denormalized for fast lookup)
+
+  Authorization chain (enforced at runtime):
+     Assistant
+         ↓
+     Credential
+         ↓
+     Credential Model Access  ← prevents unauthorized model usage
+         ↓
+     Provider Model
+```
+
+### Step 7 — Select Assistant for Company
+
+```
+#config → Models tab → Assistant dropdown
+
+  Assistant: [ iso-assistant ]
+
+  This overrides the entire pipeline persona:
+  • System prompt from assistant
+  • LLM model from assistant's credential
+  • Retrieval index from assistant's primary KB
+  • Temperature / max tokens from assistant
+
+  PUT /cloudflare/companies/popularcert
+  Body: { ASSISTANT_KEY: "iso-assistant" }
+
+  → Runtime Config (memory singleton):
+      ASSISTANT_KEY → on next /ask:
+        resolveAssistant("iso-assistant")
+        → overrides persona, model, retrieval index
+
+  Note: ASSISTANT_KEY is the legacy runtime compatibility setting for
+  selecting a company's default assistant. The canonical v5 flow treats
+  the assistant as the single source of truth for persona, model, KB,
+  and parameters. ASSISTANT_KEY exists only so the legacy config page
+  can select an assistant without the gateway's company-assistant table.
+```
+
+### Step 8 — Run Ingestion
+
+```
+#kbs/iso-docs → [Start Ingestion]
+
+  Ingestion Scope:
+    ○ Entire website    → { scope: "all", contentTypes: ["page", "post"] }
+    ○ Selected pages    → { scope: "selected", items: [{ type: "page", id: 123 }] }
+    ○ Limit documents   → { scope: "limit", limit: 100, contentTypes: ["page", "post"] }
+
+  POST /gateway/kbs/iso-docs/ingest
+  Body: { scope: { scope: "all", contentTypes: ["page", "post"] } }
+
+  Returns:
+  { jobId: "ing_01...", status: "started" }
+
+  The ingestion runs as a background job (standalone job tracked in
+  standaloneJobs Map). Status is polled via:
+  GET /gateway/kbs/iso-docs/status
+```
+
+```
+ingest.js → main()
+  │
+  ├── KB status → "indexing"
+  │
+  ├── resolveKbAdapters(kb, company)
+  │     ├── storage_resource_id → resolveResourceConnection()
+  │     │   → createStoreAdapter("cloudflare", creds, bucket)
+  │     ├── embedding_model_id → resolveEmbeddingModel()
+  │     │   → createEmbeddingAdapter("cloudflare", creds, model)
+  │     └── vector_resource_id → resolveResourceConnection()
+  │         → createVectorAdapter("cloudflare", creds, index)
+  │
+  └── runIngestion({ store, index, ... })
+        │
+        ├── WordPress Source Fetcher
+        │   GET /wp-json/wp/v2/pages|posts (per_page=100, pagination)
+        │
+        ├── Registry (skip unchanged posts)
+        │   isStale(post, modified)?
+        │
+        ├── Cleaner
+        │   HTML → Markdown (turndown) → strip boilerplate
+        │
+        ├── Chunker
+        │   Split by chunk_size (512) → filter < 40 chars
+        │
+        ├── ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+        │   │ Object Store (R2)│    │ Embedding Model  │    │ Graph Extractor  │
+        │   │ uploadChunk()    │    │ embed(texts)     │    │ (optional, async)│
+        │   └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
+        │            │                       │                       │
+        │            │              ┌────────▼─────────┐             │
+        │            │              │ Vector Store     │             │
+        │            │              │ upsert(chunks)   │             │
+        │            │              └────────┬─────────┘             │
+        │            │                       │                       │
+        │            └───────────┬───────────┴───────────────────────┘
+        │                        ▼
+        │              Registry.record()
+        │              (mark as processed)
+        │
+        ├── On completion:
+        │   KB status → "active"
+        │   Audit: kb.ingest.completed + statistics
+        │
+        │   Ingestion Statistics:
+        │   {
+        │     documentsDiscovered: 1250,
+        │     documentsProcessed:  840,
+        │     documentsSkipped:    390,
+        │     chunksCreated:       6210,
+        │     vectorsUpserted:     6210,
+        │     durationMs:          182340
+        │   }
+        │
+        ├── On failure: KB status → "error" + audit
+        └── On abort:   KB status unchanged (clean exit)
+```
+
+### Step 9 — Ask Questions (RAG)
+
+```
+POST /ask
+Header: x-company-name: popularcert
+Body: { "question": "What ISO certifications do you offer?" }
+```
+
+```
+RAG Pipeline (query/)
+  │
+  ├── 1. Intent check (intent.js)
+  │      → not greeting/vague/blocked → proceed
+  │
+  ├── 2. Resolve assistant (assistant.js)
+  │      → ASSISTANT_KEY = "iso-assistant"
+  │      → overrides: system_prompt, model, temperature,
+  │        vector index, primary KB
+  │
+  ├── 3. Rewrite followup (llm.js)
+  │      → if history, rewrite with SMALL_LLM
+  │
+  ├── 4. Cache check (cache.js)
+  │      → MD5: "popularcert:rewritten question"
+  │      → hit? return cached answer
+  │
+  ├── 5. Embed question (cloudflare_embeddings.js)
+  │      → CF REST API → 768-dim vector
+  │
+  ├── 6. Vector query (vectorize.js)
+  │      → top 10 from Vectorize
+  │      → filter: ≥75% of top score AND ≥0.5 abs
+  │
+  ├── 7. Hybrid scoring (scoring.js)
+  │      → 85% vector + 15% keyword
+  │
+  ├── 8. Dedupe + rerank (reranker.js)
+  │      → dedupe by post_id/url/r2_key
+  │      → if >3 matches: rerank with RERANKING_MODEL
+  │      → top 5
+  │
+  ├── 9. Fetch chunks from R2 (via store adapter)
+  │      → metadata.r2_key → R2 GET
+  │      → build context (max 4000 chars, [Source N] labels)
+  │
+  ├── 10. LLM call (answer.js)
+  │       → model from assistant override
+  │       → system_prompt from assistant
+  │       → context + question → answer + sources
+  │
+  └── 11. Cache result (cache.js)
+          → MD5 key → 60-min TTL
+```
+
+### Entity Relationship
+
+```
+Company
+  ├── Environments (Development / Staging / Production)
+  │     └── Credentials (encrypted at rest, per-environment)
+  │           └── Provider (from catalog)
+  │                 └── Credential Model Access (authorization boundary)
+  │                       └── Provider Model
+  │
+  ├── Resources (Vectorize index, R2 bucket, Neo4j DB)
+  │     └── Provider (from catalog)
+  │           └── Credential (API keys for live provisioning)
+  │
+  ├── Knowledge Bases
+  │     ├── Embedding Model → Provider Model
+  │     │     └── (authorized via Credential Model Access)
+  │     ├── Vector Store → Provider Resource
+  │     ├── Object Storage → Provider Resource
+  │     └── Graph Store → Provider Resource (optional)
+  │
+  └── Assistants
+        ├── Credential → Provider (API keys)
+        ├── Model → Provider Model (LLM)
+        │     └── (authorized via Credential Model Access)
+        ├── Primary KB → Knowledge Base
+        └── Graph Resource → Provider Resource (optional)
+```
+
+### Key Principles
+
+> **The Knowledge Base controls infrastructure.** Each KB binds to specific
+> provider resources (vector index, R2 bucket, embedding model). The
+> ingestion pipeline never knows whether it's using Cloudflare, S3,
+> Pinecone, or OpenAI — it receives provider-agnostic adapters from
+> `resolveKbAdapters()`. Adding a new provider means adding an adapter
+> class + factory case — zero changes to the pipeline.
+
+> **Credential Model Access is the authorization boundary.** A KB or
+> Assistant cannot use a model unless the credential has a
+> `credential_model_access` row granting permission. This prevents a KB
+> from using an embedding model the credential isn't authorized for, and
+> prevents an Assistant from calling an LLM model outside the credential's
+> allowed set.
+
+> **SQLite is legacy compatibility only.** The canonical v5 flow uses
+> MySQL (`CONFIG_STORE=mysql`). SQLite (`db/<company>.db`) exists only
+> for backward compatibility with companies created before the MySQL
+> backend was introduced. On first MySQL boot, existing SQLite companies
+> are auto-lifted into MySQL.
+
+---
+
 ## RAG Pipeline
 
 ### How It Works

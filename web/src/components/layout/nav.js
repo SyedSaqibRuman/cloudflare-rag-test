@@ -15,7 +15,7 @@ export const NAV = [
     section: "AI",
     items: [
       { id: "ask", label: "Ask Console", icon: "chat" },
-      { id: "kbs", label: "Knowledge Bases", icon: "book" },
+      { id: "ingestion", label: "Knowledge Bases", icon: "book" },
       { id: "assistants", label: "Assistants", icon: "bot" },
     ],
   },
@@ -35,10 +35,7 @@ export const NAV = [
   },
   {
     section: "Gateway",
-    items: [
-      { id: "catalog", label: "Providers", icon: "layers" },
-      { id: "credentials", label: "Credentials", icon: "key" },
-    ],
+    items: [{ id: "catalog", label: "Providers", icon: "layers" }],
   },
 ];
 
@@ -48,10 +45,9 @@ export const PAGE_META = {
   companies: { title: "Companies", subtitle: "Tenants with isolated config, vector index, and R2 bucket" },
   config: { title: "Company Config", subtitle: "Hot-reloadable runtime configuration per tenant" },
   cloudflare: { title: "Cloudflare Resources", subtitle: "Vector indexes and R2 buckets across the account" },
-  scheduler: { title: "Scheduler", subtitle: "Run jobs on demand, schedule them with cron, and manage reusable presets" },
+  scheduler: { title: "Scheduler", subtitle: "Run jobs, schedule cron tasks, manage presets, and trigger content ingestion" },
   logs: { title: "Logs", subtitle: "Server log files written by the app (error, process, upload, vector)" },
-  catalog: { title: "Service Catalog", subtitle: "Every service the platform integrates with — AI models, storage, vector, graph, and databases" },
-  kbs: { title: "Knowledge Bases", subtitle: "Per-company RAG corpora — settings, ingestion, and status" },
-  credentials: { title: "Credentials", subtitle: "Per-company API keys and secrets — encrypted at rest, never returned" },
+  catalog: { title: "Providers", subtitle: "Connect providers with API keys or OAuth — live status, batch testing, and per-provider models" },
+  ingestion: { title: "Knowledge Bases", subtitle: "Create and manage isolated knowledge repositories for your AI assistants" },
   assistants: { title: "Assistants", subtitle: "Personas bound to a credential, a model, and knowledge bases" },
 };

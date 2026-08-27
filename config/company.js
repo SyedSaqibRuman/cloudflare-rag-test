@@ -6,6 +6,7 @@ import {
 } from "./schema.js";
 import { runtimeConfig, saveConfig, getCompanyConfig, deleteCompanyDb } from "./store.js";
 import { validateConfigKey, validateCompanyName } from "./validation.js";
+import { NotFoundError } from "../shared/errors.js";
 
 /**
  * Get a snapshot of a company's config.
@@ -13,7 +14,7 @@ import { validateConfigKey, validateCompanyName } from "./validation.js";
  */
 export function getConfig(companyName) {
   const config = getCompanyConfig(companyName);
-  if (!config) throw new Error(`Company '${companyName || "(missing)"}' not found. Pass x-company-name header.`);
+  if (!config) throw new NotFoundError(`Company '${companyName || "(missing)"}' not found. Pass x-company-name header.`, "COMPANY_NOT_FOUND");
   return { ...config };
 }
 
@@ -36,15 +37,16 @@ export function listCompanies() {
     name,
     COMPANY_NAME: config.COMPANY_NAME,
     CONSULTANT_NAME: config.CONSULTANT_NAME,
+    ASSISTANT_KEY: config.ASSISTANT_KEY || null,
     BASE_URL: config.BASE_URL,
     VECTOR_INDEX: config.VECTOR_INDEX,
     R2_BUCKET_NAME: config.R2_BUCKET_NAME,
     // Whether any Cloudflare credentials are configured. Boolean only — never
     // expose the secrets themselves through the list endpoint.
     hasCredentials: CREDENTIAL_KEYS.some((k) => config[k]),
-    // Whether the Cloudflare API is usable for this company: account id +
-    // API token both set. Drives the admin sidebar's "Cloudflare" nav item.
-    hasCloudflareApi: !!(config.CLOUDFLARE_ACCOUNT_ID && config.CLOUDFLARE_API_TOKEN),
+    // Show the Cloudflare nav item only when a vector index or R2 bucket is
+    // configured — the page is useless without at least one resource.
+    hasCloudflareApi: !!(config.VECTOR_INDEX || config.R2_BUCKET_NAME),
   }));
 }
 

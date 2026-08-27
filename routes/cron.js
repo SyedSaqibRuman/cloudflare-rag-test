@@ -24,94 +24,74 @@ const router = express.Router();
 
 // GET /presets
 router.get("/presets", (req, res) => {
-  try {
-    return res.json({ success: true, presets: listPresets() });
-  } catch (err) {
-    console.error("❌ GET /presets error:", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
+  return res.json({ success: true, presets: listPresets() });
 });
 
 // POST /presets
 // Body: { name, schedule }
 router.post("/presets", (req, res) => {
-  try {
-    const { name, schedule } = req.body || {};
+  const { name, schedule } = req.body || {};
 
-    if (!name?.trim()) {
-      return res.status(400).json({ success: false, message: "name is required." });
-    }
-
-    if (!schedule?.trim()) {
-      return res.status(400).json({ success: false, message: "schedule is required." });
-    }
-
-    if (!cron.validate(schedule.trim())) {
-      return res.status(400).json({ success: false, message: "Invalid cron expression." });
-    }
-
-    const preset = createPreset(name.trim(), schedule.trim());
-    return res.status(201).json({ success: true, preset });
-  } catch (err) {
-    console.error("❌ POST /presets error:", err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!name?.trim()) {
+    return res.status(400).json({ success: false, error: "name is required." });
   }
+
+  if (!schedule?.trim()) {
+    return res.status(400).json({ success: false, error: "schedule is required." });
+  }
+
+  if (!cron.validate(schedule.trim())) {
+    return res.status(400).json({ success: false, error: "Invalid cron expression." });
+  }
+
+  const preset = createPreset(name.trim(), schedule.trim());
+  return res.status(201).json({ success: true, preset });
 });
 
 // PUT /presets/:id
 // Body: { name, schedule }
 router.put("/presets/:id", (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const { name, schedule } = req.body || {};
+  const id = Number(req.params.id);
+  const { name, schedule } = req.body || {};
 
-    if (!Number.isInteger(id) || id <= 0) {
-      return res.status(400).json({ success: false, message: "Invalid preset id." });
-    }
-
-    if (!name?.trim()) {
-      return res.status(400).json({ success: false, message: "name is required." });
-    }
-
-    if (!schedule?.trim()) {
-      return res.status(400).json({ success: false, message: "schedule is required." });
-    }
-
-    if (!cron.validate(schedule.trim())) {
-      return res.status(400).json({ success: false, message: "Invalid cron expression." });
-    }
-
-    const updated = updatePreset(id, name.trim(), schedule.trim());
-    if (!updated) {
-      return res.status(404).json({ success: false, message: "Preset not found." });
-    }
-
-    return res.json({ success: true, message: "Preset updated." });
-  } catch (err) {
-    console.error("❌ PUT /presets/:id error:", err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, error: "Invalid preset id." });
   }
+
+  if (!name?.trim()) {
+    return res.status(400).json({ success: false, error: "name is required." });
+  }
+
+  if (!schedule?.trim()) {
+    return res.status(400).json({ success: false, error: "schedule is required." });
+  }
+
+  if (!cron.validate(schedule.trim())) {
+    return res.status(400).json({ success: false, error: "Invalid cron expression." });
+  }
+
+  const updated = updatePreset(id, name.trim(), schedule.trim());
+  if (!updated) {
+    return res.status(404).json({ success: false, error: "Preset not found." });
+  }
+
+  return res.json({ success: true, message: "Preset updated." });
 });
 
 // DELETE /presets/:id
 router.delete("/presets/:id", (req, res) => {
-  try {
-    const id = Number(req.params.id);
+  const id = Number(req.params.id);
 
-    if (!Number.isInteger(id) || id <= 0) {
-      return res.status(400).json({ success: false, message: "Invalid preset id." });
-    }
-
-    const deleted = deletePreset(id);
-    if (!deleted) {
-      return res.status(404).json({ success: false, message: "Preset not found." });
-    }
-
-    return res.json({ success: true, message: "Preset deleted." });
-  } catch (err) {
-    console.error("❌ DELETE /presets/:id error:", err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, error: "Invalid preset id." });
   }
+
+  const deleted = deletePreset(id);
+  if (!deleted) {
+    return res.status(404).json({ success: false, error: "Preset not found." });
+  }
+
+  return res.json({ success: true, message: "Preset deleted." });
 });
 
 // ============================================================
@@ -122,19 +102,14 @@ router.delete("/presets/:id", (req, res) => {
 // Body: { jobId, companyName?, kbKey? }
 // Starts a job immediately. Multiple concurrent jobs allowed (up to MAX_CONCURRENT_JOBS).
 router.post("/job/start", async (req, res) => {
-  try {
-    const { jobId, companyName, kbKey } = req.body;
+  const { jobId, companyName, kbKey } = req.body;
 
-    if (!jobId) {
-      return res.status(400).json({ success: false, message: "jobId is required." });
-    }
-
-    const result = await startJob(jobId, companyName, { kbKey });
-    return res.status(result.success ? 200 : 400).json(result);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!jobId) {
+    return res.status(400).json({ success: false, error: "jobId is required." });
   }
+
+  const result = await startJob(jobId, companyName, { kbKey });
+  return res.status(result.success ? 200 : 400).json(result);
 });
 
 // POST /job/stop
@@ -160,23 +135,18 @@ router.get("/jobs/running", (req, res) => {
 // Body: { jobId, schedule, companyName? }
 // Multiple concurrent cron schedules allowed (up to MAX_CONCURRENT_JOBS).
 router.post("/cron/start", (req, res) => {
-  try {
-    const { jobId, schedule, companyName } = req.body;
+  const { jobId, schedule, companyName } = req.body;
 
-    if (!jobId) {
-      return res.status(400).json({ success: false, message: "jobId is required." });
-    }
-
-    if (!schedule) {
-      return res.status(400).json({ success: false, message: "schedule (cron expression) is required." });
-    }
-
-    const result = startCron(jobId, schedule, companyName);
-    return res.status(result.success ? 200 : 400).json(result);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
+  if (!jobId) {
+    return res.status(400).json({ success: false, error: "jobId is required." });
   }
+
+  if (!schedule) {
+    return res.status(400).json({ success: false, error: "schedule (cron expression) is required." });
+  }
+
+  const result = startCron(jobId, schedule, companyName);
+  return res.status(result.success ? 200 : 400).json(result);
 });
 
 // POST /cron/stop

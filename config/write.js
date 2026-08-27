@@ -63,8 +63,18 @@ export async function resetCompanyConfig(companyName) {
 export async function resetConfig() {
   const companyName = DEFAULT_COMPANY.COMPANY_NAME;
 
+  // Collect per-company failures instead of swallowing them — a DB that
+  // refuses deletion must be reported, not silently kept around.
+  const failed = [];
   for (const name of Object.keys(runtimeConfig.COMPANIES)) {
-    await deleteCompanyDb(name).catch(() => {});
+    try {
+      await deleteCompanyDb(name);
+    } catch (err) {
+      failed.push({ name, error: err.message });
+    }
+  }
+  if (failed.length) {
+    console.warn(`⚠️  ${failed.length} company DB(s) could not be deleted during reset:`, failed);
   }
   clearAllCompanyDbs();
 

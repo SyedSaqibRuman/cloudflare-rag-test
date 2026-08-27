@@ -7,7 +7,17 @@ import { env } from "./env.js";
 
 export const AUTH_ENABLED = Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD);
 
-const SECRET = env.ADMIN_SECRET || env.ADMIN_PASSWORD || "insecure-dev-only-secret";
+// HMAC secret for signing session tokens. It must be an explicit ADMIN_SECRET —
+// falling back to the admin password (or a known constant) would let anyone who
+// reads the repo forge valid tokens. When unset, an ephemeral random secret is
+// generated per boot: auth keeps working within a process lifetime, but tokens
+// never survive a restart (and are unforgeable).
+const SECRET = env.ADMIN_SECRET || crypto.randomBytes(32).toString("hex");
+if (AUTH_ENABLED && !env.ADMIN_SECRET) {
+  console.warn(
+    "⚠️  ADMIN_SECRET is not set — using an ephemeral random secret. Admin sessions will be invalidated on every server restart. Set ADMIN_SECRET in .env (generate with: openssl rand -hex 32)."
+  );
+}
 const TTL_SECONDS = Math.max(1, parseInt(env.ADMIN_TOKEN_TTL_HOURS || "12", 10)) * 3600;
 
 export const TOKEN_TTL_SECONDS = TTL_SECONDS;

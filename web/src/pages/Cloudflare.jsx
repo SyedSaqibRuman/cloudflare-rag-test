@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton, Toast } from "../components/ui";
 import { useCompanies } from "../context";
-import { usePoll } from "../hooks";
+import { usePoll, useToast } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
 import { formatDate } from "../util";
 
@@ -72,15 +72,10 @@ export default function Cloudflare() {
   const [buckets, setBuckets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { toast, notify } = useToast();
   const [createIndex, setCreateIndex] = useState(false);
   const [createBucket, setCreateBucket] = useState(false);
   const [busyName, setBusyName] = useState(null);
-
-  const notify = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
 
   const load = async () => {
     setError(null);
@@ -319,7 +314,7 @@ export default function Cloudflare() {
         onSubmit={handleCreateBucket}
       />
 
-      <Toast message={toast} />
+      <Toast message={toast?.msg} tone={toast?.tone} />
     </div>
   );
 }

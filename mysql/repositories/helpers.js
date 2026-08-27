@@ -8,7 +8,6 @@
 // JSON columns come back as strings from mysql2; the `json()` helper parses
 // them so callers get plain objects.
 // --------------------------
-import { getPool } from "../pool.js";
 
 export function json(value) {
   if (value === null || value === undefined) return value;

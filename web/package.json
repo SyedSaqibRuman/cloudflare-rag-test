@@ -6,16 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "analyze": "ANALYZE=true vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@radix-ui/react-dropdown-menu": "^2.1.24",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.7",
     "@vitejs/plugin-react": "^4.4.1",
+    "rollup-plugin-visualizer": "^7.1.1",
     "tailwindcss": "^4.1.7",
     "vite": "^6.3.5"
   }

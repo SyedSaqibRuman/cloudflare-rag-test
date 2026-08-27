@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 const ENDPOINT_SELECT = `SELECT pe.id, pe.provider_id, p.provider_key, p.provider_name,
@@ -14,14 +14,11 @@ const ENDPOINT_SELECT = `SELECT pe.id, pe.provider_id, p.provider_key, p.provide
                            JOIN providers p ON p.id = pe.provider_id`;
 
 export const EndpointRepository = {
-  async list({ providerId = null, providerKey = null } = {}) {
+  async list() {
     const pool = await getPool();
     const [rows] = await pool.query(
       `${ENDPOINT_SELECT}
-        WHERE (? IS NULL OR pe.provider_id = ?)
-          AND (? IS NULL OR p.provider_key = ?)
-        ORDER BY p.provider_name, pe.is_default DESC, pe.endpoint_name`,
-      [providerId, providerId, providerKey, providerKey]
+        ORDER BY p.provider_name, pe.is_default DESC, pe.endpoint_name`
     );
     return rows.map(mapRow);
   },
@@ -30,6 +27,21 @@ export const EndpointRepository = {
     const pool = await getPool();
     const [rows] = await pool.query(`${ENDPOINT_SELECT} WHERE pe.id = ?`, [id]);
     return rows[0] ? mapRow(rows[0]) : null;
+  },
+
+  /** Bulk variant for the registry loader — one query for all providers,
+   * rows carry provider_id for in-memory grouping. Same columns/ordering as
+   * list() (per provider). */
+  async listByProviderIds(providerIds) {
+    if (!providerIds.length) return [];
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `${ENDPOINT_SELECT}
+        WHERE pe.provider_id IN (?)
+        ORDER BY pe.provider_id, pe.is_default DESC, pe.endpoint_name`,
+      [providerIds]
+    );
+    return rows.map(mapRow);
   },
 
   /** Uniqueness gate for uk_provider_endpoint (provider_id, endpoint_key). */

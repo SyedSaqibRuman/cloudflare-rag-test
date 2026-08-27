@@ -1,41 +1,39 @@
 // Theme switcher: icon-button trigger opening a dropdown with Light mode /
-// Dark mode / Follow system. The trigger icon reflects the current preference
-// (sun / moon / sun-moon). Styling follows the portal's slate/indigo palette.
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./dropdown-menu";
+// Dark mode / Follow system. Uses the lightweight CSS Popover (zero deps).
+import { Popover, PopoverTrigger, PopoverContent, PopoverItem } from "./ui";
 import { cx } from "../util";
 
-export default function ThemeToggle({ theme, onChange }) {
+export default function ThemeToggle({ onChange }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
+    <Popover>
+      <PopoverTrigger asChild>
         <button
           type="button"
           aria-label="Toggle theme"
           title="Toggle theme"
           className={cx(
             "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-700 text-slate-400 shadow-sm transition-colors",
-            "hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400",
-            "data-[state=open]:bg-slate-800 data-[state=open]:text-slate-100"
+            "hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
           )}
         >
           <IconSunMoon className="h-[1.2rem] w-[1.2rem]" />
         </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={8}>
-        <DropdownMenuItem onClick={() => onChange("light")}>
+      </PopoverTrigger>
+      <PopoverContent align="end" sideOffset={8}>
+        <PopoverItem onClick={() => onChange("light")}>
           <IconSun />
           Light mode
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onChange("dark")}>
+        </PopoverItem>
+        <PopoverItem onClick={() => onChange("dark")}>
           <IconMoon />
           Dark mode
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onChange("system")}>
+        </PopoverItem>
+        <PopoverItem onClick={() => onChange("system")}>
           <IconSunMoon />
           Follow system
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </PopoverItem>
+      </PopoverContent>
+    </Popover>
   );
 }
 

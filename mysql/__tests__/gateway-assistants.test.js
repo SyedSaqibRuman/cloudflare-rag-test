@@ -570,6 +570,81 @@ test("PUT assistant merges over the existing row, keeps the key, and audits assi
 });
 
 // ------------------------------------------------------------------
+// PUT rename — the key in the route param is the identity, even when
+// the body contains a different assistantKey (the scenario that caused
+// the "Assistant 'sarah' not found" bug when the old frontend auto-
+// slugified the name into the key field on every keystroke).
+// ------------------------------------------------------------------
+
+test("PUT rename finds the assistant by route param key, not the body key", async () => {
+  const { restores, calls } = stubHappy({ existing: EXISTING });
+  const server = await listen(makeApp());
+  try {
+    // The old buggy frontend would send assistantKey: "sarah" in the body
+    // while using the original key "sales-bot" in the route param.
+    const { res, json } = await req(
+      server,
+      "PUT",
+      "/gateway/assistants/sales-bot",
+      { assistantName: "Sarah", assistantKey: "sarah" },
+      HEADERS
+    );
+    assert.equal(res.status, 200);
+    assert.equal(json.success, true);
+    // The key must stay as the route param identity — not the body value.
+    assert.equal(json.assistantKey, "sales-bot");
+    assert.equal(calls.updateArgs.input.assistantKey, "sales-bot");
+    assert.equal(calls.updateArgs.input.assistantName, "Sarah");
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
+});
+
+test("PUT rename-only succeeds with only assistantName in the body", async () => {
+  const { restores, calls } = stubHappy({ existing: EXISTING });
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await req(
+      server,
+      "PUT",
+      "/gateway/assistants/sales-bot",
+      { assistantName: "Sarah - Certification Coach" },
+      HEADERS
+    );
+    assert.equal(res.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(json.assistantKey, "sales-bot");
+    assert.equal(calls.updateArgs.input.assistantName, "Sarah - Certification Coach");
+    assert.equal(calls.updateArgs.input.assistantKey, "sales-bot");
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
+});
+
+test("PUT rename to a name that would slugify differently keeps the original key", async () => {
+  const { restores, calls } = stubHappy({ existing: EXISTING });
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await req(
+      server,
+      "PUT",
+      "/gateway/assistants/sales-bot",
+      { assistantName: "New Name With Spaces" },
+      HEADERS
+    );
+    assert.equal(res.status, 200);
+    assert.equal(json.assistantKey, "sales-bot");
+    assert.equal(calls.updateArgs.input.assistantKey, "sales-bot");
+    assert.equal(calls.updateArgs.input.assistantName, "New Name With Spaces");
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
+});
+
+// ------------------------------------------------------------------
 // DELETE /gateway/assistants/:key
 // ------------------------------------------------------------------
 

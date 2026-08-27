@@ -16,11 +16,27 @@ import endpointsRouter from "./endpoints.js";
 import pricingRouter from "./pricing.js";
 import kbsRouter from "./kbs.js";
 import assistantsRouter from "./assistants.js";
+import executeRouter from "./execute.js";
+import cloudflareResourcesRouter from "./cloudflare-resources.js";
+import ingestionRouter from "./ingestion.js";
 
 const router = express.Router();
 
 // Every gateway route requires a configured database (503 otherwise).
 router.use(gate);
+
+// Defensive: a double slash (e.g. /gateway/companies//credentials when the
+// portal's company key is empty) matches no :key route and would otherwise
+// fall through to the app-level "Route not found". Return a clear 400 instead.
+router.use((req, res, next) => {
+  if (/\/\//.test(req.path)) {
+    return res.status(400).json({
+      success: false,
+      error: "Malformed gateway path — empty path segment (missing company key?).",
+    });
+  }
+  next();
+});
 
 router.use(healthRouter);
 router.use(providersRouter);
@@ -31,5 +47,8 @@ router.use(endpointsRouter);
 router.use(pricingRouter);
 router.use(kbsRouter);
 router.use(assistantsRouter);
+router.use(executeRouter);
+router.use(cloudflareResourcesRouter);
+router.use("/ingest", ingestionRouter);
 
 export default router;

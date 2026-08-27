@@ -27,7 +27,7 @@ The server starts on `http://localhost:3000` by default. Browsers get the admin 
 |---------|---------|
 | `node app.js` | Start the API server (also serves the built UI from `web/dist`) |
 | `node mysql/migrate.js` | Apply MySQL migrations (`--dry-run` previews without applying) |
-| `node test.js` | MySQL connectivity + migration status check |
+| `node scripts/test.js` | MySQL connectivity + migration status check |
 | `cd web && npm run build` | Build the admin portal into `web/dist` — required before the server serves the UI |
 | `cd web && npm run dev` | Vite dev server with API proxying (:5173) |
 
@@ -63,7 +63,7 @@ MYSQL_DATABASE=
 # Admin login (OPT-IN — every admin route stays open until both are set)
 ADMIN_USERNAME=
 ADMIN_PASSWORD=
-ADMIN_SECRET=              # optional; defaults to ADMIN_PASSWORD
+ADMIN_SECRET=              # recommended when auth is enabled; falls back to an ephemeral per-boot secret (sessions reset on restart)
 ADMIN_TOKEN_TTL_HOURS=12   # session length
 
 # Master key for encrypting stored credentials at rest
@@ -78,8 +78,9 @@ APP_ENCRYPTION_KEY=
 | `CONFIG_STORE` | No | `sqlite` | Where company config lives: `mysql` (recommended) or `sqlite` |
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Only for `mysql` | — | MySQL connection. When unset, `/gateway/*` routes return 503 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | No | — | Enables admin auth (login page + protected routes). Unset = everything open |
-| `ADMIN_SECRET` | No | `ADMIN_PASSWORD` | HMAC secret used to sign session tokens |
+| `ADMIN_SECRET` | Recommended when auth is enabled | ephemeral random (per boot) | HMAC secret used to sign session tokens. Without it, tokens are signed with a fresh random secret each restart — sessions do not survive restarts and cannot be forged from the repo. Generate: `openssl rand -hex 32` |
 | `ADMIN_TOKEN_TTL_HOURS` | No | `12` | Session token lifetime in hours |
+| `TRUST_PROXY` | No | `true` | Proxy hops (number), proxy IPs, or boolean for Express `trust proxy`. Keep `true` only when every client reaches the server through your proxy — otherwise rate-limit keys can be spoofed via X-Forwarded-For |
 | `APP_ENCRYPTION_KEY` | No | — | AES-256-GCM master key; without it stored credentials stay plaintext (with a boot warning) |
 
 ---
@@ -191,7 +192,7 @@ If a company has an ask API key set (Config page → "Ask API Key"), `/ask` and 
 ├── config/                   # Multi-tenant config: schema, SQLite/MySQL stores, encryption, validation, prompts
 ├── query/                    # RAG pipeline: intent, llm, cache, retrieval, scoring, reranker, answer, cli
 ├── services/                 # cloudflare_embeddings, vectorize, r2, wp
-├── utils/                    # chunker, cleaner, fileWriter, helpers (retry/abort), logger
+├── utils/                    # chunker, cleaner, helpers (retry/abort), logger
 ├── routes/                   # ask.js (company + API-key gates, SSE), cloudflare/ (companies, apikey,
 │                             #   indexes, buckets, config, prompt sub-routers + barrel), cron.js, auth.js, logs.js
 ├── cron/                     # standalone jobs, cron scheduler, lifecycle, status

@@ -8,6 +8,7 @@
 // Selected by CONFIG_STORE=mysql in .env (default stays sqlite).
 // --------------------------
 import { getPool, isMysqlConfigured } from "../mysql/pool.js";
+import { CompanyRepository } from "../mysql/repositories.js";
 import { encodeStoredValue, decodeStoredValue } from "./codec.js";
 
 /**
@@ -27,6 +28,7 @@ async function ensureCompanyId(name, config = {}) {
     `SELECT id FROM companies WHERE company_key = ? AND deleted_at IS NULL`,
     [name]
   );
+  let companyId;
   if (rows.length === 0) {
     // Company exists but is soft-deleted — restore it.
     await pool.query(
@@ -37,9 +39,16 @@ async function ensureCompanyId(name, config = {}) {
       `SELECT id FROM companies WHERE company_key = ?`,
       [name]
     );
-    return restored[0].id;
+    companyId = restored[0].id;
+  } else {
+    companyId = rows[0].id;
   }
-  return rows[0].id;
+  // Mirror the gateway's company create: seed the standard
+  // Production/Staging/Development environments (idempotent — companies with
+  // environments are untouched), so RAG-created tenants get the same
+  // Environment -> Credential hierarchy from day one.
+  await CompanyRepository.ensureDefaultEnvironments(companyId);
+  return companyId;
 }
 
 /**

@@ -24,4 +24,6 @@ export const env = Object.freeze({
   MYSQL_USER: process.env.MYSQL_USER,
   MYSQL_PASSWORD: process.env.MYSQL_PASSWORD,
   MYSQL_DATABASE: process.env.MYSQL_DATABASE,
+  // "true" enables TLS for remote hosts that require it (Hostinger et al.)
+  MYSQL_SSL: process.env.MYSQL_SSL,
 })

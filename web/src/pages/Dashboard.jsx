@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Badge, StatCard, Empty, Spinner, Button } from "../components/ui";
+import { Card, Badge, StatCard, Empty, Button, SkeletonCard } from "../components/ui";
 import { useCompanies } from "../context";
 import { formatDate, shorten, companyStatus, cx } from "../util";
 
@@ -14,8 +14,9 @@ function Dot({ tone = "green" }) {
 }
 
 export default function Dashboard({ navigate }) {
-  const { company } = useCompanies();
-  const [companies, setCompanies] = useState([]);
+  // Company list comes from CompanyProvider (single source of truth, shared
+  // with the sidebar) — refreshed here every poll instead of fetched twice.
+  const { company, companies, refresh } = useCompanies();
   const [indexes, setIndexes] = useState([]);
   const [buckets, setBuckets] = useState([]);
   const [status, setStatus] = useState(null);
@@ -25,16 +26,15 @@ export default function Dashboard({ navigate }) {
   const load = async () => {
     setError(null);
     try {
-      const [c, i, b, s] = await Promise.all([
-        api("/cloudflare/companies"),
+      const [i, b, s] = await Promise.all([
         company ? api("/cloudflare/indexes", { company }) : Promise.resolve({ indexes: [] }),
         company ? api("/cloudflare/buckets", { company }) : Promise.resolve({ buckets: [] }),
         api("/cloudflare/status"),
       ]);
-      setCompanies(c.companies || []);
       setIndexes(i.indexes || []);
       setBuckets(b.buckets || []);
       setStatus(s);
+      await refresh(); // updates the shared company list (never rejects)
     } catch (e) {
       setError(e.message);
     } finally {
@@ -46,6 +46,7 @@ export default function Dashboard({ navigate }) {
     load();
     const id = setInterval(load, 15000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poll on company change; load is stable
   }, [company]);
 
   const running = status?.standalone || [];
@@ -224,7 +225,7 @@ export default function Dashboard({ navigate }) {
                             <div className="min-w-0">
                               <p className="font-medium text-slate-100 leading-tight">{c.COMPANY_NAME || c.name}</p>
                               <p className="text-xs text-slate-500 truncate">
-                                {c.CONSULTANT_NAME ? `${c.CONSULTANT_NAME} · ` : ""}{shorten(c.BASE_URL, 24)}
+                                {c.assistantName || c.CONSULTANT_NAME ? `${c.assistantName || c.CONSULTANT_NAME} · ` : ""}{shorten(c.BASE_URL, 24)}
                               </p>
                             </div>
                           </div>
@@ -243,7 +244,7 @@ export default function Dashboard({ navigate }) {
 
         <Card title="Active Jobs" subtitle="Standalone and scheduled tasks">
           {loading ? (
-            <div className="flex items-center justify-center py-10"><Spinner /></div>
+            <SkeletonCard rows={2} />
           ) : totalJobs === 0 ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-800 text-slate-400">

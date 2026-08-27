@@ -3,27 +3,30 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 export const ModelRepository = {
-  /** Active, non-deprecated models with their current (effective_to IS NULL) price. */
-  async listByProvider(providerId, { includeDeprecated = false } = {}) {
+  /** Active, non-deprecated models with their current (effective_to IS NULL)
+   * price — bulk variant for the registry loader: one query for all providers,
+   * rows carry provider_id for in-memory grouping. */
+  async listByProviderIds(providerIds, { includeDeprecated = false } = {}) {
+    if (!providerIds.length) return [];
     const pool = await getPool();
     const [rows] = await pool.query(
-      `SELECT pm.id, pm.model_key, pm.model_name, pm.model_family, pm.category,
+      `SELECT pm.provider_id, pm.id, pm.model_key, pm.model_name, pm.model_family, pm.category,
               pm.supports_streaming, pm.supports_function_calling, pm.supports_vision,
-              pm.max_context_window, pm.max_output_tokens, pm.is_deprecated,
+              pm.max_context_window, pm.max_output_tokens, pm.thinking_mode, pm.is_deprecated,
               pmp.input_price_per_million, pmp.output_price_per_million,
               pmp.cached_input_price_per_million, pmp.billing_unit, pmp.price_currency
          FROM provider_models pm
          LEFT JOIN provider_model_pricing pmp
                 ON pmp.provider_model_id = pm.id AND pmp.effective_to IS NULL
-        WHERE pm.provider_id = ?
+        WHERE pm.provider_id IN (?)
           AND pm.is_active = TRUE
           ${includeDeprecated ? "" : "AND pm.is_deprecated = FALSE"}
-        ORDER BY pm.category, pm.model_name`,
-      [providerId]
+        ORDER BY pm.provider_id, pm.category, pm.model_name`,
+      [providerIds]
     );
     return rows.map(mapRow);
   },
@@ -102,7 +105,7 @@ export const ModelRepository = {
       `SELECT pm.id, pm.provider_id, p.provider_key, pm.model_key, pm.model_name,
               pm.model_family, pm.category, pm.supports_streaming,
               pm.supports_function_calling, pm.supports_vision,
-              pm.max_context_window, pm.max_output_tokens, pm.is_deprecated
+              pm.max_context_window, pm.max_output_tokens, pm.thinking_mode, pm.is_deprecated
          FROM provider_models pm
          JOIN providers p ON p.id = pm.provider_id
         WHERE pm.id = ?`,
@@ -129,7 +132,8 @@ export const ModelRepository = {
               supports_function_calling = ?,
               supports_vision = ?,
               max_context_window = ?,
-              max_output_tokens = ?
+              max_output_tokens = ?,
+              thinking_mode = ?
         WHERE id = ?`,
       [
         input.modelKey,
@@ -141,6 +145,7 @@ export const ModelRepository = {
         input.supportsVision ?? false,
         input.maxContextWindow ?? null,
         input.maxOutputTokens ?? null,
+        input.thinkingMode ?? "auto",
         id,
       ]
     );

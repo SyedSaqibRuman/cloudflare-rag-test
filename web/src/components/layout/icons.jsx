@@ -124,6 +124,16 @@ export function IconBot() {
   );
 }
 
+export function IconUpload() {
+  return (
+    <svg {...base}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" x2="12" y1="3" y2="15" />
+    </svg>
+  );
+}
+
 // Name → component map used by the sidebar to resolve NAV icon keys.
 export const NAV_ICONS = {
   dashboard: IconDashboard,
@@ -136,4 +146,5 @@ export const NAV_ICONS = {
   book: IconBook,
   key: IconKey,
   bot: IconBot,
+  upload: IconUpload,
 };

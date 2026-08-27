@@ -2,6 +2,7 @@ import "dotenv/config";
 import readline from "readline";
 import { getConfig, initConfig } from "../config/index.js";
 import { askQuestion } from "./answer.js";
+import { resolveAssistantOverrides } from "./assistant.js";
 import { MAX_HISTORY } from "./llm.js";
 
 // --------------------------
@@ -16,7 +17,7 @@ if (process.argv[1]?.endsWith("query/cli.js")) {
   const history = [];
   let cliCompany = null;
 
-  rl.question("🏢 Company name: ", (co) => {
+  rl.question("🏢 Company name: ", async (co) => {
     cliCompany = co.trim();
     if (!cliCompany) {
       console.log("❌ Company name is required. Exiting.");
@@ -24,7 +25,9 @@ if (process.argv[1]?.endsWith("query/cli.js")) {
       return;
     }
     const config = getConfig(cliCompany);
-    console.log(`\n🤖 ${config.CONSULTANT_NAME || "Assistant"} RAG System Active | Type 'exit' to quit.\n`);
+    const assistant = await resolveAssistantOverrides(cliCompany);
+    const displayName = assistant?.assistantName || config.CONSULTANT_NAME || "Assistant";
+    console.log(`\n🤖 ${displayName} RAG System Active | Type 'exit' to quit.\n`);
 
     const ask = () => {
       rl.question("❓ Ask: ", async (q) => {
@@ -34,8 +37,7 @@ if (process.argv[1]?.endsWith("query/cli.js")) {
 
         history.push({ role: "user", content: input });
         const res = await askQuestion(input, history, cliCompany);
-        const consultantName = getConfig(cliCompany).CONSULTANT_NAME || "Assistant";
-        console.log(`\n💡 ${consultantName}:\n${res.answer}\n`);
+        console.log(`\n💡 ${displayName}:\n${res.answer}\n`);
         history.push({ role: "assistant", content: res.answer });
 
         while (history.length > MAX_HISTORY * 2) history.splice(0, 2);

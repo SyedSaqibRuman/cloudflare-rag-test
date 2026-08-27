@@ -31,11 +31,13 @@ curl -N -X POST http://localhost:3000/ask-stream \
   "question": "What is ISO 9001 certification?",
   "history": []
 }
-```
-
-**Response:** `text/event-stream`
+```**Response:** `text/event-stream`
 
 ```
+data: {"token":"__START_RESPONSE__"}
+
+data: {"sources":[{"title":"ISO 9001 in Angola","score":0.86}]}
+
 data: {"token":"ISO"}
 
 data: {"token":" 9001"}
@@ -43,9 +45,7 @@ data: {"token":" 9001"}
 data: {"token":" is"}
 
 data: {"token":" an"}
-
 data: {"token":" internationally"}
-
 data: [DONE]
 ```
 
@@ -53,6 +53,8 @@ data: [DONE]
 
 | Event | Description |
 |-------|-------------|
+| `data: {"token":"__START_RESPONSE__"}` | Sent before the first real token; clears the client's "Thinking..." state |
+| `data: {"sources":[{title, score}]}` | Retrieval sources for RAG answers (same shape as the non-streaming `/ask` response); emitted before tokens |
 | `data: {"token":"..."}` | Each streamed token |
 | `data: [DONE]` | Stream completed successfully |
 | `data: {"error":"..."}` | Error occurred |

@@ -8,6 +8,9 @@ import {
   STRING_KEYS,
   RESOURCE_KEYS,
   CREDENTIAL_KEYS,
+// Relative (not an alias): config/schema.js re-exports feed the browser
+// bundle via Vite, but models.js must stay resolvable outside Vite too
+// (pure-ESM tooling); Node rejects "../" escapes in "imports" targets.
 } from "../../config/schema.js";
 
 export const EMBEDDING_MODELS = ALLOWED_MODELS.EMBEDDING_MODEL;

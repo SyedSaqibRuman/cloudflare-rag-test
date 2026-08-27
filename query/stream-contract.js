@@ -1,16 +1,21 @@
 // --------------------------
 // ASK-STREAM CONTRACT
 // The SSE wire protocol for /ask-stream lives here and only here: token
-// frames, the __START_RESPONSE__ sentinel, the [DONE] terminator, error
-// frames, and the abort policy (client close + timeout combined into one
-// signal). The route and query pipeline both cross this seam, so the client
-// contract is documented instead of implicit.
+// frames, the __START_RESPONSE__ sentinel (legacy, kept for backwards compat
+// with existing frontends), structured start frames, possible-questions
+// frames, error frames, and the [DONE] terminator. The route and query
+// pipeline both cross this seam, so the client contract is documented
+// instead of implicit.
 //
 // Wire format (matches web/src/api.js):
-//   data: {"token":"..."}\n\n        — a streamed token
-//   data: {"token":"__START_RESPONSE__"}\n\n — sentinel; clear "Thinking..."
-//   data: {"error":"..."}\n\n        — an error
-//   data: [DONE]\n\n                 — stream terminator
+//   data: {"token":"..."}\n\n                — a streamed token
+//   data: {"token":"__START_RESPONSE__"}\n\n  — legacy sentinel (deprecated)
+//   data: {"sources":[...]}\n\n               — retrieval sources (legacy, standalone)
+//   data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}}\n\n
+//                                             — structured start: metadata + sources
+//   data: {"possibleQuestions":[...]}\n\n     — follow-up suggestions
+//   data: {"error":"..."}\n\n                 — an error
+//   data: [DONE]\n\n                          — stream terminator
 // --------------------------
 
 export const START_SENTINEL = "__START_RESPONSE__";
@@ -20,6 +25,21 @@ export const DEFAULT_STREAM_TIMEOUT_MS = 30_000;
 /** Frame a token as an SSE data event. */
 export function frameToken(token) {
   return `data: ${JSON.stringify({ token })}\n\n`;
+}
+
+/** Frame retrieval sources as an SSE data event (same shape as /ask sources). */
+export function frameSources(sources) {
+  return `data: ${JSON.stringify({ sources })}\n\n`;
+}
+
+/** Frame the structured start event: sources, matches, and graph metadata. */
+export function frameStart({ sources, matches, graph }) {
+  return `data: ${JSON.stringify({ __start: true, sources, matches, graph })}\n\n`;
+}
+
+/** Frame possible follow-up questions as an SSE data event. */
+export function framePossibleQuestions(questions) {
+  return `data: ${JSON.stringify({ possibleQuestions: Array.isArray(questions) ? questions : [] })}\n\n`;
 }
 
 /** Frame an error as an SSE data event. */
@@ -111,7 +131,14 @@ export function createStreamTransport({ write, externalSignal = null, timeoutMs 
       stopTimeout();
     },
     sendToken: (token) => send(frameToken(token)),
-    sendStart: () => send(frameToken(START_SENTINEL)),
+    sendStart: (meta = {}) => {
+      const frame = meta.__start !== false
+        ? frameStart({ sources: meta.sources || [], matches: meta.matches || [], graph: meta.graph || null })
+        : frameToken(START_SENTINEL);
+      send(frame);
+    },
+    sendSources: (sources) => send(frameSources(sources)),
+    sendPossibleQuestions: (questions) => send(framePossibleQuestions(questions)),
     sendError: (message) => send(frameError(message)),
     finish: () => {
       if (closed) return;

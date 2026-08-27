@@ -6,9 +6,10 @@
 // --------------------------
 import { useEffect, useRef, useState } from "react";
 import { createProviderModel, updateProviderModel } from "../../../api";
-import { Button, Input, Modal, Select, Spinner } from "../../../components/ui";
+import { Button, Input, Modal, Select, Spinner, Toggle } from "../../../components/ui";
 import { MODEL_CATEGORIES } from "../constants";
 import { modelKeyFromName } from "../utils";
+import { MODEL_KEY_RE } from "#shared/patterns.js";
 
 export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
   const [form, setForm] = useState({
@@ -21,13 +22,14 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
     vision: false,
     maxContextWindow: "",
     maxOutputTokens: "",
+    thinkingMode: "auto",
     inputPricePerMillion: "",
     outputPricePerMillion: "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   // Once the user types in the key field, the auto-sync from the name stops
-  // (same behavior as the provider wizard + credentials page). In edit mode
+  // (same behavior as the provider wizard + Connections card). In edit mode
   // auto-sync is OFF from the start: the key is only changed when the user
   // edits the key field directly (a name rename must not silently rename it).
   const [keyTouched, setKeyTouched] = useState(false);
@@ -48,6 +50,7 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
         vision: !!r.supports_vision,
         maxContextWindow: r.max_context_window != null ? String(r.max_context_window) : "",
         maxOutputTokens: r.max_output_tokens != null ? String(r.max_output_tokens) : "",
+        thinkingMode: r.thinking_mode || "auto",
         inputPricePerMillion: "",
         outputPricePerMillion: "",
       });
@@ -64,7 +67,7 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
       const isEdit = !!row;
       if (!isEdit) {
         if (!form.key.trim()) throw new Error("Model key is required.");
-        if (!/^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/.test(form.key.trim())) {
+        if (!MODEL_KEY_RE.test(form.key.trim())) {
           throw new Error("Model key: letters, numbers, dots, underscores, hyphens, and @ / : for vendor-prefixed IDs (e.g. gpt-4o, @cf/baai/bge-base-en-v1.5).");
         }
       }
@@ -82,6 +85,7 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
         vision: form.vision,
         maxContextWindow: form.maxContextWindow === "" ? null : Number(form.maxContextWindow),
         maxOutputTokens: form.maxOutputTokens === "" ? null : Number(form.maxOutputTokens),
+        thinkingMode: form.thinkingMode,
       };
       if (isEdit) {
         await updateProviderModel(providerKey, row.id, body);
@@ -145,7 +149,7 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
               set("key", e.target.value);
               setKeyTouched(true);
             }}
-            error={form.key && !/^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/.test(form.key) ? "Letters, numbers, dots, _, -, @ and / only." : undefined}
+            error={form.key && !MODEL_KEY_RE.test(form.key) ? "Letters, numbers, dots, _, -, @ and / only." : undefined}
           />
         </div>
         {!isEdit && (
@@ -158,24 +162,26 @@ export function ModelModal({ open, row, providerKey, onClose, onSaved }) {
           <Input label="Family (optional)" placeholder="gpt-4" value={form.family} onChange={(e) => set("family", e.target.value)} />
           <Select label="Category *" options={MODEL_CATEGORIES} value={form.category} onChange={(e) => set("category", e.target.value)} />
         </div>
-        <label className="flex flex-wrap items-center gap-5 text-sm text-slate-300">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-slate-300">
           <span className="flex items-center gap-2">
-            <input type="checkbox" name="streaming" checked={form.streaming} onChange={(e) => set("streaming", e.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500" />
             Streaming
+            <Toggle checked={form.streaming} onChange={(v) => set("streaming", v)} title="Toggle streaming support" />
           </span>
           <span className="flex items-center gap-2">
-            <input type="checkbox" name="functionCalling" checked={form.functionCalling} onChange={(e) => set("functionCalling", e.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500" />
             Function calling
+            <Toggle checked={form.functionCalling} onChange={(v) => set("functionCalling", v)} title="Toggle function calling" />
           </span>
           <span className="flex items-center gap-2">
-            <input type="checkbox" name="vision" checked={form.vision} onChange={(e) => set("vision", e.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500" />
             Vision
+            <Toggle checked={form.vision} onChange={(v) => set("vision", v)} title="Toggle vision support" />
           </span>
-        </label>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <Input label="Max context window" type="number" min={1} placeholder="128000" value={form.maxContextWindow} onChange={(e) => set("maxContextWindow", e.target.value)} />
           <Input label="Max output tokens" type="number" min={1} placeholder="4096" value={form.maxOutputTokens} onChange={(e) => set("maxOutputTokens", e.target.value)} />
+          <Select label="Thinking mode" options={["auto", "on", "off"]} value={form.thinkingMode} onChange={(e) => set("thinkingMode", e.target.value)} />
         </div>
+        <p className="-mt-2 text-[11px] text-slate-500">Thinking: auto follows the provider default, on forces extended thinking, off never reasons.</p>
         {!isEdit && (
           <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Starting price (optional)</p>

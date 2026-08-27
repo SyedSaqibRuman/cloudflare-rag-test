@@ -205,6 +205,7 @@ test("accepts a fully valid input and returns the normalized value", () => {
     graphResourceId: 6,
     isActive: false,
     isPublic: true,
+    variables: [],
   });
 });
 

@@ -16,13 +16,16 @@ const AI_BASE_URL = "https://api.cloudflare.com/client/v4";
  * @param {string} companyName — resolves per-company credentials.
  * @param {string} model — Workers AI model id.
  * @param {object} input — model input (messages/text, temperature, ...).
+ * @param {object} [opts] — { signal } for client-disconnect abort support.
  */
-export async function runCloudflareAI(companyName, model, input) {
+export async function runCloudflareAI(companyName, model, input, { signal } = {}) {
   const { CLOUDFLARE_ACCOUNT_ID } = resolveCreds(companyName);
-  return getCFClient(companyName).ai.run(model, {
-    account_id: CLOUDFLARE_ACCOUNT_ID,
-    ...input,
-  });
+  return getCFClient(companyName).ai.run(
+    model,
+    { account_id: CLOUDFLARE_ACCOUNT_ID, ...input },
+    // Third SDK arg = per-request options (verified: Core.RequestOptions.signal).
+    signal ? { signal } : undefined
+  );
 }
 
 /**

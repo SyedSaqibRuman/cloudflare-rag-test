@@ -147,6 +147,7 @@ export async function startJob(jobId, companyName, opts = {}) {
     duration: null,
     error: null,
     abortController,
+    progress: null, // { processed, skipped, chunks, discovered, phase }
   };
 
   standaloneJobs.set(key, state);
@@ -162,6 +163,7 @@ export async function startJob(jobId, companyName, opts = {}) {
         signal: abortController.signal,
         companyName,
         ...opts,
+        setProgress: (p) => { state.progress = p; },
       });
 
       if (state.status !== "stopped") {
@@ -213,6 +215,7 @@ export function getRunningJobs() {
         kbKey: state.kbKey ?? null,
         status: state.status,
         startedAt: state.startedAt,
+        progress: state.progress,
       });
     }
   }
@@ -309,19 +312,6 @@ export function getJobs() {
     name: job.name,
     description: job.description ?? "",
   }));
-}
-
-function standaloneStatus(key, state) {
-  return {
-    key,
-    jobId: state.jobId,
-    companyName: state.companyName || null,
-    status: state.status,
-    startedAt: state.startedAt,
-    completedAt: state.completedAt,
-    duration: state.duration ? `${state.duration}ms` : null,
-    error: state.error,
-  };
 }
 
 function cronStatus(key, state) {

@@ -1,71 +1,102 @@
 // --------------------------
-// CATALOG CONSTANTS — shared enums/labels for the provider catalog UI.
+// CATALOG CONSTANTS — shared enums/labels for the provider catalog UI
+// (Providers page: sections grouped by provider type / service category,
+// compatible provider prefixes, category accents, model categories).
 // --------------------------
 
-export const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"];
-export const CATEGORIES = ["ai", "embedding", "vector", "storage", "graph", "image", "speech", "search", "database", "email", "analytics"];
-export const AUTH_TYPES = ["api_key", "bearer_token", "oauth2", "basic_auth", "custom"];
+// The three ENUM vocabularies are shared with the backend — single source of
+// truth is shared/catalog-enums.js (mirrors the MySQL columns in
+// migrations/001_init.sql). Re-exported under the portal's names.
+// Relative (NOT the #shared alias): constants.js is transitively imported by
+// __tests__/serves-models.test.js (via utils.js) under bare `node --test`,
+// which cannot resolve Vite aliases.
+import {
+  MODEL_CATEGORIES,
+  PROVIDER_AUTH_TYPES,
+  PROVIDER_CATEGORIES,
+} from "../../../../shared/catalog-enums.js";
 
-// Wizard-specific enums.
-export const AUTH_FIELD_TYPES = ["text", "password", "textarea", "select", "url", "email", "numeric", "json", "file"];
-export const RESOURCE_TYPES = ["vector_index", "object_bucket", "sql_database", "kv_namespace", "graph_database", "embedding_index", "search_index", "cache_namespace"];
-export const FIELD_GROUPS = ["main", "advanced"];
-export const FIELD_WIDTHS = ["full", "half", "third", "quarter"];
-export const DRAFT_KEY = "pc_provider_wizard_draft";
+export const CATEGORIES = PROVIDER_CATEGORIES;
+export const AUTH_TYPES = PROVIDER_AUTH_TYPES;
+export { MODEL_CATEGORIES };
 
-// Service groups — the mental model users have when configuring an AI platform
-// ("I need an AI model, a vector database, object storage…"). Schema categories
-// map onto these display groups; no schema change required.
+// Capability keys that mean the provider SERVES models (catalog provider_models
+// + model-access grants + per-model Test are only meaningful then). Vector DBs,
+// storage, graph, and web-search providers lack these, so their detail pages
+// skip the "Available Models" card entirely (9Router behavior).
+export const MODEL_CAPABILITY_KEYS = new Set([
+  "chat",
+  "embeddings",
+  "embedding",
+  "image_generation",
+  "text_to_speech",
+  "speech_to_text",
+  "vision",
+  "audio_output",
+  "rerank",
+  "reranker",
+]);
+
+// ------------------------------------------------------------------
+// Provider-type sections — the Providers page groups cards by service
+// category (primary_service_category), one section per type. "Custom"
+// OpenAI/Anthropic-compatible endpoints are created with category "ai", so
+// they land in the AI section. Sections with zero providers are hidden;
+// unknown categories fall into "Other".
+// ------------------------------------------------------------------
+export const OPENAI_COMPATIBLE_PREFIX = "oc_";
+export const ANTHROPIC_COMPATIBLE_PREFIX = "ac_";
+
+export const isOpenAICompatible = (key) => String(key || "").startsWith(OPENAI_COMPATIBLE_PREFIX);
+export const isAnthropicCompatible = (key) => String(key || "").startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
+
+// One entry per primary_service_category ENUM value (schema/v5.sql). Keep the
+// ids in sync with the backend ENUM when categories are added.
+export const TYPE_SECTIONS = [
+  { id: "ai", label: "AI Providers", note: "Chat & language models", emoji: "🧠", tone: "indigo" },
+  { id: "embedding", label: "Embedding", note: "Vector embedding APIs", emoji: "🧬", tone: "cyan" },
+  { id: "vector", label: "Vector Databases", note: "Vector search stores", emoji: "🗂", tone: "cyan" },
+  { id: "storage", label: "Storage", note: "Object & file storage", emoji: "📦", tone: "amber" },
+  { id: "graph", label: "Graph Databases", note: "Graph query engines", emoji: "🕸", tone: "green" },
+  { id: "database", label: "Databases", note: "SQL / NoSQL", emoji: "🗄", tone: "slate" },
+  { id: "image", label: "Image", note: "Image generation & vision", emoji: "🎨", tone: "red" },
+  { id: "speech", label: "Speech", note: "Text-to-speech / speech-to-text", emoji: "🎙", tone: "slate" },
+  { id: "search", label: "Search", note: "Semantic & keyword search", emoji: "🔍", tone: "cyan" },
+  { id: "email", label: "Email", note: "Email delivery APIs", emoji: "✉️", tone: "slate" },
+  { id: "analytics", label: "Analytics", note: "Usage analytics", emoji: "📊", tone: "amber" },
+];
+
+// Service-group labels for the detail header badge (AI / Vector / Storage …).
+// Categories map onto these display groups; no schema change required.
 export const SERVICE_GROUPS = [
-  { id: "ai", short: "AI", label: "AI Providers", emoji: "🧠", match: ["ai", "embedding", "image", "speech"] },
-  { id: "vector", short: "Vector", label: "Vector Databases", emoji: "🗂", match: ["vector"] },
+  { id: "ai", short: "AI", label: "AI", emoji: "🧠", match: ["ai", "embedding", "image", "speech"] },
+  { id: "vector", short: "Vector", label: "Vector Database", emoji: "🗂", match: ["vector"] },
   { id: "storage", short: "Storage", label: "Object Storage", emoji: "📦", match: ["storage"] },
-  { id: "graph", short: "Graph", label: "Graph Databases", emoji: "🕸", match: ["graph"] },
+  { id: "graph", short: "Graph", label: "Graph Database", emoji: "🕸", match: ["graph"] },
   { id: "database", short: "Database", label: "SQL / NoSQL", emoji: "🗄", match: ["database"] },
 ];
 
-// Categories not covered by a named group (search, email, analytics, …).
 export const groupFor = (category) =>
   SERVICE_GROUPS.find((g) => g.match.includes(category)) || { id: "other", short: "Other", label: "Other", emoji: "📎", match: [category] };
-
-// AI vs infrastructure split — only AI providers carry models/capabilities/pricing.
-export const INFRASTRUCTURE_GROUPS = SERVICE_GROUPS.filter((g) => g.id !== "ai");
-export const isInfrastructure = (category) => groupFor(category).id !== "ai";
 
 export const categoryTone = (c) => {
   const map = { ai: "indigo", embedding: "cyan", vector: "cyan", storage: "amber", graph: "green", database: "slate", image: "red", speech: "slate", search: "cyan", email: "slate", analytics: "amber" };
   return map[c] || "slate";
 };
 
-// Capability keys → friendly chips shown on infrastructure provider cards.
-// (AI-flavored keys are skipped there — those providers show stats instead.)
-export const CAPABILITY_LABELS = {
-  s3_compatible: "S3 Compatible",
-  vector_search: "Vector Search",
-  object_storage: "Object Storage",
-  graph_storage: "Graph Storage",
-  supports_cypher: "Cypher",
-  sql_database_resource: "SQL Database",
-  vector_index_resource: "Vector Index",
-  object_bucket_resource: "Object Bucket",
-  kv_namespace_resource: "KV Namespace",
-  graph_database_resource: "Graph Database",
+// Per-category accent colors for the provider icon tiles (9Router cards paint
+// the icon background with the provider's color + 15% alpha).
+const PROVIDER_COLORS = {
+  ai: "#818cf8",
+  embedding: "#22d3ee",
+  vector: "#22d3ee",
+  storage: "#f59e0b",
+  graph: "#34d399",
+  database: "#94a3b8",
+  image: "#f87171",
+  speech: "#94a3b8",
+  search: "#22d3ee",
+  email: "#94a3b8",
+  analytics: "#f59e0b",
 };
-export const AI_CAPABILITY_KEYS = new Set(["chat", "streaming", "embeddings", "function_calling", "vision", "reasoning", "audio_output"]);
-export const capabilityLabel = (k) => CAPABILITY_LABELS[k] || k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
-// Model category ENUM from schema/v5.sql — keep in sync with the backend.
-export const MODEL_CATEGORIES = ["chat", "embedding", "reranker", "image", "tts", "stt", "vision"];
-
-// Short labels for the stepper, full titles for the header/footer buttons,
-// and per-step explanations for the "How to add a provider" help panel — only
-// the tip for the current step is shown (index-aligned with the steps).
-export const STEP_LABELS = ["Basics", "Auth", "Fields", "Endpoints", "Review"];
-export const STEP_TITLES = ["Basics", "Auth Config", "Credential Form Fields", "Endpoints & Resource Types", "Review & Confirm"];
-export const STEP_TIPS = [
-  "The provider's name (the key auto-generates from it: lowercase, spaces → _), its stable key that can never change later, the service category, and website/docs/logo URLs.",
-  "How requests will authenticate: the auth type, the header the credential goes into, the default API base URL, and an optional API-key format regex.",
-  "What the Credentials page will ask for when connecting this provider (e.g. an API key). Each row you add becomes one input on that form.",
-  "The API endpoints this provider exposes and the resources it can provision (vector index, object bucket, …).",
-  "Check the summary and the exact row counts per table, then create the provider. Models are added afterward from the provider detail page.",
-];
+export const colorFor = (category) => PROVIDER_COLORS[category] || "#94a3b8";
