@@ -2,58 +2,56 @@
 // GRAPH RAG — query-time Neo4j context injection
 // Optional pipeline step: when the company has a Neo4j connection configured
 // (NEO4J_URI + NEO4J_USERNAME + NEO4J_PASSWORD, plus NEO4J_DATABASE), the ask
-// path generates a read-only Cypher query from the user's question, runs it
-// against the graph, and formats the results as extra context alongside the
-// vector chunks — so the AI can answer from relationship data, not just
-// chunks. Best-effort by design: any failure (bad config, LLM, network,
-// invalid Cypher) yields NO graph context, never an ask error.
+// path augments the answer with knowledge from the company's knowledge graph.
+//
+// Phase 4 retrieval is knowledge-aware (proposal §17) instead of raw
+// generated Cypher:
+//
+//   question → entity mention detection → canonical entity resolution
+//            → graph traversal (typed edges + accepted claims w/ evidence)
+//            → confidence filtering → formatted [Graph Knowledge] context
+//
+// The legacy path (LLM-generated read-only Cypher) remains as a FALLBACK for
+// structural questions (aggregates, counts, "list everything") that entity
+// matching cannot answer. Best-effort by design: any failure (bad config,
+// LLM, network, invalid Cypher) yields NO graph context, never an ask error.
 //
 // Safety:
 //  - All queries run inside session.executeRead (the driver refuses writes).
-//  - Generated Cypher is sanitized: only MATCH/WITH/WHERE/RETURN/ORDER BY/
-//    LIMIT/UNWIND/OPTIONAL MATCH tokens survive; destructive clauses
-//    (CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, FOREACH, CALL db.*)
-//    and multiple statements are rejected before execution.
-//  - Result rows are capped (GRAPH_MAX_ROWS) and truncated to a char budget.
+//  - Entity/claim/edge queries are fixed templates with parameters — no
+//    LLM-supplied string is ever interpolated into Cypher.
+//  - The fallback path sanitizes generated Cypher (isSafeCypher): only
+//    MATCH/WITH/WHERE/RETURN/ORDER BY/LIMIT/UNWIND/OPTIONAL MATCH survive;
+//    destructive clauses and multiple statements are rejected.
+//  - Every query is scoped to the company (entities/claims/edges carry the
+//    company property) — tenant isolation is enforced by the query shape,
+//    not by the model.
+//  - Result rows are capped (GRAPH_MAX_ROWS / per-entity budgets) and
+//    truncated to a char budget.
 // --------------------------
-import { getCompanyConfig } from "../config/index.js";
 import { runCloudflareAI } from "../services/cloudflare_ai.js";
 import { getLlmModel } from "./llm.js";
 import { sanitizeText } from "./context.js";
+
+// Graph config resolution now lives in config/graph.js (shared with the
+// knowledge layer). Re-exported here so existing importers (kb-service,
+// ingest, tests) keep working unchanged.
+export { getGraphConfig, graphEnabled } from "../config/graph.js";
 
 const GRAPH_MAX_ROWS = 20;
 const GRAPH_MAX_CHARS = 2500;
 const CYPHER_TIMEOUT_MS = 15_000;
 
+// Knowledge-aware path budgets.
+const GRAPH_MAX_ENTITIES = 5; // entities considered per question
+const GRAPH_MAX_NEIGHBORS_PER_ENTITY = 8; // edges+claims shown per entity
+const GRAPH_MIN_CONFIDENCE = 0.5; // below this, edges/claims are filtered out
+const GRAPH_ENTITY_CANDIDATES = 20; // raw mention candidates before filtering
+
 // Destructive / non-read Cypher clauses that must never reach the graph.
 // The driver's executeRead mode is the hard backstop (write transactions are
 // refused); this blacklist is the first line so we don't even try.
 const DESTRUCTIVE = /\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|FOREACH|CALL|LOAD\s+CSV)\b/i;
-
-/**
- * The company's Neo4j connection from the RAG config store, or null when the
- * graph isn't configured (no URI/username/password). Database name is
- * optional — Aura defaults to 'neo4j'. `database` overrides the stored
- * NEO4J_DATABASE (used when a selected assistant points at a specific graph
- * resource).
- */
-export function getGraphConfig(companyName, database = null) {
-  const config = getCompanyConfig(companyName);
-  if (!config) return null;
-  const { NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE } = config;
-  if (!NEO4J_URI || !NEO4J_USERNAME || !NEO4J_PASSWORD) return null;
-  return {
-    uri: NEO4J_URI,
-    username: NEO4J_USERNAME,
-    password: NEO4J_PASSWORD,
-    database: database || NEO4J_DATABASE || "neo4j",
-  };
-}
-
-/** True when the company has a usable Neo4j connection in its config store. */
-export function graphEnabled(companyName) {
-  return getGraphConfig(companyName) !== null;
-}
 
 /**
  * Open a short-lived driver session. The driver is lazy-imported so the module
@@ -76,6 +74,292 @@ async function withSession(graph, fn) {
     await driver.close();
   }
 }
+
+// ------------------------------------------------------------------
+// PHASE 4 — KNOWLEDGE-AWARE RETRIEVAL (entity path)
+// ------------------------------------------------------------------
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * Build a word-boundary-aware matcher for one entity name/alias. Only applies
+ * boundaries on the sides where the term starts/ends with a word character —
+ * punctuation-edged terms (e.g. "O'Reilly") match loosely.
+ * @param {string} term
+ * @returns {RegExp|null}  null when the term is empty
+ */
+export function entityMentionRegex(term) {
+  const t = String(term || "").trim();
+  if (!t) return null;
+  const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const start = WORD_CHAR.test(t[0]) ? "(?<![\\p{L}\\p{N}_])" : "";
+  const end = WORD_CHAR.test(t[t.length - 1]) ? "(?![\\p{L}\\p{N}_])" : "";
+  return new RegExp(`${start}${escaped}${end}`, "iu");
+}
+
+/**
+ * True when `question` mentions the entity name/alias (case-insensitive,
+ * word-boundary aware — "ISO" does not match "isolation").
+ * @param {string} question
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function matchesEntityMention(question, name) {
+  const re = entityMentionRegex(name);
+  return re ? re.test(question) : false;
+}
+
+/**
+ * Detect canonical entities mentioned in the question. Runs a fixed template
+ * query scoped to the company (optionally one KB); word-boundary filtering
+ * happens in JS to cut false positives. Returns up to GRAPH_MAX_ENTITIES
+ * entities, most-specific (longest name) first.
+ *
+ * @param {object} session  open READ session
+ * @param {string} question
+ * @param {string} companyName
+ * @param {string|null} [kbKey]  scope to a single KB when provided
+ * @returns {Promise<Array<{id, name, type, confidence, kbKey}>>}
+ */
+export async function detectEntityMentions(session, question, companyName, kbKey = null) {
+  const params = { company: companyName, q: question, limit: GRAPH_ENTITY_CANDIDATES };
+  const kbClause = kbKey ? "AND e.kb_key = $kb" : "";
+  if (kbKey) params.kb = kbKey;
+  const res = await session.run(
+    `MATCH (e:Entity)
+     WHERE e.company = $company ${kbClause}
+       AND (toLower($q) CONTAINS toLower(e.name)
+            OR any(a IN coalesce(e.aliases, []) WHERE toLower($q) CONTAINS toLower(a)))
+     RETURN e.id AS id, e.name AS name, e.type AS type,
+            e.confidence AS confidence, e.kb_key AS kbKey
+     ORDER BY size(e.name) DESC
+     LIMIT $limit`,
+    params,
+    { timeout: CYPHER_TIMEOUT_MS }
+  );
+
+  const out = [];
+  for (const row of res.records) {
+    const name = String(row.get("name") || "");
+    if (!name) continue;
+    // Word-boundary check against the question (name + any alias).
+    if (!matchesEntityMention(question, name)) continue;
+    const aliases = [];
+    out.push({
+      id: String(row.get("id")),
+      name,
+      type: String(row.get("type") || "Other"),
+      confidence: row.get("confidence") ?? null,
+      kbKey: String(row.get("kbKey") || ""),
+      aliases,
+    });
+    if (out.length >= GRAPH_MAX_ENTITIES) break;
+  }
+  return out;
+}
+
+/**
+ * Fetch the neighborhood of the matched entities: typed edges (both
+ * directions) and ACCEPTED claims with their evidence, all company-scoped and
+ * confidence-filtered. Claims and edges for the same triple are both returned;
+ * formatGraphKnowledge dedupes.
+ *
+ * @param {object} session  open READ session
+ * @param {string} companyName
+ * @param {Array<{id, name}>} entities
+ * @returns {Promise<{ relationships: Array, claims: Array }>}
+ */
+export async function fetchEntityNeighborhood(session, companyName, entities) {
+  const relationships = [];
+  const claims = [];
+  const paramsBase = { company: companyName, minConf: GRAPH_MIN_CONFIDENCE };
+
+  await Promise.all(
+    entities.map(async (entity) => {
+      const relRes = await session.run(
+        `MATCH (e:Entity {id: $id})-[r]-(n:Entity)
+         WHERE e.company = $company AND n.company = $company
+           AND coalesce(r.confidence, 0) >= $minConf
+         RETURN n.id AS nid, n.name AS nname, n.type AS ntype,
+                type(r) AS rtype, r.confidence AS confidence, r.evidence AS evidence,
+                CASE WHEN startNode(r) = e THEN 'out' ELSE 'in' END AS dir
+         ORDER BY coalesce(r.confidence, 0) DESC
+         LIMIT $max`,
+        { ...paramsBase, id: entity.id, max: GRAPH_MAX_NEIGHBORS_PER_ENTITY },
+        { timeout: CYPHER_TIMEOUT_MS }
+      );
+      for (const row of relRes.records) {
+        relationships.push({
+          entityId: entity.id,
+          entityName: entity.name,
+          otherId: String(row.get("nid")),
+          otherName: String(row.get("nname") || ""),
+          otherType: String(row.get("ntype") || "Other"),
+          type: String(row.get("rtype") || ""),
+          confidence: row.get("confidence") ?? null,
+          evidence: row.get("evidence") || [],
+          direction: row.get("dir") === "out" ? "out" : "in",
+        });
+      }
+
+      // Accepted claims where the entity is the subject (out) …
+      const outRes = await session.run(
+        `MATCH (e:Entity {id: $id})-[:SUBJECT_OF]->(c:Claim)-[:OBJECT_OF]->(o:Entity)
+         WHERE c.company = $company AND c.status = 'accepted'
+           AND coalesce(c.confidence, 0) >= $minConf
+         RETURN o.id AS otherId, o.name AS otherName, c.predicate AS predicate,
+                c.confidence AS confidence, c.evidence AS evidence
+         ORDER BY coalesce(c.confidence, 0) DESC
+         LIMIT $max`,
+        { ...paramsBase, id: entity.id, max: GRAPH_MAX_NEIGHBORS_PER_ENTITY },
+        { timeout: CYPHER_TIMEOUT_MS }
+      );
+      for (const row of outRes.records) {
+        claims.push({
+          entityId: entity.id,
+          entityName: entity.name,
+          otherId: String(row.get("otherId")),
+          otherName: String(row.get("otherName") || ""),
+          predicate: String(row.get("predicate") || ""),
+          confidence: row.get("confidence") ?? null,
+          evidence: row.get("evidence") || [],
+          direction: "out",
+        });
+      }
+
+      // … and where it is the object (in).
+      const inRes = await session.run(
+        `MATCH (e:Entity {id: $id})<-[:OBJECT_OF]-(c:Claim)<-[:SUBJECT_OF]-(s:Entity)
+         WHERE c.company = $company AND c.status = 'accepted'
+           AND coalesce(c.confidence, 0) >= $minConf
+         RETURN s.id AS otherId, s.name AS otherName, c.predicate AS predicate,
+                c.confidence AS confidence, c.evidence AS evidence
+         ORDER BY coalesce(c.confidence, 0) DESC
+         LIMIT $max`,
+        { ...paramsBase, id: entity.id, max: GRAPH_MAX_NEIGHBORS_PER_ENTITY },
+        { timeout: CYPHER_TIMEOUT_MS }
+      );
+      for (const row of inRes.records) {
+        claims.push({
+          entityId: entity.id,
+          entityName: entity.name,
+          otherId: String(row.get("otherId")),
+          otherName: String(row.get("otherName") || ""),
+          predicate: String(row.get("predicate") || ""),
+          confidence: row.get("confidence") ?? null,
+          evidence: row.get("evidence") || [],
+          direction: "in",
+        });
+      }
+    })
+  );
+
+  return { relationships, claims };
+}
+
+function fmtConfidence(value) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+    : "?";
+}
+
+function fmtEvidence(evidence) {
+  const refs = Array.isArray(evidence) ? evidence.slice(0, 2) : [];
+  return refs.length ? ` — ${refs.join(", ")}` : "";
+}
+
+/**
+ * Format the matched-entity neighborhood into a [Graph Knowledge] context
+ * block. Pure + deterministic: sorts by confidence, dedupes the same
+ * (predicate, direction, other) from edge + claim representations, and stays
+ * within the char budget. Returns null when there is nothing to show.
+ *
+ * @param {object} opts
+ * @param {Array<{name, type}>} opts.entities
+ * @param {Array} opts.relationships  [{ entityName, otherName, type, confidence, evidence, direction }]
+ * @param {Array} opts.claims         [{ entityName, otherName, predicate, confidence, evidence, direction }]
+ * @param {number} [opts.maxChars]
+ * @param {number} [opts.maxPerEntity]
+ * @returns {string|null}
+ */
+export function formatGraphKnowledge({ entities = [], relationships = [], claims = [], maxChars = GRAPH_MAX_CHARS, maxPerEntity = GRAPH_MAX_NEIGHBORS_PER_ENTITY } = {}) {
+  if (!entities.length) return null;
+
+  // Merge edges + claims, deduping identical (entity, predicate, other, dir).
+  const byEntity = new Map(); // entityName → Map(key → {…})
+  const upsert = (item, key) => {
+    const bucket = byEntity.get(item.entityName) || new Map();
+    const existing = bucket.get(key);
+    if (!existing) {
+      bucket.set(key, item);
+    } else if ((item.confidence ?? 0) > (existing.confidence ?? 0)) {
+      // Higher-confidence representation wins, but evidence is merged — the
+      // claim's citation trail must survive even when the edge scored higher.
+      item.evidence = mergeEvidence(existing.evidence, item.evidence);
+      bucket.set(key, item);
+    } else {
+      existing.evidence = mergeEvidence(existing.evidence, item.evidence);
+    }
+    byEntity.set(item.entityName, bucket);
+  };
+
+  const mergeEvidence = (a, b) => {
+    const refs = [...(a || []), ...(b || [])];
+    return [...new Set(refs)].slice(0, 4);
+  };
+  for (const rel of relationships) {
+    if (!rel.type || !rel.otherName) continue;
+    upsert(rel, `${rel.type}|${rel.direction}|${rel.otherName.toLowerCase()}`);
+  }
+  for (const claim of claims) {
+    if (!claim.predicate || !claim.otherName) continue;
+    upsert(claim, `${claim.predicate}|${claim.direction}|${claim.otherName.toLowerCase()}`);
+  }
+
+  let text = "";
+  for (const entity of entities) {
+    const bucket = [...(byEntity.get(entity.name) || new Map()).values()]
+      .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+      .slice(0, maxPerEntity);
+    if (!bucket.length) continue;
+    const arrow = (dir) => (dir === "out" ? "→" : "←");
+    const header = `- ${entity.name}${entity.type && entity.type !== "Other" ? ` (${entity.type})` : ""}`;
+    if (text && (text + `\n${header}`).length > maxChars) break;
+    text += `\n${header}`;
+    for (const item of bucket) {
+      const pred = item.type || item.predicate;
+      const line = `\n    ${arrow(item.direction)} ${pred} ${item.otherName} (${fmtConfidence(item.confidence)})${fmtEvidence(item.evidence)}`;
+      if ((text + line).length > maxChars) break;
+      text += line;
+    }
+  }
+  if (!text) return null;
+  return `[Graph Knowledge]${text}`;
+}
+
+/**
+ * Knowledge-aware retrieval for one question, in one READ session.
+ * Returns { context, method: "knowledge", entities } or null.
+ */
+async function retrieveViaKnowledge(graph, question, companyName, kbKey) {
+  return withSession(graph, async (session) => {
+    const entities = await detectEntityMentions(session, question, companyName, kbKey);
+    if (!entities.length) return null;
+    const { relationships, claims } = await fetchEntityNeighborhood(session, companyName, entities);
+    const context = formatGraphKnowledge({ entities, relationships, claims });
+    if (!context) return null;
+    return {
+      context: `\n${sanitizeText(context)}`,
+      cypher: null,
+      method: "knowledge",
+      entities: entities.map((e) => ({ id: e.id, name: e.name, type: e.type, kbKey: e.kbKey })),
+    };
+  });
+}
+
+// ------------------------------------------------------------------
+// LEGACY PATH — schema → generated Cypher (fallback for structural Qs)
+// ------------------------------------------------------------------
 
 /**
  * Fetch a compact graph schema (labels, relationship types, property keys)
@@ -207,25 +491,39 @@ async function runCypher(graph, cypher, question) {
   });
 }
 
+// ------------------------------------------------------------------
+// ORCHESTRATOR
+// ------------------------------------------------------------------
+
 /**
- * The GraphRAG step: schema → Cypher → execute → formatted context.
- * Returns { context } or null when the graph isn't configured / anything fails.
+ * The GraphRAG step. Knowledge-aware path first (entity mentions → canonical
+ * entities → neighborhood edges + accepted claims with evidence →
+ * confidence-filtered context); legacy schema → Cypher path as a fallback for
+ * structural questions. Returns { context, cypher?, method?, entities? } or
+ * null when the graph isn't configured / nothing matched / anything fails.
+ *
  * opts.database overrides the stored NEO4J_DATABASE (assistant-bound graph
  * resource); opts.enabled=false skips the step entirely (assistant with
- * enable_graph_context off — company-level graph config then stays unused).
+ * enable_graph_context off — company-level graph config then stays unused);
+ * opts.kbKey optionally scopes entity detection to a single knowledge base.
  */
-export async function retrieveGraphContext(question, companyName, { database = null, enabled = true } = {}) {
+export async function retrieveGraphContext(question, companyName, { database = null, enabled = true, kbKey = null } = {}) {
   if (!enabled) return null;
   const graph = getGraphConfig(companyName, database);
   if (!graph) return null;
   try {
+    // Phase 4 — knowledge-aware retrieval (fixed templates, entity-grounded).
+    const knowledge = await retrieveViaKnowledge(graph, question, companyName, kbKey);
+    if (knowledge) return knowledge;
+
+    // Fallback — structural questions (aggregates, counts, "what exists").
     const schema = await fetchGraphSchema(graph);
     if (!schema.labels.length && !schema.relationshipTypes.length) return null; // empty graph
     const cypher = await generateCypher(question, schema, companyName);
     if (!cypher) return null;
     const context = await runCypher(graph, cypher, question);
     if (!context) return null;
-    return { context: `\n[Graph Knowledge]\n${context}`, cypher };
+    return { context: `\n[Graph Knowledge]\n${context}`, cypher, method: "cypher" };
   } catch {
     return null; // graph context is best-effort — never fail the ask
   }

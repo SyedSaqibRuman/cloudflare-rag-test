@@ -16,9 +16,15 @@ import endpointsRouter from "./endpoints.js";
 import pricingRouter from "./pricing.js";
 import kbsRouter from "./kbs.js";
 import assistantsRouter from "./assistants.js";
+
 import executeRouter from "./execute.js";
 import cloudflareResourcesRouter from "./cloudflare-resources.js";
 import ingestionRouter from "./ingestion.js";
+import usageRouter from "./usage.js";
+import workflowsRouter from "./workflows.js";
+import bulkRouter from "./bulk.js";
+import webhooksRouter from "./webhooks.js";
+import knowledgeRouter from "./knowledge.js";
 
 const router = express.Router();
 
@@ -47,8 +53,14 @@ router.use(endpointsRouter);
 router.use(pricingRouter);
 router.use(kbsRouter);
 router.use(assistantsRouter);
+
 router.use(executeRouter);
 router.use(cloudflareResourcesRouter);
 router.use("/ingest", ingestionRouter);
+router.use(usageRouter);
+router.use(workflowsRouter);
+router.use(bulkRouter);
+router.use(webhooksRouter);
+router.use(knowledgeRouter);
 
 export default router;

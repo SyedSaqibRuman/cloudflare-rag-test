@@ -5,12 +5,14 @@
 // --------------------------
 
 import { useState, useRef, useEffect } from "react";
-import { getKb, kbStatus, ingestKb, deleteKb, uploadKbDocuments, clearKbDocuments } from "../api";
-import { Card, Button, Badge, Empty, Spinner, StatCard, SkeletonCard, Toast } from "../components/ui";
+import { getKb, kbStatus, ingestKb, deleteKb, uploadKbDocuments, clearKbDocuments, listKbDocuments, api, listKbQa, addKbQa, updateKbQa, deleteKbQa, matchKbQa } from "../api";
+import { Card, Button, Badge, Empty, Spinner, StatCard, SkeletonCard, Toast, Popover, PopoverTrigger, PopoverContent, PopoverItem, PopoverSeparator, InfoTip } from "../components/ui";
+import { getTermTooltip } from "../components/glossary";
 import ScrollToTop from "../components/ui/ScrollToTop.jsx";
 import { usePoll, useToast } from "../hooks";
 import { useCompanies } from "../context";
 import KbModal from "../components/kb-modal";
+import KnowledgeGraphTab from "./kb-knowledge/KnowledgeGraphTab";
 import { timeAgo } from "../util";
 import { statusTone, kbLifecycle } from "#shared/status.js";
 
@@ -21,6 +23,8 @@ const TABS = [
   { id: "overview", label: "Overview", icon: "📊" },
   { id: "documents", label: "Documents", icon: "📄" },
   { id: "ingestion", label: "Ingestion", icon: "📥" },
+  { id: "qa", label: "Custom Q&A", icon: "💬" },
+  { id: "knowledge", label: "Knowledge Graph", icon: "🕸️" },
   { id: "configuration", label: "Configuration", icon: "⚙️" },
 ];
 
@@ -73,7 +77,19 @@ export default function KbDetail({ navigate, path }) {
   const [ingesting, setIngesting] = useState(false);
   const [scope, setScope] = useState("all");
   const [docLimit, setDocLimit] = useState("100");
-  const [scopeOpen, setScopeOpen] = useState(false);
+  const [selectedPages, _setSelectedPages] = useState([]); // selection read-only today (Ingestion tab)
+
+  // Initialize scope from KB source_config when kb loads
+  useEffect(() => {
+    if (kb?.source_config) {
+      try {
+        const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
+        if (cfg.scope) setScope(cfg.scope);
+        if (cfg.docLimit) setDocLimit(String(cfg.docLimit));
+      } catch { /* ignore parse errors */ }
+    }
+  }, [kb?.source_config]);
+
 
   // File upload state (scoped to Documents tab)
   const [uploading, setUploading] = useState(false);
@@ -81,6 +97,10 @@ export default function KbDetail({ navigate, path }) {
   const [dragOver, setDragOver] = useState(false);
   const [previewFile, setPreviewFile] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Processed documents list (for WordPress/URL KBs)
+  const [processedDocs, setProcessedDocs] = useState([]);
+  const [docsLoading, setDocsLoading] = useState(false);
 
   const loadKb = async () => {
     if (!company || !kbKey) return;
@@ -97,11 +117,34 @@ export default function KbDetail({ navigate, path }) {
   const inProgress = status?.inProgress || status?.status === "indexing";
   usePoll(loadStatus, inProgress ? 10000 : 30000, [kbKey, company, inProgress]);
 
+  // Load processed documents when Documents tab is active and KB is not file-based
+  useEffect(() => {
+    if (activeTab !== "documents" || !company || !kbKey) return;
+    if (kb?.source_type === "file") return; // file KBs show uploaded files, not registry
+    let cancelled = false;
+    (async () => {
+      setDocsLoading(true);
+      try {
+        const res = await listKbDocuments(kbKey, company);
+        if (!cancelled) setProcessedDocs(res.documents || []);
+      } catch {
+        if (!cancelled) setProcessedDocs([]);
+      } finally {
+        if (!cancelled) setDocsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, kbKey, company, kb?.source_type]);
+
   const runIngest = async () => {
     setIngesting(true);
     setError(null);
     try {
-      const ingestScope = scope === "limit" ? { scope: "limit", limit: Number(docLimit) } : { scope: "all" };
+      const ingestScope = scope === "limit"
+        ? { scope: "limit", limit: Number(docLimit) || 100 }
+        : scope === "selected" && selectedPages.length > 0
+          ? { scope: "selected", items: selectedPages }
+          : { scope: "all" };
       const res = await ingestKb(kbKey, company, ingestScope);
       notify(res.message || "Ingest started.");
       await loadStatus();
@@ -236,10 +279,10 @@ export default function KbDetail({ navigate, path }) {
 
           <Card title="Infrastructure">
             <dl className="space-y-3 text-sm">
-              <InfoRow label="Embedding" value={kb?.embedding_model_name || "Company default"} />
-              <InfoRow label="Vector Store" value={kb?.vector_external_id || kb?.vector_resource_name || "Company default"} />
-              <InfoRow label="Object Storage" value={kb?.storage_external_id || kb?.storage_resource_name || "Company default"} />
-              <InfoRow label="Graph" value={kb?.enable_graph_rag ? "Enabled" : "Disabled"} />
+              <InfoRow label="Embedding" value={kb?.embedding_model_name || "Company default"} tip={getTermTooltip("embedding-model")} />
+              <InfoRow label="Vector Store" value={kb?.vector_external_id || kb?.vector_resource_name || "Company default"} tip={getTermTooltip("vector-store")} />
+              <InfoRow label="Object Storage" value={kb?.storage_external_id || kb?.storage_resource_name || "Company default"} tip={getTermTooltip("object-storage")} />
+              <InfoRow label="Graph" value={kb?.enable_graph_rag ? "Enabled" : "Disabled"} tip={getTermTooltip("graph-rag")} />
               <InfoRow label="Source" value={kb?.source_type || "wordpress"} />
               {kb?.description && <InfoRow label="Description" value={kb.description} />}
             </dl>
@@ -340,23 +383,99 @@ export default function KbDetail({ navigate, path }) {
               })()}
             </Card>
           ) : (
-            <Card title="Documents">
-              <p className="text-sm text-slate-500">
-                {kb?.source_type === "wordpress" && "Content is fetched from the WordPress REST API during ingestion."}
-                {kb?.source_type === "url" && "Content is fetched from configured URLs during ingestion."}
-                {kb?.source_type === "custom" && "Content is provided via the API or a custom pipeline."}
-                {!kb?.source_type && "Content source not configured."}
-              </p>
-              <dl className="mt-3 space-y-2 text-sm">
-                <InfoRow label="Source type" value={kb?.source_type || "N/A"} />
-                {kb?.source_type === "url" && (() => {
-                  const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
-                  const urls = cfg?.urls || [];
-                  return urls.length > 0 ? <InfoRow label="URLs" value={`${urls.length} configured`} /> : null;
-                })()}
-                <InfoRow label="Registry count" value={status?.documentCount?.toLocaleString() || "0"} />
-              </dl>
-            </Card>
+            <div className="space-y-4">
+              {/* Source info card */}
+              <Card title="Source">
+                <dl className="space-y-2 text-sm">
+                  <InfoRow label="Source type">
+                    <Badge tone={kb?.source_type === "wordpress" ? "cyan" : kb?.source_type === "url" ? "amber" : "slate"}>
+                      {kb?.source_type === "wordpress" && "\ud83c\udf10 WordPress"}
+                      {kb?.source_type === "url" && "\ud83d\udd17 URL"}
+                      {kb?.source_type === "custom" && "\u2699\ufe0f Custom"}
+                      {!kb?.source_type && "Not configured"}
+                    </Badge>
+                  </InfoRow>
+                  {kb?.source_type === "url" && (() => {
+                    const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
+                    const urls = cfg?.urls || [];
+                    return urls.length > 0 ? (
+                      <InfoRow label="URLs">
+                        <div className="space-y-1">
+                          {urls.map((u, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-slate-600" />
+                              <span className="truncate text-xs text-slate-400" title={u}>{u}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </InfoRow>
+                    ) : null;
+                  })()}
+                  {kb?.source_type === "wordpress" && (() => {
+                    const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
+                    const scope = cfg?.scope || "all";
+                    return (
+                      <InfoRow label="Scope">
+                        <span className="text-xs text-slate-300">
+                          {scope === "all" ? "Entire website" : scope === "limit" ? `Limit: ${cfg.docLimit || "?"} documents` : scope === "selected" ? "Selected pages" : scope}
+                        </span>
+                      </InfoRow>
+                    );
+                  })()}
+                  <InfoRow label="Total documents" value={status?.documentCount?.toLocaleString() || "0"} />
+                </dl>
+              </Card>
+
+              {/* Processed documents list */}
+              <Card title="Processed Documents" subtitle="Documents ingested from the source">
+                {docsLoading ? (
+                  <div className="flex items-center gap-2 py-4 text-sm text-slate-400">
+                    <Spinner className="h-4 w-4" /> Loading documents…
+                  </div>
+                ) : processedDocs.length === 0 ? (
+                  <Empty message="No documents ingested yet. Run ingestion to populate this list." />
+                ) : (
+                  <>
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-xs font-medium text-slate-400">
+                        {processedDocs.length} document{processedDocs.length !== 1 ? "s" : ""} ingested
+                      </span>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-500">
+                            <th className="pb-2 pr-3 font-medium">Document</th>
+                            <th className="pb-2 pr-3 font-medium">Type</th>
+                            <th className="pb-2 font-medium">Last Modified</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/50">
+                          {processedDocs.map((doc) => (
+                            <tr key={doc.key} className="group">
+                              <td className="py-2 pr-3">
+                                <div className="flex items-center gap-2">
+                                  <span className={`inline-block h-1.5 w-1.5 rounded-full ${doc.type === "post" ? "bg-indigo-400" : "bg-emerald-400"}`} />
+                                  <span className="font-medium text-slate-300" title={doc.key}>{doc.slug}</span>
+                                </div>
+                              </td>
+                              <td className="py-2 pr-3">
+                                <Badge tone={doc.type === "post" ? "indigo" : "green"} className="text-[10px]">
+                                  {doc.type === "post" ? "Post" : doc.type === "page" ? "Page" : doc.type}
+                                </Badge>
+                              </td>
+                              <td className="py-2 text-slate-500">
+                                {doc.modifiedAt ? new Date(doc.modifiedAt).toLocaleDateString() : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </Card>
+            </div>
           )}
         </div>
       )}
@@ -369,48 +488,48 @@ export default function KbDetail({ navigate, path }) {
           {/* Ingest controls */}
           <Card title="Run Ingestion" subtitle="Fetch content from the source and index it">
             <div className="flex flex-wrap items-center gap-3">
-              {/* Scope selector */}
-              <div className="relative shrink-0">
-                <Button
-                  variant="ghost"
-                  onClick={() => setScopeOpen(!scopeOpen)}
-                  disabled={!kb || ingesting || inProgress}
-                  className="gap-1.5 whitespace-nowrap"
-                >
-                  <svg aria-hidden="true" className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="1" /><circle cx="12" cy="5" r="1" /><circle cx="12" cy="19" r="1" />
-                  </svg>
-                  Scope: {scope === "all" ? "All" : `Limit ${docLimit}`}
-                </Button>
-                {scopeOpen && (
-                  <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-slate-700 bg-slate-800 shadow-xl">
-                    <div className="p-2">
-                      <p className="mb-2 px-2 text-[11px] font-medium text-slate-500">Ingestion scope</p>
-                      <button type="button" onClick={() => { setScope("all"); setScopeOpen(false); }}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${scope === "all" ? "bg-indigo-500/15 text-indigo-300" : "text-slate-300 hover:bg-slate-700"}`}>
-                        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${scope === "all" ? "border-indigo-400 bg-indigo-400" : "border-slate-600"}`}>
-                          {scope === "all" && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                        </span>
-                        All documents
-                      </button>
-                      <button type="button" onClick={() => { setScope("limit"); setScopeOpen(false); }}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${scope === "limit" ? "bg-indigo-500/15 text-indigo-300" : "text-slate-300 hover:bg-slate-700"}`}>
-                        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${scope === "limit" ? "border-indigo-400 bg-indigo-400" : "border-slate-600"}`}>
-                          {scope === "limit" && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                        </span>
-                        Limit documents
-                      </button>
-                      {scope === "limit" && (
-                        <div className="mt-2 px-2">
-                          <label className="mb-1 block text-[11px] text-slate-500">Max documents</label>
-                          <input type="number" min={1} max={10000} value={docLimit}
-                            onChange={(e) => setDocLimit(e.target.value)}
-                            className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
+              {/* Scope selector — uses Popover to escape Card overflow-hidden */}
+              <div className="shrink-0">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      disabled={!kb || ingesting || inProgress}
+                      className="gap-1.5 whitespace-nowrap"
+                    >
+                      <svg aria-hidden="true" className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="1" /><circle cx="12" cy="5" r="1" /><circle cx="12" cy="19" r="1" />
+                      </svg>
+                      Scope: {scope === "all" ? "All" : `Limit ${docLimit}`}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" side="bottom" sideOffset={8} className="w-56 p-1">
+                    <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">Ingestion scope</p>
+                    <PopoverItem
+                      onClick={() => setScope("all")}
+                      className={scope === "all" ? "bg-indigo-500/15 text-indigo-300" : ""}
+                    >
+                      <span className={`mr-2 inline-block h-1.5 w-1.5 rounded-full ${scope === "all" ? "bg-indigo-400" : "bg-slate-600"}`} />
+                      All documents
+                    </PopoverItem>
+                    <PopoverSeparator />
+                    <PopoverItem
+                      onClick={() => setScope("limit")}
+                      className={scope === "limit" ? "bg-indigo-500/15 text-indigo-300" : ""}
+                    >
+                      <span className={`mr-2 inline-block h-1.5 w-1.5 rounded-full ${scope === "limit" ? "bg-indigo-400" : "bg-slate-600"}`} />
+                      Limit documents
+                    </PopoverItem>
+                    {scope === "limit" && (
+                      <div className="mt-1 px-3 py-2">
+                        <label className="mb-1 block text-[11px] text-slate-500">Max documents</label>
+                        <input type="number" min={1} max={10000} value={docLimit}
+                          onChange={(e) => setDocLimit(e.target.value)}
+                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none" />
+                      </div>
+                    )}
+                  </PopoverContent>
+                </Popover>
               </div>
               <Button onClick={runIngest} disabled={!kb || ingesting || inProgress} className="whitespace-nowrap">
                 {ingesting ? <Spinner className="h-3.5 w-3.5" /> : "Run Ingest"}
@@ -443,6 +562,20 @@ export default function KbDetail({ navigate, path }) {
       )}
 
       {/* ══════════════════════════════════════════════════════════════════ */}
+      {/* TAB: Custom Q&A                                                  */}
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {activeTab === "qa" && (
+        <CustomQATab kbKey={kbKey} company={company} notify={notify} />
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {/* TAB: Knowledge Graph (Phase 6)                                   */}
+      {/* ══════════════════════════════════════════════════════════════════ */}
+      {activeTab === "knowledge" && (
+        <KnowledgeGraphTab kbKey={kbKey} company={company} kb={kb} notify={notify} />
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════ */}
       {/* TAB: Configuration                                               */}
       {/* ══════════════════════════════════════════════════════════════════ */}
       {activeTab === "configuration" && (
@@ -463,7 +596,22 @@ export default function KbDetail({ navigate, path }) {
               <dl className="space-y-2 text-sm">
                 <InfoRow label="URL" value={kb.webhook_url} />
                 <InfoRow label="HMAC secret" value={kb.has_webhook_secret ? "Configured" : "Not set"} />
+                <InfoRow label="Events" value={Array.isArray(kb.webhook_events) ? kb.webhook_events.join(", ") : (kb.webhook_events || "completed, failed")} />
               </dl>
+              <div className="mt-3">
+                <Button
+                  variant="secondary"
+                  onClick={async () => {
+                    try {
+                      await api(`/gateway/kbs/${kbKey}/webhook/test`, { method: "POST", company });
+                      notify("Test webhook sent.");
+                    } catch (e) { setError(e.message); }
+                  }}
+                  className="text-xs"
+                >
+                  🧪 Send test webhook
+                </Button>
+              </div>
             </Card>
           )}
         </div>
@@ -485,14 +633,240 @@ export default function KbDetail({ navigate, path }) {
 }
 
 // ---------------------------------------------------------------------------
+// Custom Q&A Tab
+// ---------------------------------------------------------------------------
+
+function CustomQATab({ kbKey, company, notify }) {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editEntry, setEditEntry] = useState(null);
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [tags, setTags] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testQ, setTestQ] = useState("");
+  const [testResult, setTestResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await listKbQa(kbKey, company);
+      setEntries(data);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [kbKey, company]);
+
+  const openAdd = () => {
+    setQuestion(""); setAnswer(""); setTags(""); setEditEntry(null); setShowAdd(true);
+  };
+
+  const openEdit = (entry) => {
+    setQuestion(entry.question); setAnswer(entry.answer);
+    setTags((entry.tags || []).join(", ")); setEditEntry(entry); setShowAdd(true);
+  };
+
+  const handleSave = async () => {
+    if (!question.trim() || !answer.trim()) {
+      setError("Question and answer are required."); return;
+    }
+    setSaving(true); setError(null);
+    try {
+      const tagList = tags.split(",").map((t) => t.trim()).filter(Boolean);
+      if (editEntry) {
+        await updateKbQa(kbKey, editEntry.id, { question: question.trim(), answer: answer.trim(), tags: tagList }, company);
+        notify("Q&A updated.");
+      } else {
+        await addKbQa(kbKey, { question: question.trim(), answer: answer.trim(), tags: tagList }, company);
+        notify("Q&A added.");
+      }
+      setShowAdd(false); await load();
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleDelete = async (entry) => {
+    if (!window.confirm(`Delete this Q&A pair?`)) return;
+    try {
+      await deleteKbQa(kbKey, entry.id, company);
+      notify("Q&A deleted."); await load();
+    } catch (e) { setError(e.message); }
+  };
+
+  const handleToggle = async (entry) => {
+    try {
+      await updateKbQa(kbKey, entry.id, { enabled: !entry.enabled }, company);
+      await load();
+    } catch (e) { setError(e.message); }
+  };
+
+  const handleTest = async () => {
+    if (!testQ.trim()) return;
+    try {
+      const result = await matchKbQa(kbKey, testQ.trim(), company);
+      setTestResult(result);
+    } catch (e) { setError(e.message); }
+  };
+
+  const enabledCount = entries.filter((e) => e.enabled).length;
+
+  return (
+    <div className="space-y-4">
+      <Card title="Custom Q&A" subtitle="Direct answers that override the RAG pipeline for matching questions">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex gap-4 text-xs text-slate-400">
+            <span>{entries.length} total</span>
+            <span>{enabledCount} enabled</span>
+          </div>
+          <Button size="sm" onClick={openAdd}>+ Add Q&A</Button>
+        </div>
+
+        {/* Test matcher */}
+        <div className="mb-4 p-3 bg-slate-800/50 rounded-lg border border-slate-700">
+          <label className="block text-xs font-medium text-slate-400 mb-1.5">Test question matching</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={testQ}
+              onChange={(e) => setTestQ(e.target.value)}
+              placeholder="Type a question to test matching..."
+              className="flex-1 text-sm bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              onKeyDown={(e) => e.key === "Enter" && handleTest()}
+            />
+            <Button size="sm" variant="secondary" onClick={handleTest}>Test</Button>
+          </div>
+          {testResult && (
+            <div className="mt-2 text-xs">
+              {testResult.matched ? (
+                <div className="p-2 bg-emerald-500/10 border border-emerald-500/20 rounded text-emerald-400">
+                  <span className="font-medium">✅ Match found:</span> "{testResult.match.question}"
+                  <div className="mt-1 text-slate-300">{testResult.match.answer}</div>
+                </div>
+              ) : (
+                <div className="p-2 bg-amber-500/10 border border-amber-500/20 rounded text-amber-400">
+                  No match — this question would go through the RAG pipeline.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {error && <div className="text-xs text-red-400 mb-3">{error}</div>}
+
+        {loading ? (
+          <div className="flex justify-center py-8"><Spinner className="h-5 w-5" /></div>
+        ) : entries.length === 0 ? (
+          <Empty message="No custom Q&A pairs yet. Add one to provide direct answers for specific questions." />
+        ) : (
+          <div className="space-y-2">
+            {entries.map((entry) => (
+              <div key={entry.id} className={`p-3 rounded-lg border ${entry.enabled ? "border-slate-700 bg-slate-800/30" : "border-slate-800 bg-slate-900/30 opacity-60"}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-medium text-indigo-400">Q:</span>
+                      <span className="text-sm text-slate-200 truncate">{entry.question}</span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="text-sm font-medium text-emerald-400">A:</span>
+                      <span className="text-sm text-slate-300 line-clamp-2">{entry.answer}</span>
+                    </div>
+                    {entry.tags?.length > 0 && (
+                      <div className="flex gap-1 mt-1.5">
+                        {entry.tags.map((tag) => (
+                          <span key={tag} className="text-[10px] bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => handleToggle(entry)}
+                      className={`px-2 py-0.5 text-[10px] rounded ${entry.enabled ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700 text-slate-500"}`}
+                      title={entry.enabled ? "Disable" : "Enable"}
+                    >
+                      {entry.enabled ? "ON" : "OFF"}
+                    </button>
+                    <button onClick={() => openEdit(entry)} className="p-1 text-slate-500 hover:text-slate-300" title="Edit">
+                      <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                    </button>
+                    <button onClick={() => handleDelete(entry)} className="p-1 text-slate-500 hover:text-red-400" title="Delete">
+                      <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Add/Edit Modal */}
+      {showAdd && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-lg mx-4 p-5">
+            <h3 className="text-lg font-semibold text-white mb-4">
+              {editEntry ? "Edit Q&A" : "Add Custom Q&A"}
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Question</label>
+                <input
+                  type="text"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="e.g. What is your refund policy?"
+                  className="w-full text-sm bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Answer</label>
+                <textarea
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                  placeholder="The exact answer the AI should give..."
+                  rows={4}
+                  className="w-full text-sm bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Tags (comma-separated, optional)</label>
+                <input
+                  type="text"
+                  value={tags}
+                  onChange={(e) => setTags(e.target.value)}
+                  placeholder="e.g. refund, policy, billing"
+                  className="w-full text-sm bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+            </div>
+            {error && <div className="mt-2 text-xs text-red-400">{error}</div>}
+            <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-slate-700">
+              <Button variant="outline" onClick={() => setShowAdd(false)}>Cancel</Button>
+              <Button onClick={handleSave} disabled={saving}>{saving ? "Saving..." : "Save"}</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Shared UI helpers
 // ---------------------------------------------------------------------------
 
 /** Information row: label on left, value on right — used in Overview + Config tabs. */
-function InfoRow({ label, value, children }) {
+function InfoRow({ label, value, children, tip }) {
   return (
     <div className="flex items-center justify-between gap-4">
-      <dt className="text-slate-400">{label}</dt>
+      <dt className="flex items-center gap-1.5 text-slate-400">
+        {label}
+        {tip && <InfoTip content={tip} />}
+      </dt>
       <dd className="text-right font-medium text-slate-100">{children || value || "—"}</dd>
     </div>
   );

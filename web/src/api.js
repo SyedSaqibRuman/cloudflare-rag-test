@@ -5,6 +5,7 @@ const BASE = "";
 // deliberately excluded: they use per-company x-api-key auth instead.
 const AUTH_PATHS = ["/cloudflare", "/gateway", "/auth", "/logs"];
 import { getToken, onUnauthorized } from "./auth";
+import { applyAskFrame } from "./ask-stream-contract.js";
 
 function authHeaders(path) {
   const t = getToken();
@@ -122,7 +123,7 @@ export function logUiToast(message, tone = "green") {
   api("/logs/ui", { method: "POST", body: { message, tone } }).catch(() => {});
 }
 
-export async function askStream({ question, history, company, apiKey, onToken, onError, signal }) {
+export async function askStream({ question, history, company, apiKey, assistantKey, onToken, onStart, onPossibleQuestions, onError, signal }) {
   const res = await fetch(`${BASE}/ask-stream`, {
     method: "POST",
     headers: {
@@ -130,7 +131,7 @@ export async function askStream({ question, history, company, apiKey, onToken, o
       ...(company ? { "x-company-name": company } : {}),
       ...(apiKey ? { "x-api-key": apiKey } : {}),
     },
-    body: JSON.stringify({ question, history }),
+    body: JSON.stringify({ question, history, assistantKey }),
     signal,
   });
 
@@ -165,15 +166,23 @@ export async function askStream({ question, history, company, apiKey, onToken, o
         const payload = trimmed.slice(5).trim();
         if (payload === "[DONE]") return;
         try {
-          const parsed = JSON.parse(payload);
-          if (parsed.token) onToken(parsed.token);
-          else if (parsed.error) onError(parsed.error);
+          applyAskFrame(JSON.parse(payload), { onToken, onStart, onPossibleQuestions, onError });
         } catch {
           /* ignore partial frames */
         }
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Ask suggestions — per-company starter questions (best-effort; Test AI page)
+// ---------------------------------------------------------------------------
+export async function getAskSuggestions(company, apiKey) {
+  return api("/ask/suggestions", {
+    company,
+    headers: apiKey ? { "x-api-key": apiKey } : {},
+  }).then((d) => (Array.isArray(d?.questions) ? d.questions : []));
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +347,10 @@ export const updateKb = (key, body, company) =>
 export const deleteKb = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}`, { method: "DELETE", company });
 
+/** Delete a KB's entities + relationships from the Neo4j knowledge graph. */
+export const clearKbGraph = (key, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/graph`, { method: "DELETE", company });
+
 export const ingestKb = (key, company, scope) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/ingest`, {
     method: "POST",
@@ -355,6 +368,12 @@ export const getKbProgress = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/ingest-progress`, { company });
 
 export const getKbOptions = (company) => api("/gateway/kbs/options", { company }).then((d) => d.options);
+
+export const exportKbs = (keys, company) =>
+  api("/gateway/kbs/export", { method: "POST", body: { keys }, company });
+
+export const importKbs = (items, company, overwrite = false) =>
+  api("/gateway/kbs/import", { method: "POST", body: { items, overwrite }, company });
 
 /** Upload files to a KB for ingestion. Uses FormData (not JSON).
  * @param {string} key
@@ -399,6 +418,34 @@ export function uploadKbDocuments(key, files, company, opts = {}) {
 /** Remove uploaded files from a KB. */
 export const clearKbDocuments = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/documents`, { method: "DELETE", company });
+
+/** List processed documents from the ingestion registry. */
+export const listKbDocuments = (key, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/documents`, { company });
+
+// ---------------------------------------------------------------------------
+// KB Custom Q&A — direct answers that override the RAG pipeline
+// ---------------------------------------------------------------------------
+export const listKbQa = (key, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/qa`, { company }).then((d) => d.entries || []);
+
+export const addKbQa = (key, entry, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/qa`, { method: "POST", body: entry, company });
+
+export const updateKbQa = (key, entryId, updates, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/qa/${encodeURIComponent(entryId)}`, {
+    method: "PUT", body: updates, company,
+  });
+
+export const deleteKbQa = (key, entryId, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/qa/${encodeURIComponent(entryId)}`, {
+    method: "DELETE", company,
+  });
+
+export const matchKbQa = (key, question, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/qa/match`, {
+    method: "POST", body: { question }, company,
+  });
 
 // ---------------------------------------------------------------------------
 // AI Gateway — tenant resources (provider_resources, owned by a credential)
@@ -452,6 +499,20 @@ export const updateAssistant = (key, body, company) =>
 
 export const deleteAssistant = (key, company) =>
   api(`/gateway/assistants/${encodeURIComponent(key)}`, { method: "DELETE", company });
+
+export const testAssistant = (key, question, company, history = []) =>
+  api(`/gateway/assistants/${encodeURIComponent(key)}/test`, {
+    method: "POST",
+    body: { question, history },
+    company,
+  });
+
+export const duplicateAssistant = (key, newKey, company, newName) =>
+  api(`/gateway/assistants/${encodeURIComponent(key)}/duplicate`, {
+    method: "POST",
+    body: { newKey, newName },
+    company,
+  });
 
 // Execute a chat completion through a stored gateway credential (admin test call).
 // body: { credentialId? | providerKey + credentialKey? + environmentKey?,
@@ -516,3 +577,68 @@ export const getIngestionStatus = (companyName) =>
 
 export const cancelIngestion = (companyName) =>
   api(`/gateway/ingest/cancel/${encodeURIComponent(companyName || "")}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
+// AI Gateway — usage (per-company, x-company-name scoped)
+// ---------------------------------------------------------------------------
+export const getUsageSummary = (company, { from, to } = {}) =>
+  api("/gateway/usage/summary", { company, query: { from, to } }).then((d) => d.summary);
+
+export const getUsageAggregate = (company, { from, to, groupBy } = {}) =>
+  api("/gateway/usage", { company, query: { from, to, groupBy } }).then((d) => d.data);
+
+export const getUsageTop = (company, limit = 10) =>
+  api("/gateway/usage/top", { company, query: { limit } }).then((d) => d.data);
+
+export const getUsageRecent = (company, limit = 20) =>
+  api("/gateway/usage/recent", { company, query: { limit } }).then((d) => d.data);
+
+// ---------------------------------------------------------------------------
+// Knowledge graph (per-KB, x-company-name scoped — /gateway/knowledge)
+// Entities, relationships, claims, conflicts + review queue for the Neo4j
+// knowledge layer (Phases 2–5).
+// ---------------------------------------------------------------------------
+export const listKnowledgeEntities = (key, company, query = {}) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/entities`, { company, query }).then((d) => d.entities || []);
+
+export const getKnowledgeEntity = (key, entityId, company) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/entities/${encodeURIComponent(entityId)}`, { company }).then((d) => d.entity);
+
+export const mergeKnowledgeEntities = (key, keepId, dropId, company) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/entities/merge`, {
+    method: "POST", body: { keepId, dropId }, company,
+  });
+
+export const listKnowledgeRelationships = (key, company, query = {}) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/relationships`, { company, query }).then((d) => d.relationships || []);
+
+export const listKnowledgeClaims = (key, company, query = {}) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/claims`, { company, query }).then((d) => d.claims || []);
+
+export const updateKnowledgeClaimStatus = (key, claimId, status, company, reason = null) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/claims/${encodeURIComponent(claimId)}/status`, {
+    method: "PUT", body: { status, reason }, company,
+  });
+
+export const listKnowledgeConflicts = (key, company) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/conflicts`, { company }).then((d) => d.conflicts || []);
+
+export const listKnowledgeReview = (key, company) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/review`, { company }).then((d) => d.review || []);
+
+export const executeKnowledgeTool = (key, tool, args, company) =>
+  api(`/gateway/knowledge/kbs/${encodeURIComponent(key)}/tools/execute`, {
+    method: "POST", body: { tool, args }, company,
+  });
+
+// ---------------------------------------------------------------------------
+// Bulk operations
+// ---------------------------------------------------------------------------
+export const bulkDelete = (entity, keys, company) =>
+  api("/gateway/bulk/delete", { method: "POST", body: { entity, keys }, company });
+
+export const bulkExport = (entity, keys, company) =>
+  api("/gateway/bulk/export", { method: "POST", body: { entity, keys }, company });
+
+export const bulkImport = (entity, items, company, overwrite = false) =>
+  api("/gateway/bulk/import", { method: "POST", body: { entity, items, overwrite }, company });

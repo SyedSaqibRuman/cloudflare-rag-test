@@ -17,7 +17,7 @@ process.chdir(TEST_DIR);
 process.env.CONFIG_STORE = "sqlite";
 
 const { createCompany, updateCompany } = await import("../../config/index.js");
-const { getGraphConfig, graphEnabled, isSafeCypher } = await import("../graph.js");
+const { getGraphConfig, graphEnabled, isSafeCypher, matchesEntityMention, entityMentionRegex, formatGraphKnowledge } = await import("../graph.js");
 await createCompany("graphco");
 
 test("getGraphConfig returns null without a full Neo4j connection", () => {
@@ -97,6 +97,80 @@ test("isSafeCypher rejects non-query text and multiple statements", () => {
 test("isSafeCypher requires a read clause to start", () => {
   assert.equal(isSafeCypher("RETURN 1"), false); // must start with MATCH/UNWIND/OPTIONAL MATCH
   assert.equal(isSafeCypher("UNWIND [1,2] AS x RETURN x"), true);
+});
+
+// --------------------------
+// Phase 4 — entity mention matching (pure, word-boundary aware)
+// --------------------------
+
+test("matchesEntityMention matches a canonical name inside a question", () => {
+  assert.equal(matchesEntityMention("what is ISO 9001 certification?", "ISO 9001"), true);
+  assert.equal(matchesEntityMention("What Is ISO 9001?", "ISO 9001"), true); // case-insensitive
+  assert.equal(matchesEntityMention("tell me about PopularCert RAG", "PopularCert RAG"), true);
+});
+
+test("matchesEntityMention does not false-positive on substrings", () => {
+  // "ISO" must not match inside "isolation"
+  assert.equal(matchesEntityMention("what is the isolation level?", "ISO"), false);
+  // "9001" must not match inside "19001"
+  assert.equal(matchesEntityMention("the code 19001 means what?", "9001"), false);
+});
+
+test("entityMentionRegex returns null for blank terms", () => {
+  assert.equal(entityMentionRegex(""), null);
+  assert.equal(entityMentionRegex("   "), null);
+});
+
+// --------------------------
+// Phase 4 — graph context formatting (pure)
+// --------------------------
+
+test("formatGraphKnowledge renders entities with typed edges and claims", () => {
+  const out = formatGraphKnowledge({
+    entities: [{ name: "ISO 9001", type: "Standard" }],
+    relationships: [
+      { entityName: "ISO 9001", otherName: "Quality Management System", type: "CERTIFIES", confidence: 0.92, evidence: [], direction: "out" },
+      { entityName: "ISO 9001", otherName: "ISO 9001:2008", type: "SUPERSEDES", confidence: 0.95, evidence: [], direction: "in" },
+    ],
+    claims: [],
+  });
+  assert.ok(out.startsWith("[Graph Knowledge]"));
+  assert.ok(out.includes("ISO 9001 (Standard)"));
+  assert.ok(out.includes("→ CERTIFIES Quality Management System (0.92)"));
+  assert.ok(out.includes("← SUPERSEDES ISO 9001:2008 (0.95)")); // direction arrow
+});
+
+test("formatGraphKnowledge dedupes edge + claim for the same triple", () => {
+  const out = formatGraphKnowledge({
+    entities: [{ name: "A", type: "Concept" }],
+    relationships: [{ entityName: "A", otherName: "B", type: "USES", confidence: 0.9, evidence: [], direction: "out" }],
+    claims: [{ entityName: "A", otherName: "B", predicate: "USES", confidence: 0.7, evidence: ["doc/chunk-1"], direction: "out" }],
+  });
+  // Same (predicate, direction, other) appears once — the higher confidence wins.
+  assert.equal((out.match(/USES B/g) || []).length, 1);
+  assert.ok(out.includes("(0.9)"));
+  assert.ok(out.includes("doc/chunk-1")); // evidence of the kept item
+});
+
+test("formatGraphKnowledge returns null when nothing matches", () => {
+  assert.equal(formatGraphKnowledge({ entities: [] }), null);
+  assert.equal(
+    formatGraphKnowledge({ entities: [{ name: "A", type: "Concept" }], relationships: [], claims: [] }),
+    null
+  );
+});
+
+test("formatGraphKnowledge respects the char budget", () => {
+  const out = formatGraphKnowledge({
+    entities: [{ name: "Long Entity Name", type: "Concept" }],
+    relationships: [
+      { entityName: "Long Entity Name", otherName: "Target One", type: "RELATED_TO", confidence: 0.9, evidence: [], direction: "out" },
+      { entityName: "Long Entity Name", otherName: "Target Two", type: "RELATED_TO", confidence: 0.8, evidence: [], direction: "out" },
+    ],
+    claims: [],
+    maxChars: 90,
+  });
+  assert.ok(out.length <= 90, `context exceeds budget (${out.length})`);
 });
 
 after(() => {
