@@ -57,6 +57,7 @@ ragBot/
 archive-*/
 ragBot.zip
 processed.json
+processed-*.json
 runtime-config.json
 questions*.json
 results*.csv

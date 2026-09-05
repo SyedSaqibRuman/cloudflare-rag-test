@@ -163,7 +163,7 @@ An optional **MySQL-backed** multi-tenant provider/credential layer running **al
 7. **Config is loaded once at process start** (runtime singleton, populated by `initConfig()` before `app.listen`). Editing the DB while the server runs has no effect; changing a company's config via the API mutates the singleton and persists **asynchronously** (persist-first — a failed DB write returns an error and leaves memory untouched).
 8. **Vector index dimensions must match `EMBEDDING_DIMENSIONS`** for the company's `EMBEDDING_MODEL`, or upserts fail with "Invalid embedding detected". Changing `EMBEDDING_MODEL` on a populated index means re-ingesting (or recreating the index).
 9. **History is capped at 6 messages** (`MAX_HISTORY`) and query rewriting only happens when history is non-empty.
-10. **`processed-<company>.json` is the ingestion registry** (gitignored except the committed `processed-maxicert.json`). Deleting it forces full re-ingest; `content/` holds per-post Markdown from ingestion.
+10. **`processed-<company>.json` is the ingestion registry** (gitignored via `processed-*.json`). Deleting it forces full re-ingest; `content/` holds per-post Markdown from ingestion.
 11. Console logging is gated on `NODE_ENV !== "production"` in the query path; file logs (`utils/logger.js`, `logs/`) are async/batched, rotate once per session at 5MB, and are always written.
 12. The web dashboard is only served if `web/dist` exists at boot (`hasWeb` check). After pulling new UI changes, rebuild before restarting the server.
 13. Emojis in log strings (`✅`, `❌`, `⚠️`) and `// ------` banner comments are the house style — keep it when editing existing files.
