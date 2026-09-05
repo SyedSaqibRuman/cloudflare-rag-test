@@ -25,7 +25,9 @@ export async function resolveResourceConnection(resource) {
   const decrypted = decryptCredential(cred.encrypted_credentials);
 
   const env = cred.environment_id
-    ? await import("../repositories/company-environment.js").then((m) => m.CompanyEnvironmentRepository.findById(cred.environment_id))
+    ? await import("../repositories/company-environment.js")
+        .then((m) => m.CompanyEnvironmentRepository.findById(cred.environment_id))
+        .catch(() => null)
     : null;
 
   return {

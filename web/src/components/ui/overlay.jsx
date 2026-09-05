@@ -1,4 +1,5 @@
-import { createContext, cloneElement, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, cloneElement, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { cx } from "./helpers";
 import ScrollToTop from "./ScrollToTop.jsx";
 
@@ -9,19 +10,19 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
   const dialogRef = useRef(null);
   const scrollRef = useRef(null);
   const previousFocusRef = useRef(null);
-  const [progress, setProgress] = useState(0);
-
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const max = el.scrollHeight - el.clientHeight;
-    setProgress(max > 0 ? Math.min(100, Math.round((el.scrollTop / max) * 100)) : 0);
-  }, []);
+  // Callers pass inline onClose arrows, which get a NEW identity on every
+  // parent render. If onClose were an effect dependency, the effect would
+  // re-run on every keystroke inside the dialog and its requestAnimationFrame
+  // below would steal focus from the input the user is typing in (cursor jumps
+  // to the first focusable — e.g. the Close button). Hold the latest onClose
+  // in a ref so the effect only runs when the modal actually opens/closes.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
-      if (e.key === "Escape" && closeOnEscape) onClose();
+      if (e.key === "Escape" && closeOnEscape) onCloseRef.current();
       if (e.key === "Tab" && dialogRef.current) {
         const focusable = dialogRef.current.querySelectorAll(
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -39,7 +40,6 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
       }
     };
     previousFocusRef.current = document.activeElement;
-    setProgress(0);
     requestAnimationFrame(() => {
       const focusable = dialogRef.current?.querySelectorAll(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -51,7 +51,7 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
       window.removeEventListener("keydown", onKey);
       previousFocusRef.current?.focus();
     };
-  }, [open, onClose, closeOnEscape]);
+  }, [open, closeOnEscape]);
 
   if (!open) return null;
   return (
@@ -80,15 +80,7 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
             </svg>
           </button>
         </div>
-        <div ref={scrollRef} onScroll={handleScroll} className={cx("relative min-h-0 p-5", wide && "max-h-[70vh] overflow-y-auto", maxScreen && "flex-1 overflow-y-auto")}>
-          {maxScreen && progress > 0 && (
-            <div className="sticky top-0 left-0 z-10 -mx-5 -mt-5 mb-3 h-0.5 bg-slate-800">
-              <div
-                className="h-full bg-indigo-500 transition-[width] duration-150"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-          )}
+        <div ref={scrollRef} className={cx("relative min-h-0 p-5", wide && "max-h-[70vh] overflow-y-auto", maxScreen && "flex-1 overflow-y-auto")}>
           {children}
           {maxScreen && (
             <ScrollToTop container={scrollRef} className="sticky bottom-3 ml-auto" />
@@ -141,17 +133,24 @@ export function TabPanel({ id, active, children }) {
 // ------------------------------------------------------------------
 const PopoverCtx = createContext(null);
 
-export function Popover({ children }) {
+export function Popover({ children, className }) {
   const [open, setOpen] = useState(false);
   // Outside-click guard lives here (wrapping BOTH trigger and content): the
-  // content renders outside the trigger element, so a trigger-scoped guard
-  // would close the popover on mousedown before the item's click ever fires.
-  const ref = useRef(null);
+  // content renders in a portal to <body>, so a trigger-scoped guard would
+  // close the popover on mousedown before the item's click ever fires. We
+  // therefore consider clicks inside the trigger wrapper OR the portaled menu
+  // as "inside".
+  const wrapperRef = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
     const onClickOutside = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+      if (wrapperRef.current && wrapperRef.current.contains(e.target)) return;
+      // Use closest() for robust portal detection — menuRef.current may not
+      // be set yet on first interaction, and portal DOM can confuse contains().
+      if (e.target.closest?.("[role=menu]") || e.target.closest?.("[role=menuitem]")) return;
+      setOpen(false);
     };
     const onKey = (e) => {
       if (e.key === "Escape") setOpen(false);
@@ -165,8 +164,8 @@ export function Popover({ children }) {
   }, [open]);
 
   return (
-    <PopoverCtx.Provider value={{ open, setOpen }}>
-      <div ref={ref} className="relative w-full">{children}</div>
+    <PopoverCtx.Provider value={{ open, setOpen, wrapperRef, menuRef }}>
+      <div ref={wrapperRef} className={cx("relative w-full", className)}>{children}</div>
     </PopoverCtx.Provider>
   );
 }
@@ -195,44 +194,110 @@ export function PopoverTrigger({ children, asChild }) {
   );
 }
 
-export function PopoverContent({ children, align = "start", sideOffset = 8, side = "bottom", className }) {
-  const { open, setOpen } = useContext(PopoverCtx);
+export function PopoverContent({ children, align = "start", sideOffset = 8, side = "bottom", className, matchTrigger = false }) {
+  const { open, wrapperRef, menuRef } = useContext(PopoverCtx);
   const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+  const [resolvedSide, setResolvedSide] = useState("bottom");
 
+  // Expose the portaled menu so Popover's outside-click guard treats clicks on
+  // it as "inside" (the menu renders in a portal to <body>, not inside the
+  // wrapper — otherwise every selection would be dismissed on mousedown).
   useEffect(() => {
-    if (!open || !ref.current) return;
-    const first = ref.current.querySelector("[role=menuitem], button, a");
-    if (first) requestAnimationFrame(() => first.focus());
-  }, [open]);
+    menuRef.current = ref.current;
+    return () => { menuRef.current = null; };
+  }, [menuRef]);
+
+  // Measure + place before paint (no flash at 0,0) and reposition on
+  // resize/scroll. Uses `fixed` positioning, so it escapes any ancestor's
+  // overflow clipping (e.g. the Card primitive's overflow-hidden) and clamps
+  // to the viewport so it can never be positioned with a negative X.
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const el = ref.current;
+    const wrapper = wrapperRef.current;
+    if (!el || !wrapper) return;
+    // Anchor = the composed trigger (the first element child of the wrapper),
+    // so a split-button group positions the menu against the whole control
+    // rather than a tiny chevron.
+    const trigger = wrapper.firstElementChild || wrapper;
+
+    const compute = () => {
+      if (!document.body.contains(el)) return;
+      const t = trigger.getBoundingClientRect();
+      if (matchTrigger) el.style.width = `${t.width}px`;
+      const mh = el.offsetHeight;
+      const menuW = matchTrigger ? t.width : el.offsetWidth;
+      const margin = 8;
+
+      // Vertical: prefer the requested side; when only one side fits, use it;
+      // clamp into the viewport either way.
+      const fitsBelow = t.bottom + sideOffset + mh <= window.innerHeight - margin;
+      const fitsAbove = t.top - sideOffset - mh >= margin;
+      let placeBelow;
+      if (fitsBelow && fitsAbove) placeBelow = side !== "top";
+      else placeBelow = fitsBelow;
+      const rawTop = placeBelow ? t.bottom + sideOffset : t.top - sideOffset - mh;
+      const top = Math.max(margin, Math.min(rawTop, window.innerHeight - mh - margin));
+      setResolvedSide(placeBelow ? "bottom" : "top");
+
+      // Horizontal: align start/center/end to the anchor, then clamp so the
+      // menu is never clipped by the viewport's left or right edge.
+      let left = align === "end" ? t.right - menuW : align === "center" ? t.left + (t.width - menuW) / 2 : t.left;
+      left = Math.max(margin, Math.min(left, window.innerWidth - menuW - margin));
+
+      setPos({ left, top });
+    };
+
+    compute();
+    window.addEventListener("resize", compute);
+    window.addEventListener("scroll", compute, true);
+    return () => {
+      window.removeEventListener("resize", compute);
+      window.removeEventListener("scroll", compute, true);
+    };
+  }, [open, align, side, sideOffset, matchTrigger, wrapperRef]);
 
   if (!open) return null;
 
-  return (
+  // Grow the menu outward from its anchor edge so the open animation feels
+  // anchored to the button rather than always originating top-left.
+  // Applied as an inline transform-origin (bulletproof — no Tailwind scanning
+  // dependency) keyed to the resolved side + align.
+  const origin =
+    resolvedSide === "bottom"
+      ? align === "end" ? "bottom right"
+        : align === "center" ? "bottom center" : "bottom left"
+      : align === "end" ? "top right"
+        : align === "center" ? "top center" : "top left";
+
+  return createPortal(
     <div
       ref={ref}
       role="menu"
       className={cx(
-        "absolute z-50 min-w-[10rem] rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-xl",
-        "animate-in fade-in zoom-in-95 duration-100",
-        align === "end" ? "right-0" : "left-0",
+        "z-50 min-w-[10rem] rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-xl",
+        "popover-pop-in",
         className
       )}
-      style={{ [side === "top" ? "marginBottom" : "marginTop"]: `${sideOffset}px`, [side === "top" ? "bottom" : "top"]: "100%" }}
-      onClick={(e) => {
-        if (e.target.closest("[role=menuitem]")) setOpen(false);
-      }}
+      style={{ position: "fixed", left: pos?.left ?? 0, top: pos?.top ?? 0, transformOrigin: origin }}
     >
       {children}
-    </div>
+    </div>,
+    document.body
   );
 }
 
 export function PopoverItem({ children, onClick, className }) {
+  const { setOpen } = useContext(PopoverCtx);
   return (
     <button
       type="button"
       role="menuitem"
-      onClick={(e) => onClick?.(e)}
+      onClick={(e) => {
+        onClick?.(e);
+        setOpen(false);
+      }}
       className={cx(
         "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-300",
         "transition-colors hover:bg-slate-800 hover:text-slate-100",

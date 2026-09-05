@@ -28,6 +28,7 @@ export async function fireIngestionWebhook(opts) {
   const {
     webhookUrl,
     webhookSecret,
+    webhookEvents,
     stats,
     kbKey,
     companyName,
@@ -36,6 +37,11 @@ export async function fireIngestionWebhook(opts) {
   } = opts;
 
   if (!webhookUrl) return;
+
+  // Respect event filtering: skip if this event type is not in webhookEvents.
+  if (webhookEvents && !webhookEvents.split(",").map((e) => e.trim()).includes(status)) {
+    return;
+  }
 
   const payload = buildPayload({ stats, kbKey, companyName, status, error });
 

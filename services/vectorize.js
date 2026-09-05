@@ -5,6 +5,48 @@ import { chunkArray } from "../utils/helpers.js";
 import { resolveCreds, getConfig } from "../config/index.js";
 
 // --------------------------
+// 🔹 Embed usage logging (best-effort, non-blocking)
+// --------------------------
+async function logEmbedUsage(companyName, { inputTokens = 0, batchSize = 0 } = {}) {
+  try {
+    const { CompanyRepository, CredentialRepository, UsageRepository } = await import("../mysql/repositories.js");
+    const company = await CompanyRepository.findByKey(companyName);
+    if (!company) return;
+
+    const creds = await CredentialRepository.listByCompany(company.id);
+    const cfCred = creds?.find((c) => c.provider_key === "cloudflare" || c.provider_key === "cloudflare-ai");
+
+    const { estimateCost, getPool } = await import("../mysql/services/cost.js");
+    const pool = await getPool();
+    let costUsd = 0;
+    try {
+      const costResult = await estimateCost({
+        modelKey: getConfig(companyName).EMBEDDING_MODEL || "@cf/baai/bge-base-en-v1.5",
+        inputTokens,
+        outputTokens: 0,
+        getPool,
+      });
+      costUsd = costResult.costUsd;
+    } catch { /* pricing unavailable */ }
+
+    await UsageRepository.log({
+      companyId: company.id,
+      credentialId: cfCred?.id || null,
+      action: "ingest.embed",
+      modelUsed: getConfig(companyName).EMBEDDING_MODEL || "@cf/baai/bge-base-en-v1.5",
+      inputUnits: inputTokens || null,
+      outputUnits: null,
+      durationMs: null,
+      costUsd: costUsd || null,
+      responseStatus: 200,
+      requestId: null,
+    });
+  } catch {
+    // Best-effort — usage logging must never disrupt ingestion
+  }
+}
+
+// --------------------------
 // 🔹 Config
 // --------------------------
 const DIMENSIONS = 768;
@@ -165,6 +207,11 @@ export async function upsertVectors(
       });
 
       const ndjson = lines.join("\n") + "\n";
+
+      // --------------------------
+      // 🔹 Log usage for embedding batch (best-effort)
+      // --------------------------
+      logEmbedUsage(companyName, { inputTokens: texts.join(" ").length, batchSize: batch.length }).catch(() => {});
 
       // --------------------------
       // 🔹 Upsert via SDK

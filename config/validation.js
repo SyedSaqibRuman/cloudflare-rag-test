@@ -65,6 +65,27 @@ export function validateConfigKey(key, value) {
     return null;
   }
 
+  // Custom guardrail prompt (appended to the system message). Free text —
+  // empty clears it and falls back to the built-in guardrail.
+  if (key === "GUARDRAIL_PROMPT") {
+    if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
+    if (value.length > 8000) return `${key} must be at most 8000 characters.`;
+    return null;
+  }
+
+  // Blocked topics — a newline-separated list of keywords/phrases. Each line
+  // is matched as a case-insensitive substring against the user's question.
+  if (key === "BLOCKED_TOPICS") {
+    if (typeof value !== "string" || !value.trim()) return `${key} must be a non-empty string.`;
+    const lines = value.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return `${key} must contain at least one topic.`;
+    if (lines.length > 100) return `${key} supports at most 100 topics (one per line).`;
+    for (const line of lines) {
+      if (line.length > 120) return `${key} topics must be at most 120 characters each.`;
+    }
+    return null;
+  }
+
   // Resource names (vector indexes, R2 buckets)
   if (RESOURCE_KEYS.includes(key)) {
     const normalized = value.trim();

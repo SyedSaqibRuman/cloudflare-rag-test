@@ -134,6 +134,40 @@ export function IconUpload() {
   );
 }
 
+export function IconChatbot() {
+  return (
+    <svg {...base}>
+      <rect x="3" y="3" width="18" height="14" rx="2" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+      <circle cx="9" cy="10" r="1" fill="currentColor" />
+      <circle cx="15" cy="10" r="1" fill="currentColor" />
+      <path d="M9 13h6" />
+    </svg>
+  );
+}
+
+export function IconChart() {
+  return (
+    <svg {...base}>
+      <path d="M3 3v18h18" />
+      <path d="m19 9-5 5-4-4-3 3" />
+    </svg>
+  );
+}
+
+export function IconWorkflow() {
+  return (
+    <svg {...base}>
+      <rect x="3" y="3" width="6" height="6" rx="1" />
+      <rect x="15" y="3" width="6" height="6" rx="1" />
+      <rect x="9" y="15" width="6" height="6" rx="1" />
+      <path d="M9 6h6" />
+      <path d="M12 12v3" />
+    </svg>
+  );
+}
+
 // Name → component map used by the sidebar to resolve NAV icon keys.
 export const NAV_ICONS = {
   dashboard: IconDashboard,
@@ -147,4 +181,7 @@ export const NAV_ICONS = {
   key: IconKey,
   bot: IconBot,
   upload: IconUpload,
+  chatbot: IconChatbot,
+  chart: IconChart,
+  workflow: IconWorkflow,
 };

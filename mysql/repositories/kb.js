@@ -57,8 +57,9 @@ export const KbRepository = {
           vector_resource_id, graph_resource_id, storage_resource_id,
           embedding_model_id, embedding_model_provider,
           chunk_size, chunk_overlap, retrieval_top_k, retrieval_score_threshold,
-          enable_graph_rag, enable_hybrid_search, source_type, status, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          enable_graph_rag, enable_hybrid_search, source_type, status, is_active,
+          webhook_url, webhook_secret, webhook_events, source_config)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.kbKey,
@@ -78,6 +79,10 @@ export const KbRepository = {
         input.sourceType ?? "wordpress",
         input.status ?? "active",
         input.isActive ?? true,
+        input.webhookUrl ?? null,
+        input.webhookSecret ?? null,
+        input.webhookEvents ?? null,
+        input.sourceConfig ? JSON.stringify(input.sourceConfig) : null,
       ]
     );
     return Number(result.insertId);
@@ -175,6 +180,87 @@ export const KbRepository = {
       `UPDATE knowledge_bases SET last_error = ? WHERE id = ?`,
       [errorMessage, kbId]
     );
+  },
+
+  // ------------------------------------------------------------------
+  // 🔹 Custom Q&A — direct answers that override the RAG pipeline
+  // ------------------------------------------------------------------
+
+  /** Get all custom Q&A pairs for a KB. */
+  async getCustomQa(kbId) {
+    const pool = await getPool();
+    const [[row]] = await pool.query(
+      `SELECT custom_qa FROM knowledge_bases WHERE id = ?`,
+      [kbId]
+    );
+    if (!row?.custom_qa) return [];
+    try {
+      const parsed = typeof row.custom_qa === "string" ? JSON.parse(row.custom_qa) : row.custom_qa;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+
+  /** Replace all custom Q&A pairs for a KB. */
+  async setCustomQa(kbId, entries) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET custom_qa = ? WHERE id = ?`,
+      [JSON.stringify(entries), kbId]
+    );
+  },
+
+  /** Add a single Q&A pair to a KB. Returns the new entry with id. */
+  async addCustomQaEntry(kbId, entry) {
+    const existing = await this.getCustomQa(kbId);
+    const newEntry = {
+      id: `qa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      question: entry.question,
+      answer: entry.answer,
+      enabled: entry.enabled !== false,
+      tags: entry.tags || [],
+      created_at: new Date().toISOString(),
+    };
+    existing.push(newEntry);
+    await this.setCustomQa(kbId, existing);
+    return newEntry;
+  },
+
+  /** Update a single Q&A pair by id. */
+  async updateCustomQaEntry(kbId, entryId, updates) {
+    const existing = await this.getCustomQa(kbId);
+    const idx = existing.findIndex((e) => e.id === entryId);
+    if (idx === -1) return null;
+    existing[idx] = { ...existing[idx], ...updates, id: entryId, updated_at: new Date().toISOString() };
+    await this.setCustomQa(kbId, existing);
+    return existing[idx];
+  },
+
+  /** Delete a single Q&A pair by id. */
+  async deleteCustomQaEntry(kbId, entryId) {
+    const existing = await this.getCustomQa(kbId);
+    const filtered = existing.filter((e) => e.id !== entryId);
+    if (filtered.length === existing.length) return false;
+    await this.setCustomQa(kbId, filtered);
+    return true;
+  },
+
+  /** Find the first matching custom Q&A entry for a question (case-insensitive contains). */
+  async matchCustomQa(kbId, question) {
+    const entries = await this.getCustomQa(kbId);
+    const q = question.toLowerCase().trim();
+    // First: exact match
+    for (const entry of entries) {
+      if (entry.enabled && entry.question.toLowerCase().trim() === q) return entry;
+    }
+    // Second: contains match (question contains the custom question, or vice versa)
+    for (const entry of entries) {
+      if (!entry.enabled) continue;
+      const cq = entry.question.toLowerCase().trim();
+      if (q.includes(cq) || cq.includes(q)) return entry;
+    }
+    return null;
   },
 };
 

@@ -21,6 +21,10 @@ const Catalog = lazy(() => import("./pages/Catalog"));
 const Assistants = lazy(() => import("./pages/Assistants"));
 const Ingestion = lazy(() => import("./pages/Ingestion"));
 
+const Workflows = lazy(() => import("./pages/Workflows"));
+const Usage = lazy(() => import("./pages/Usage"));
+const Webhooks = lazy(() => import("./pages/Webhooks"));
+
 const PAGES = {
   dashboard: Dashboard,
   ask: AskConsole,
@@ -32,6 +36,10 @@ const PAGES = {
   catalog: Catalog,
   assistants: Assistants,
   ingestion: Ingestion,
+
+  workflows: Workflows,
+  usage: Usage,
+  webhooks: Webhooks,
 };
 
 // --------------------------

@@ -7,13 +7,57 @@ import { cx } from "../util";
 import { health as fetchHealth } from "../api";
 import { useCompanies } from "../context";
 import { useAuth } from "../auth.jsx";
+import { getSessionRemaining } from "../auth.js";
 import ThemeToggle from "./theme-toggle";
 import CompanySelect from "./company-select";
+import { PageHelpButton } from "./PageHelp";
 import { Popover, PopoverTrigger, PopoverContent, PopoverItem, PopoverSeparator } from "./ui";
 import { NAV, PAGE_META } from "./layout/nav.js";
 import { NAV_ICONS } from "./layout/icons.jsx";
+import KeyboardShortcuts from "./KeyboardShortcuts";
 
 const HeaderActionsCtx = createContext(null);
+
+// ------------------------------------------------------------------
+// Session timeout badge — shows remaining session time, warns at <5 min
+// ------------------------------------------------------------------
+function SessionTimeoutBadge() {
+  const [remaining, setRemaining] = useState(null);
+
+  useEffect(() => {
+    const tick = () => setRemaining(getSessionRemaining());
+    tick();
+    const id = setInterval(tick, 30000); // update every 30s
+    return () => clearInterval(id);
+  }, []);
+
+  if (remaining === null) return null; // no JWT expiry available
+
+  const mins = Math.floor(remaining / 60);
+  const secs = remaining % 60;
+  const isLow = remaining < 300; // <5 min
+  const isExpired = remaining === 0;
+
+  if (isExpired) return null; // will redirect to login
+
+  return (
+    <span
+      className={cx(
+        "hidden sm:inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
+        isLow
+          ? "bg-amber-500/15 text-amber-400 animate-pulse"
+          : "bg-slate-800/60 text-slate-400"
+      )}
+      title={`Session expires in ${mins}m ${String(secs).padStart(2, "0")}s`}
+    >
+      <svg aria-hidden="true" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </svg>
+      {mins}:{String(secs).padStart(2, "0")}
+    </span>
+  );
+}
 
 /**
  * Pages call this with the toolbar JSX they want rendered in the shared
@@ -58,7 +102,7 @@ function LazyUserMenu({ username, isCollapsed, navigate, logout }) {
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" side="top" sideOffset={8} className="w-full">
+      <PopoverContent align="start" side="top" sideOffset={8}>
         <PopoverItem
           onClick={() => window.open("/api-docs", "_blank", "noopener,noreferrer")}
         >
@@ -277,7 +321,7 @@ export default function Layout({ route, navigate, children }) {
                   <a
                     key={item.id}
                     href={`#${item.id}`}
-                    title={isCollapsed ? item.label : undefined}
+                    title={isCollapsed ? (item.tip || item.label) : item.tip || undefined}
                     aria-current={route === item.id ? "page" : undefined}
                     onClick={onNavClick}
                     className={cx(
@@ -340,6 +384,7 @@ export default function Layout({ route, navigate, children }) {
 
   return (
     <HeaderActionsCtx.Provider value={setHeaderActions}>
+    <KeyboardShortcuts navigate={navigate} />
     <div className="flex min-h-screen">
       <a
         href="#main"
@@ -399,6 +444,22 @@ export default function Layout({ route, navigate, children }) {
           </div>
           <div className="flex items-center gap-2">
             {headerActions}
+            <PageHelpButton pageId={route} />
+            {/* Search button — shows keyboard shortcut hint */}
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }))}
+              className="hidden items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/60 px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300 sm:flex"
+              title="Search (Ctrl+K)"
+            >
+              <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <span className="hidden lg:inline">Search</span>
+              <kbd className="hidden lg:inline rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-600">⌘K</kbd>
+            </button>
+            <SessionTimeoutBadge />
             <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
         </header>

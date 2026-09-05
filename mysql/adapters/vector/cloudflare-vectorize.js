@@ -30,6 +30,7 @@ function cleanString(str = "") {
 
 export class CloudflareVectorAdapter {
   constructor(credentials, { embeddingAdapter } = {}) {
+    this.providerKey = "cloudflare";
     this.accountId = credentials.accountId;
     this.apiToken = credentials.apiToken;
     this.vectorIndexName = credentials.vectorIndexName;
@@ -122,6 +123,48 @@ export class CloudflareVectorAdapter {
         logToFile("error.log", "==============================================");
         throw error;
       }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 🔹 Query — search by vector
+  // ------------------------------------------------------------------
+  async query(vector, topK = 10, { indexName = null } = {}) {
+    const idx = indexName || this.vectorIndexName;
+    if (!idx) throw new Error("VECTOR_INDEX is not configured.");
+    const acId = accountId(this.companyName);
+
+    const res = await getCFClient(this.companyName).vectorize.indexes.query(idx, {
+      account_id: acId,
+      topK,
+      vector,
+      returnMetadata: "all",
+      returnValues: true,
+    });
+
+    return {
+      matches: (res.matches || []).map((m) => ({
+        id: m.id,
+        score: m.score,
+        metadata: m.metadata || {},
+        values: m.values || null,
+      })),
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // 🔹 Count vectors in index
+  // ------------------------------------------------------------------
+  async countVectors({ indexName = null } = {}) {
+    const idx = indexName || this.vectorIndexName;
+    if (!idx) return null;
+    try {
+      const res = await getCFClient(this.companyName).vectorize.indexes.get(idx, {
+        account_id: acId,
+      });
+      return res?.result?.vectorCount ?? null;
+    } catch {
+      return null;
     }
   }
 }

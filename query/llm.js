@@ -73,11 +73,32 @@ Return ONLY the rewritten search query or INVALID. No explanation.
  * @param {string} companyName — for model resolution
  * @returns {Promise<string[]>}
  */
+// Follow-up suggestions must stay on-topic — drop anything that drifts into
+// code/programming or entertainment (the assistant is a certification bot).
+const OFF_TOPIC_QUESTION_REGEX =
+  /\b(code|programming|script|function|poem|joke|recipe|movie|song|debug|compile)\b/i;
+
+/**
+ * Company-customized blocked topics (BLOCKED_TOPICS, one per line) as
+ * lowercase substrings, so follow-up suggestions never re-introduce a topic
+ * the company explicitly banned. Best-effort: [] on any failure.
+ */
+function companyBlockedTopics(companyName) {
+  if (!companyName) return [];
+  try {
+    const raw = getConfig(companyName)?.BLOCKED_TOPICS;
+    if (!raw || typeof raw !== "string") return [];
+    return raw.split("\n").map((l) => l.trim().toLowerCase()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export async function generatePossibleQuestions(answer, companyName) {
   if (!answer || !answer.trim()) return [];
 
   const prompt = `
-You are a helpful assistant for a certification services company. Based on the answer below, suggest 3-5 concise follow-up questions a user might ask next. Return ONLY the questions, one per line, no numbering, no explanation.
+You are a helpful assistant for a certification services company. Based on the answer below, suggest 3-5 concise follow-up questions a user might ask next. Only suggest questions related to certification, standards, compliance, or this company's services. If the answer is a refusal or does not contain useful certification-related content, return nothing. Return ONLY the questions, one per line, no numbering, no explanation.
 
 Answer:
 ${answer.slice(0, 4000)}
@@ -91,7 +112,17 @@ ${answer.slice(0, 4000)}
     });
     const text = res.response?.trim();
     if (!text) return [];
-    return text.split("\n").filter((q) => q.trim()).slice(0, 5);
+    const blocked = companyBlockedTopics(companyName);
+    return text
+      .split("\n")
+      .map((q) => q.trim())
+      .filter((q) => {
+        if (!q || OFF_TOPIC_QUESTION_REGEX.test(q)) return false;
+        if (!blocked.length) return true;
+        const lower = q.toLowerCase();
+        return !blocked.some((b) => lower.includes(b));
+      })
+      .slice(0, 5);
   } catch {
     return [];
   }

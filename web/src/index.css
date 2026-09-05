@@ -2,11 +2,6 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/*
- * Light/dark theme via CSS variables remapped in @theme inline.
- * Light = standard Tailwind slate on light surfaces; dark = default
- * dark slate. Accent text shades are adjusted per theme for contrast.
- */
 @theme inline {
   --color-slate-50: var(--ui-slate-50);
   --color-slate-100: var(--ui-slate-100);
@@ -128,6 +123,27 @@ a {
 /* Native <select> needs explicit bg/color for Windows dark mode */
 select {
   color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------
+ * Popover/dropdown open animation — grows from its anchor edge.
+ * transform-origin is set inline from the popover's resolved side/align,
+ * so the scale radiates outward from the trigger button rather than from
+ * the element's top-left corner. Reduced-motion is disabled globally below.
+ * ------------------------------------------------------------------ */
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.popover-pop-in {
+  animation: popover-in 120ms ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {

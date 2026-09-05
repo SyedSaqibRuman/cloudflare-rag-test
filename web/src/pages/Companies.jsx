@@ -12,8 +12,20 @@ export default function Companies({ navigate }) {
   const [error, setError] = useState(null);
   const { toast, notify } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
+  const [createError, setCreateError] = useState(null);
   const [form, setForm] = useState({ name: "", baseUrl: "" });
   const [busy, setBusy] = useState(false);
+
+  const openCreate = () => {
+    setForm({ name: "", baseUrl: "" });
+    setCreateError(null);
+    setCreateOpen(true);
+  };
+
+  // Mirror of the server rule (config/validation.js): lowercase letters,
+  // numbers, and hyphens, 2–63 chars.
+  const name = form.name.trim();
+  const slugOk = /^[a-z0-9-]+$/.test(name) && name.length >= 2 && name.length <= 63;
 
   const load = async () => {
     setLoading(true);
@@ -28,21 +40,21 @@ export default function Companies({ navigate }) {
   };
 
   const create = async () => {
-    if (!form.name.trim()) return;
+    if (!slugOk) return;
     setBusy(true);
-    setError(null);
+    setCreateError(null);
     try {
       const config = form.baseUrl.trim() ? { BASE_URL: form.baseUrl.trim() } : undefined;
       await api("/cloudflare/companies", {
         method: "POST",
-        body: { name: form.name.trim(), config },
+        body: { name, config },
       });
       setCreateOpen(false);
       setForm({ name: "", baseUrl: "" });
       await refresh();
-      notify(`Company '${form.name.trim()}' created.`);
+      notify(`Company '${name}' created.`);
     } catch (e) {
-      setError(e.message);
+      setCreateError(e.message);
     } finally {
       setBusy(false);
     }
@@ -77,7 +89,7 @@ export default function Companies({ navigate }) {
       <Button variant="secondary" onClick={load} disabled={loading}>
         {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
       </Button>
-      <Button onClick={() => setCreateOpen(true)} className="whitespace-nowrap">New Company</Button>
+      <Button onClick={openCreate} className="whitespace-nowrap">New Company</Button>
     </div>
   );
 
@@ -176,21 +188,28 @@ export default function Companies({ navigate }) {
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={create} disabled={!form.name.trim() || busy}>
+            <Button onClick={create} disabled={!slugOk || busy} title={slugOk ? undefined : "Lowercase letters, numbers, and hyphens, 2–63 characters"}>
               {busy ? <Spinner className="h-3.5 w-3.5" /> : "Create"}
             </Button>
           </>
         }
       >
         <div className="space-y-4">
+          {createError && (
+            <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+              {createError}
+            </div>
+          )}
           <Input
             label="Company slug"
             placeholder="acme-cert"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             error={
-              form.name && !/^[a-z0-9-]+$/.test(form.name)
-                ? "Lowercase letters, numbers, and hyphens only."
+              form.name && (!slugOk)
+                ? !/^[a-z0-9-]+$/.test(form.name)
+                  ? "Lowercase letters, numbers, and hyphens only."
+                  : "Between 2 and 63 characters."
                 : undefined
             }
           />

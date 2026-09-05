@@ -129,8 +129,8 @@ describe("vector adapter factory", () => {
   it("createVectorAdapter: unsupported provider throws", async () => {
     const { createVectorAdapter } = await import("../../mysql/adapters/vector/factory.js");
     assert.throws(
-      () => createVectorAdapter("pinecone", {}),
-      /Unsupported vector provider: pinecone/
+      () => createVectorAdapter("mongodb", {}),
+      /Unsupported vector provider: mongodb/
     );
   });
 });

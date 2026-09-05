@@ -117,7 +117,7 @@ export function transformItem(item, type, { r2Prefix = "site", chunkSize = MAX_C
  * processContent and the selected-scope processItems). Extracted once
  * to eliminate the near-clone duplication.
  */
-async function processItemBatch({ items, type, store, index, registry, signal, r2Prefix, chunkOptions, stats, reportProgress }) {
+async function processItemBatch({ items, type, store, index, registry, signal, r2Prefix, chunkOptions, stats, reportProgress, graphAdapter = null }) {
   const uploadLimit = pLimit(UPLOAD_CONCURRENCY);
 
   for (const item of items) {
@@ -177,6 +177,18 @@ async function processItemBatch({ items, type, store, index, registry, signal, r
       await retry(() => index.upsert(vectorChunks), 3, 500, signal);
       logToFile("vector.log", `✅ Vectorized ${vectorChunks.length} chunks`);
 
+      // 🔹 Graph extraction stage (optional, best-effort)
+      if (graphAdapter) {
+        try {
+          checkAbort(signal);
+          await retry(() => graphAdapter.extractFromChunks(vectorChunks, signal), 2, 1000, signal);
+        } catch (err) {
+          if (err.name === "AbortError") throw err;
+          logToFile("error.log", `🕸️ Graph extraction failed for ${registryKey}: ${err.message}`);
+          // Best-effort — never block ingestion
+        }
+      }
+
       checkAbort(signal);
       registry.record(registryKey, modifiedDate);
 
@@ -193,7 +205,7 @@ async function processItemBatch({ items, type, store, index, registry, signal, r
   }
 }
 
-export async function processContent({ fetchFn, type, store, index, registry, signal, companyName, r2Prefix, chunkOptions, maxPages, docLimit, stats = { processed: 0, skipped: 0, chunks: 0, discovered: 0 }, reportProgress }) {
+export async function processContent({ fetchFn, type, store, index, registry, signal, companyName, r2Prefix, chunkOptions, maxPages, docLimit, stats = { processed: 0, skipped: 0, chunks: 0, discovered: 0 }, reportProgress, graphAdapter }) {
   let currentPage = 1;
 
   while (true) {
@@ -216,7 +228,7 @@ export async function processContent({ fetchFn, type, store, index, registry, si
     console.log(`Fetching ${type} page ${currentPage}...`);
     logToFile("process.log", `📄 Fetching ${type} page ${currentPage}`);
 
-    const items = await fetchFn(currentPage, companyName);
+    let items = await fetchFn(currentPage, companyName);
 
     if (!items || items.length === 0) {
       console.log(`Done fetching all ${type}.`);
@@ -224,7 +236,27 @@ export async function processContent({ fetchFn, type, store, index, registry, si
       break;
     }
 
-    await processItemBatch({ items, type, store, index, registry, signal, r2Prefix, chunkOptions, stats, reportProgress });
+    // Track total discovered documents for the progress bar.
+    stats.discovered += items.length;
+    reportProgress?.("fetching");
+
+    // Trim items to the remaining docLimit so we don't process more than
+    // requested.  This is critical for URL/sitemap sources that return all
+    // items on page 1 — without this, the limit check at the top of the
+    // next loop iteration would be too late.
+    if (docLimit != null) {
+      const remaining = docLimit - stats.processed - stats.skipped;
+      if (remaining <= 0) {
+        logToFile("process.log", `🛑 Reached document limit (${docLimit}) — trimming batch`);
+        break;
+      }
+      if (items.length > remaining) {
+        logToFile("process.log", `✂️ Trimmed batch from ${items.length} to ${remaining} documents (limit: ${docLimit})`);
+        items = items.slice(0, remaining);
+      }
+    }
+
+    await processItemBatch({ items, type, store, index, registry, signal, r2Prefix, chunkOptions, stats, reportProgress, graphAdapter });
 
     currentPage++;
   }
@@ -256,6 +288,7 @@ export async function runIngestion({
   chunkOptions = {},
   scope = {},
   setProgress,
+  graphAdapter = null,
 }) {
   checkAbort(signal);
   await store.ensureBucket();
@@ -307,6 +340,7 @@ export async function runIngestion({
         chunkOptions,
         stats,
         reportProgress,
+        graphAdapter,
       });
     }
   } else {
@@ -329,6 +363,7 @@ export async function runIngestion({
         docLimit,
         stats,
         reportProgress,
+        graphAdapter,
       });
     }
 
@@ -346,6 +381,7 @@ export async function runIngestion({
         docLimit,
         stats,
         reportProgress,
+        graphAdapter,
       });
     }
   }

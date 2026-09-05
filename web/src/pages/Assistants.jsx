@@ -8,9 +8,13 @@ import {
   createAssistant,
   updateAssistant,
   deleteAssistant,
+  testAssistant,
+  duplicateAssistant,
   api,
 } from "../api";
-import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton, Toggle } from "../components/ui";
+import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton, Toggle, ArrowRightIcon, InfoTip } from "../components/ui";
+import { triggerNextStep } from "../components/NextStepPrompt";
+import { getTermTooltip } from "../components/glossary";
 import { useCompanies } from "../context";
 import { timeAgo } from "../util";
 import { useHeaderActions } from "../components/Layout";
@@ -96,7 +100,10 @@ export default function Assistants() {
     credentialId: "",
     modelId: "",
     primaryKbId: "",
+    kbIds: [],
     systemPrompt: "",
+    guardrailPrompt: "",
+    blockedTopics: "",
     variables: [],
     temperature: "0.7",
     maxTokens: "4096",
@@ -104,6 +111,17 @@ export default function Assistants() {
     enableStreaming: true,
     isPublic: false,
   });
+  // Test in Console state
+  const [testOpen, setTestOpen] = useState(false);
+  const [testAssistantKey, setTestAssistantKey] = useState(null);
+  const [testQuestion, setTestQuestion] = useState("");
+  const [testAnswer, setTestAnswer] = useState(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [testError, setTestError] = useState(null);
+  // Duplicate state
+  const [duplicateTarget, setDuplicateTarget] = useState(null);
+  const [dupKey, setDupKey] = useState("");
+  const [dupBusy, setDupBusy] = useState(false);
   const [editingVarIndex, setEditingVarIndex] = useState(null);
   const [keyTouched, setKeyTouched] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -182,7 +200,8 @@ export default function Assistants() {
         api(`/cloudflare/config?company=${encodeURIComponent(companyKey)}`),
       ]);
       setCreds(c);
-      setKbs(k);
+      // listKbs resolves to { items, pagination } — unwrap the array.
+      setKbs(Array.isArray(k) ? k : (k?.items ?? []));
       setCompanyConfig(configData?.config?.GENERAL || {});
       const companySystemPrompt = configData?.config?.GENERAL?.SYSTEM_PROMPT || "";
       if (assistant) {
@@ -192,7 +211,10 @@ export default function Assistants() {
           credentialId: String(assistant.credential_id || ""),
           modelId: assistant.model_id ? String(assistant.model_id) : "",
           primaryKbId: assistant.primary_kb_id ? String(assistant.primary_kb_id) : "",
+          kbIds: assistant.kb_ids || [],
           systemPrompt: assistant.system_prompt || "",
+          guardrailPrompt: assistant.guardrail_prompt || "",
+          blockedTopics: assistant.blocked_topics || "",
           variables: assistant.assistant_variables?.length ? assistant.assistant_variables : [],
           temperature: String(assistant.temperature ?? 0.7),
           maxTokens: String(assistant.max_tokens ?? 4096),
@@ -211,6 +233,8 @@ export default function Assistants() {
           modelId: "",
           primaryKbId: "",
           systemPrompt: companySystemPrompt,
+          guardrailPrompt: "",
+          blockedTopics: "",
           variables: [],
           temperature: "0.7",
           maxTokens: "4096",
@@ -259,7 +283,10 @@ export default function Assistants() {
         credentialId: Number(form.credentialId),
         modelId: form.modelId ? Number(form.modelId) : null,
         primaryKbId: form.primaryKbId ? Number(form.primaryKbId) : null,
+        kbIds: form.kbIds.length ? form.kbIds : null,
         systemPrompt: form.systemPrompt.trim() || null,
+        guardrailPrompt: form.guardrailPrompt.trim() || null,
+        blockedTopics: form.blockedTopics.trim() || null,
         variables: form.variables.filter((v) => v.key.trim()),
         temperature: Number(form.temperature),
         maxTokens: Number(form.maxTokens),
@@ -273,6 +300,7 @@ export default function Assistants() {
       } else {
         await createAssistant(body, companyKey);
         notify(`Assistant '${form.assistantKey.trim()}' created.`);
+        triggerNextStep("assistant-created");
       }
       setModal(null);
       await load(companyKey);
@@ -296,6 +324,45 @@ export default function Assistants() {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const openTest = (assistant) => {
+    setTestAssistantKey(assistant.assistant_key);
+    setTestQuestion("");
+    setTestAnswer(null);
+    setTestError(null);
+    setTestOpen(true);
+  };
+
+  const runTest = async () => {
+    if (!testQuestion.trim()) return;
+    setTestBusy(true);
+    setTestAnswer(null);
+    setTestError(null);
+    try {
+      const result = await testAssistant(testAssistantKey, testQuestion.trim(), companyKey);
+      setTestAnswer(result);
+    } catch (e) {
+      setTestError(e.message);
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  const runDuplicate = async () => {
+    if (!dupKey.trim()) return;
+    setDupBusy(true);
+    try {
+      await duplicateAssistant(duplicateTarget.assistant_key, dupKey.trim(), companyKey);
+      notify(`Duplicated as '${dupKey.trim()}'.`);
+      setDuplicateTarget(null);
+      setDupKey("");
+      await load(companyKey);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDupBusy(false);
     }
   };
 
@@ -349,10 +416,10 @@ export default function Assistants() {
               <thead>
                 <tr className="text-left text-xs text-slate-500">
                   <th className="pb-3 font-medium">Assistant</th>
-                  <th className="pb-3 font-medium">Credential</th>
-                  <th className="pb-3 font-medium">Model</th>
-                  <th className="pb-3 font-medium">KB</th>
-                  <th className="pb-3 font-medium">Streaming</th>
+                  <th className="pb-3 font-medium">Credential <InfoTip content={getTermTooltip("api-key")} /></th>
+                  <th className="pb-3 font-medium">Model <InfoTip content={getTermTooltip("model")} /></th>
+                  <th className="pb-3 font-medium">KB <InfoTip content={getTermTooltip("knowledge-base")} /></th>
+                  <th className="pb-3 font-medium">Streaming <InfoTip content={getTermTooltip("streaming")} /></th>
                   <th className="pb-3 font-medium">Updated</th>
                   <th className="pb-3 font-medium text-right">Actions</th>
                 </tr>
@@ -374,6 +441,12 @@ export default function Assistants() {
                     <td className="py-3 text-xs text-slate-500">{timeAgo(a.updated_at)}</td>
                     <td className="py-3">
                       <div className="flex items-center justify-end gap-1">
+                        <IconButton title="Test in console" className="hover:text-emerald-300" onClick={() => openTest(a)}>
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                        </IconButton>
+                        <IconButton title="Duplicate assistant" className="hover:text-amber-300" onClick={() => { setDuplicateTarget(a); setDupKey(`${a.assistant_key}-copy`); }}>
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                        </IconButton>
                         <IconButton title="Edit assistant" onClick={() => openModal(a)}><IconPencil /></IconButton>
                         <IconButton title="Delete assistant" className="hover:text-rose-300" onClick={() => setDeleteTarget(a)}><IconTrash /></IconButton>
                       </div>
@@ -450,7 +523,7 @@ export default function Assistants() {
                     <p className="mt-1.5 text-[11px] text-slate-500">
                       {keyTouched
                         ? "Manual value — type in the name field to re-sync it."
-                        : "Auto-generated from the name (lowercase, spaces → -)."}
+                        : <>Auto-generated from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> -).</>}
                     </p>
                   )}
                 </div>
@@ -482,6 +555,34 @@ export default function Assistants() {
                 value={form.primaryKbId}
                 onChange={(e) => setForm((f) => ({ ...f, primaryKbId: e.target.value }))}
               />
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">Additional knowledge bases</p>
+                <div className="flex flex-wrap gap-2">
+                  {kbs.map((k) => {
+                    const selected = form.kbIds.includes(k.id);
+                    return (
+                      <button
+                        key={k.id}
+                        type="button"
+                        onClick={() => {
+                          setForm((f) => ({
+                            ...f,
+                            kbIds: selected ? f.kbIds.filter((id) => id !== k.id) : [...f.kbIds, k.id],
+                          }));
+                        }}
+                        className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                          selected
+                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-300"
+                            : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500"
+                        }`}
+                      >
+                        {k.kb_name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">Toggle KBs this assistant can search beyond the primary.</p>
+              </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <Input
@@ -545,6 +646,30 @@ export default function Assistants() {
                 onChange={(e) => setForm((f) => ({ ...f, systemPrompt: e.target.value }))}
                 placeholder="You are a helpful certification coach…"
               />
+              <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+                <p className="mb-3 text-xs font-medium text-slate-300">Guardrails <span className="font-normal text-slate-500">— topic restrictions applied to every answer, on top of the company defaults</span></p>
+                <div className="space-y-4">
+                  <TextArea
+                    label="Custom guardrail instructions"
+                    rows={4}
+                    value={form.guardrailPrompt}
+                    onChange={(e) => setForm((f) => ({ ...f, guardrailPrompt: e.target.value }))}
+                    placeholder={'Optional instructions appended to the system prompt — e.g. "Never discuss pricing specifics; always direct users to the contact form." Leave empty to use the company/built-in guardrail.'}
+                  />
+                  <TextArea
+                    label="Blocked topics (one per line)"
+                    rows={3}
+                    value={form.blockedTopics}
+                    onChange={(e) => setForm((f) => ({ ...f, blockedTopics: e.target.value }))}
+                    placeholder={"crypto\ninvestments\ngambling"}
+                  />
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    Questions containing any blocked topic are refused before retrieval or an AI call, and blocked topics stay
+                    out of the suggested follow-up questions. Matching is case-insensitive ("crypto" also blocks "cryptocurrency").
+                    Leave both empty to fall back to the company-level guardrails and the built-in off-topic patterns.
+                  </p>
+                </div>
+              </div>
               <div className="space-y-2">
                 <p className="text-xs font-medium text-slate-300">Built-in variables</p>
                 <div className="flex flex-wrap gap-2">
@@ -682,6 +807,78 @@ export default function Assistants() {
           <span className="text-slate-100">{deleteTarget?.assistant_name}</span>)? This soft-deletes the row
           so it can no longer be resolved.
         </p>
+      </Modal>
+
+      {/* Test in Console */}
+      <Modal
+        open={testOpen}
+        title={`Test assistant — ${testAssistantKey || ""}`}
+        onClose={() => setTestOpen(false)}
+        wide
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setTestOpen(false)}>Close</Button>
+            <Button onClick={runTest} disabled={testBusy || !testQuestion.trim()}>
+              {testBusy ? <Spinner className="h-3.5 w-3.5" /> : "Run test"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {testError && (
+            <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{testError}</div>
+          )}
+          <Input
+            label="Ask a question"
+            value={testQuestion}
+            onChange={(e) => setTestQuestion(e.target.value)}
+            placeholder="e.g. What is ISO 9001?"
+            onKeyDown={(e) => { if (e.key === "Enter" && !testBusy) runTest(); }}
+            autoFocus
+          />
+          {testAnswer && (
+            <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+              <p className="mb-2 text-xs font-medium text-slate-400">Answer</p>
+              <div className="whitespace-pre-wrap text-sm text-slate-200">{testAnswer.answer}</div>
+              {testAnswer.sources?.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {testAnswer.sources.map((s, i) => (
+                    <Badge key={i} tone="cyan">{s.title || `Source ${i + 1}`}</Badge>
+                  ))}
+                </div>
+              )}
+              {testAnswer.cached && <p className="mt-2 text-[11px] text-slate-500">(cached response)</p>}
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* Duplicate assistant */}
+      <Modal
+        open={duplicateTarget !== null}
+        title="Duplicate assistant"
+        onClose={() => setDuplicateTarget(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setDuplicateTarget(null)}>Cancel</Button>
+            <Button onClick={runDuplicate} disabled={dupBusy || !dupKey.trim()}>
+              {dupBusy ? <Spinner className="h-3.5 w-3.5" /> : "Duplicate"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-slate-300">
+            Clone <span className="font-mono text-indigo-300">{duplicateTarget?.assistant_key}</span> with a new key:
+          </p>
+          <Input
+            label="New key *"
+            value={dupKey}
+            onChange={(e) => setDupKey(e.target.value)}
+            placeholder="e.g. sales-bot-v2"
+            autoFocus
+          />
+        </div>
       </Modal>
 
       <Toast message={toast?.msg} tone={toast?.tone} />

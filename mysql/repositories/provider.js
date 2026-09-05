@@ -21,6 +21,20 @@ export const ProviderRepository = {
     return rows.map(mapRow);
   },
 
+  async findById(id) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, provider_key, provider_name, primary_service_category,
+              website_url, documentation_url, logo_url, default_api_base_url,
+              auth_type, auth_header_name, api_key_format_regex, is_active,
+              round_robin_enabled
+         FROM providers
+        WHERE id = ?`,
+      [id]
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  },
+
   async findByKey(providerKey) {
     const pool = await getPool();
     const [rows] = await pool.query(

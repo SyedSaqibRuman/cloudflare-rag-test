@@ -26,9 +26,14 @@ export function useHashRoute() {
     return () => window.removeEventListener("hashchange", onChange);
   }, []);
 
-  const navigate = (r) => {
+  const navigate = useCallback((r) => {
+    // Set hash — in most browsers this fires hashchange synchronously.
     window.location.hash = r;
-  };
+    // Fallback: if the hashchange listener didn't pick it up (e.g. the
+    // assignment was a no-op because the hash was already equal), force the
+    // route state so navigation still completes.
+    setRoute(r || "dashboard");
+  }, []);
 
   return [route, navigate];
 }

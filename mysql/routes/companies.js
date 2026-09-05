@@ -8,6 +8,7 @@ import {
   ResourceRepository,
   AuditRepository,
 } from "../repositories.js";
+import { onboardCompany } from "../services/onboarding.js";
 import { wrap } from "./helpers.js";
 import { parsePagination, paginate } from "./pagination.js";
 import { actorFromReq, requireCompany } from "./shared-helpers.js";
@@ -61,7 +62,14 @@ router.post(
       afterState: { company_key: company.company_key, environments: environments.map((e) => e.env_key) },
       reason: "admin action",
     });
-    return res.status(201).json({ success: true, company, environments });
+    // Auto-onboard: create default KB + assistant from config if applicable
+    let onboarding = null;
+    try {
+      onboarding = await onboardCompany({ id: company.id, company_key: company.company_key });
+    } catch (err) {
+      console.error("⚠️ Onboarding failed (non-fatal):", err.message);
+    }
+    return res.status(201).json({ success: true, company, environments, onboarding });
   })
 );
 

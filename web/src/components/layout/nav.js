@@ -9,45 +9,60 @@
 export const NAV = [
   {
     section: "Overview",
-    items: [{ id: "dashboard", label: "Dashboard", icon: "dashboard" }],
+    items: [{ id: "dashboard", label: "Dashboard", icon: "dashboard", tip: "Your AI platform at a glance" }],
   },
   {
     section: "AI",
     items: [
-      { id: "ask", label: "Ask Console", icon: "chat" },
-      { id: "ingestion", label: "Knowledge Bases", icon: "book" },
-      { id: "assistants", label: "Assistants", icon: "bot" },
+      { id: "ingestion", label: "Knowledge", icon: "book", tip: "Add your content so your AI can answer questions" },
+      { id: "assistants", label: "Assistants", icon: "bot", tip: "Create AI assistants with custom knowledge and behavior" },
+
+      { id: "ask", label: "Test AI", icon: "chat", tip: "Ask questions and see how your AI responds" },
     ],
   },
   {
-    section: "Companies",
+    section: "Workspaces",
     items: [
-      { id: "companies", label: "Companies", icon: "building" },
-      { id: "config", label: "Configuration", icon: "sliders" },
+      { id: "companies", label: "Companies", icon: "building", tip: "Manage your workspaces and their settings" },
+      { id: "config", label: "Settings", icon: "sliders", tip: "Configure your workspace preferences" },
     ],
   },
   {
-    section: "Infrastructure",
+    section: "Automation",
     items: [
-      { id: "cloudflare", label: "Cloudflare", icon: "cloud" },
-      { id: "scheduler", label: "Scheduler", icon: "clock" },
+      { id: "workflows", label: "Workflows", icon: "workflow", tip: "Automate tasks with AI-powered workflows" },
+      { id: "scheduler", label: "Scheduler", icon: "clock", tip: "Schedule automatic content updates" },
+      { id: "webhooks", label: "Notifications", icon: "cloud", tip: "Manage webhook notifications for events" },
     ],
   },
   {
-    section: "Gateway",
-    items: [{ id: "catalog", label: "Providers", icon: "layers" }],
+    section: "Insights",
+    items: [
+      { id: "usage", label: "Usage", icon: "chart", tip: "Track your AI usage and costs" },
+    ],
+  },
+  {
+    section: "Advanced",
+    items: [
+      { id: "cloudflare", label: "Cloud Services", icon: "cloud", tip: "Manage your cloud storage and search indexes" },
+      { id: "catalog", label: "AI Providers", icon: "layers", tip: "Connect to AI services like Cloudflare, OpenAI, and more" },
+    ],
   },
 ];
 
 export const PAGE_META = {
-  dashboard: { title: "Dashboard", subtitle: "Platform overview and live system state" },
-  ask: { title: "Ask Console", subtitle: "Test the RAG assistant with live streaming responses" },
-  companies: { title: "Companies", subtitle: "Tenants with isolated config, vector index, and R2 bucket" },
-  config: { title: "Company Config", subtitle: "Hot-reloadable runtime configuration per tenant" },
-  cloudflare: { title: "Cloudflare Resources", subtitle: "Vector indexes and R2 buckets across the account" },
-  scheduler: { title: "Scheduler", subtitle: "Run jobs, schedule cron tasks, manage presets, and trigger content ingestion" },
-  logs: { title: "Logs", subtitle: "Server log files written by the app (error, process, upload, vector)" },
-  catalog: { title: "Providers", subtitle: "Connect providers with API keys or OAuth — live status, batch testing, and per-provider models" },
-  ingestion: { title: "Knowledge Bases", subtitle: "Create and manage isolated knowledge repositories for your AI assistants" },
-  assistants: { title: "Assistants", subtitle: "Personas bound to a credential, a model, and knowledge bases" },
+  dashboard: { title: "Dashboard", subtitle: "Your AI platform at a glance" },
+  ask: { title: "Test AI", subtitle: "Ask questions and see how your AI responds" },
+  companies: { title: "Companies", subtitle: "Manage your workspaces and their settings" },
+  config: { title: "Settings", subtitle: "Configure your workspace preferences" },
+  cloudflare: { title: "Cloud Services", subtitle: "Manage your cloud storage and search indexes" },
+  scheduler: { title: "Scheduler", subtitle: "Schedule automatic content updates" },
+  logs: { title: "Logs", subtitle: "View system activity and errors" },
+  catalog: { title: "AI Providers", subtitle: "Connect to AI services like Cloudflare, OpenAI, and more" },
+  ingestion: { title: "Knowledge", subtitle: "Create and manage knowledge bases for your AI" },
+  assistants: { title: "Assistants", subtitle: "Create AI assistants with custom knowledge and behavior" },
+
+  workflows: { title: "Workflows", subtitle: "Automate tasks with AI-powered workflows" },
+  usage: { title: "Usage", subtitle: "Track your AI usage, tokens, and costs" },
+  webhooks: { title: "Notifications", subtitle: "Manage webhook notifications for events" },
 };

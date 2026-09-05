@@ -1,0 +1,24 @@
+{
+  "name": "popularcert-e2e-tests",
+  "version": "1.0.0",
+  "description": "E2E tests for PopularCert AI using Playwright",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:auth": "npx playwright test auth.spec.js",
+    "test:dashboard": "npx playwright test dashboard.spec.js",
+    "test:kb": "npx playwright test knowledge-bases.spec.js",
+    "test:assistants": "npx playwright test assistants.spec.js",
+    "test:ai": "npx playwright test test-ai.spec.js",
+    "test:navigation": "npx playwright test navigation.spec.js",
+    "test:responsive": "npx playwright test responsive.spec.js",
+    "test:e2e": "npx playwright test e2e.spec.js",
+    "test:ui": "npx playwright test --ui",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "report": "npx playwright show-report",
+    "install:browsers": "npx playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}

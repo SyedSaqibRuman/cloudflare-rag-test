@@ -30,6 +30,16 @@ function isPosInt(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
 }
 
+/** Normalize a blocked-topics string: trim each line, drop empties, or null. */
+function normalizeBlockedTopics(raw) {
+  if (raw == null) return null;
+  const lines = String(raw)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines.join("\n") : null;
+}
+
 /**
  * Validate assistant input. Normalizes defaults for optional fields.
  * @param {Object} input
@@ -75,6 +85,20 @@ export function validateAssistantInput(input = {}) {
     errors.systemPrompt = "systemPrompt must be at most 65535 characters.";
   }
 
+  // Guardrails (mirror company-level config/validation.js limits). Empty/null
+  // means "inherit company default / built-in guardrail".
+  if (input.guardrailPrompt !== undefined && input.guardrailPrompt !== null && input.guardrailPrompt.length > 8000) {
+    errors.guardrailPrompt = "guardrailPrompt must be at most 8000 characters.";
+  }
+  if (input.blockedTopics !== undefined && input.blockedTopics !== null) {
+    const lines = String(input.blockedTopics).split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length > 100) {
+      errors.blockedTopics = "blockedTopics supports at most 100 topics (one per line).";
+    } else if (String(input.blockedTopics).length > 8000) {
+      errors.blockedTopics = "blockedTopics must be at most 8000 characters.";
+    }
+  }
+
   if (input.variables !== undefined && input.variables !== null) {
     if (!Array.isArray(input.variables)) {
       errors.variables = "variables must be an array of {key, value} objects.";
@@ -116,6 +140,8 @@ export function validateAssistantInput(input = {}) {
       credentialId: Number(input.credentialId),
       modelId: input.modelId ? Number(input.modelId) : null,
       systemPrompt: input.systemPrompt?.trim() || null,
+      guardrailPrompt: input.guardrailPrompt?.trim() || null,
+      blockedTopics: normalizeBlockedTopics(input.blockedTopics),
       variables: input.variables == null ? [] : Array.isArray(input.variables) ? input.variables.map((v) => ({ key: String(v.key).trim(), value: String(v.value) })) : [],
       temperature: input.temperature === undefined || input.temperature === null ? 0.7 : Number(input.temperature),
       maxTokens: input.maxTokens === undefined || input.maxTokens === null ? 4096 : Number(input.maxTokens),
@@ -265,6 +291,8 @@ export async function updateAssistant(company, assistantKey, input, actor = {}) 
     credentialId: existing.credential_id,
     modelId: existing.model_id,
     systemPrompt: existing.system_prompt,
+    guardrailPrompt: existing.guardrail_prompt,
+    blockedTopics: existing.blocked_topics,
     temperature: Number(existing.temperature),
     maxTokens: existing.max_tokens,
     enableFunctionCalling: Boolean(existing.enable_function_calling),

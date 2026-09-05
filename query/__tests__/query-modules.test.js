@@ -411,6 +411,7 @@ import {
   isHelpQuery,
   isVagueQuery,
   checkFastPath,
+  matchesBlockedTopics,
 } from "../intent.js";
 
 describe("intent", () => {
@@ -490,6 +491,58 @@ describe("intent", () => {
 
     it("blocks movie queries", () => {
       assert.ok(!isBusinessQuery("what movie should I watch?"));
+    });
+
+    it("blocks code/programming requests", () => {
+      assert.ok(!isBusinessQuery("create a basic C program"));
+      assert.ok(!isBusinessQuery("write me a Python script"));
+      assert.ok(!isBusinessQuery("can you build an app for me?"));
+      assert.ok(!isBusinessQuery("how do I write a function in Java"));
+      assert.ok(!isBusinessQuery("make a calculator program"));
+    });
+
+    it("still allows certification queries containing ambiguous words", () => {
+      assert.ok(isBusinessQuery("what is ISO 9001?"));
+      assert.ok(isBusinessQuery("how to get certified?"));
+      assert.ok(isBusinessQuery("how do I make an appointment with a consultant"));
+      assert.ok(isBusinessQuery("what is an API key and how do I use it?"));
+    });
+
+    it("blocks topics listed in the company's BLOCKED_TOPICS config", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "crypto\ninvestment";
+        assert.ok(!isBusinessQuery("should I invest in cryptocurrency?", companyName));
+        assert.ok(!isBusinessQuery("what are the best investment strategies?", companyName));
+        // Unrelated certification queries still pass
+        assert.ok(isBusinessQuery("what is ISO 9001?", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
+    });
+
+    it("matchesBlockedTopics flags substrings and ignores empty input", () => {
+      assert.equal(matchesBlockedTopics("what is cryptocurrency?", "crypto"), true);
+      assert.equal(matchesBlockedTopics("best investment strategies", "crypto\ninvestment"), true);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", "crypto"), false);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", ""), false);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", null), false);
+    });
+
+    it("checkFastPath refuses company-blocked topics and ignores missing config", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "gambling";
+        const result = checkFastPath("best online gambling sites?", companyName);
+        assert.ok(result);
+        assert.ok(result.toLowerCase().includes("not able to find"));
+        // Unknown company: falls back to built-in patterns without throwing
+        assert.ok(isBusinessQuery("what is ISO 9001?", "nonexistent-company"));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
     });
   });
 

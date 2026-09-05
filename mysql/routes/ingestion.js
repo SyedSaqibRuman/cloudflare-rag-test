@@ -57,8 +57,18 @@ router.post(
       return res.status(500).json({ success: false, error: result.message || "Failed to start job" });
     }
 
-    // Log audit
-    // TODO: audit logging
+    // Audit logging (best-effort)
+    try {
+      const { AuditRepository } = await import("../repositories.js");
+      await AuditRepository.log({
+        companyId: company.id,
+        action: "kb.ingest.started",
+        entityType: "knowledge_base",
+        entityId: kbKey || null,
+        actor: req.headers["x-auth-user"] || "system",
+        afterState: { kbKey, scope, maxPages, jobId: result.jobId },
+      });
+    } catch { /* best-effort */ }
 
     res.json({ success: true, message: `Ingestion started for company '${companyName}'${kbKey ? ` and KB '${kbKey}'` : ""}`, startedAt: result.startedAt });
   })

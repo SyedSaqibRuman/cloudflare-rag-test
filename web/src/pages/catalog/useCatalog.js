@@ -29,6 +29,7 @@ export function useCatalog(key, navigate) {
   const [error, setError] = useState(null);
   const { toast, notify } = useToast();
   const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [expandedSections, setExpandedSections] = useState(() => new Set());
   const [collapsedSections, setCollapsedSections] = useState(() => new Set());
   const [testing, setTesting] = useState(false);
@@ -60,7 +61,7 @@ export function useCatalog(key, navigate) {
     (async () => {
       setError(null);
       try {
-        const [csResult, psResult] = await Promise.all([listGatewayCompanies(), listProviders()]);
+        const [csResult, psResult] = await Promise.all([listGatewayCompanies(), listProviders({ perPage: 500 })]);
         const cs = csResult.items ?? csResult;
         const ps = psResult.items ?? psResult;
         setCompanies(cs);
@@ -184,7 +185,7 @@ export function useCatalog(key, navigate) {
     try {
       await deleteProvider(deleteTarget.providerKey, force);
       setForceDelete(false);
-      setProviders((await listProviders()).items ?? []);
+      setProviders((await listProviders({ perPage: 500 })).items ?? []);
       if (key === deleteTarget.providerKey) navigate("catalog");
       notify(`Provider '${deleteTarget.providerKey}' deleted.`);
       setDeleteTarget(null);
@@ -199,12 +200,13 @@ export function useCatalog(key, navigate) {
   const compatibleCreated = async (providerKeyParam) => {
     setAddOpenAI(false);
     setAddAnthropic(false);
-    setProviders((await listProviders()).items ?? []);
+    setProviders((await listProviders({ perPage: 500 })).items ?? []);
     navigate(`catalog/${providerKeyParam}`);
     notify(`Provider '${providerKeyParam}' created.`);
   };
 
   const matchSearch = (p) => {
+    if (categoryFilter && p.category !== categoryFilter) return false;
     const q = search.trim().toLowerCase();
     if (!q) return true;
     return (
@@ -237,6 +239,8 @@ export function useCatalog(key, navigate) {
     notify,
     search,
     setSearch,
+    categoryFilter,
+    setCategoryFilter,
     expandedSections,
     setExpandedSections,
     collapsedSections,

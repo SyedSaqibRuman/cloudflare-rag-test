@@ -183,7 +183,13 @@ export async function startJob(jobId, companyName, opts = {}) {
       state.duration = +(performance.now() - start).toFixed(2);
       state.abortController = null;
       // Clean up finished entries so they don't count toward the concurrency limit.
-      standaloneJobs.delete(key);
+      // Guard the delete: a NEWER run for the same key may have replaced this
+      // entry while this (possibly stopped/wedged) run was still settling —
+      // deleting unconditionally would untrack the newer run (it would keep
+      // executing but vanish from /jobs/running and become unstoppable).
+      if (standaloneJobs.get(key) === state) {
+        standaloneJobs.delete(key);
+      }
     }
   })();
 

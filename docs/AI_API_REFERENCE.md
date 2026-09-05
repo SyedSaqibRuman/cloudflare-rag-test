@@ -152,9 +152,20 @@ x-company-name: popularcert
   "answer": "ISO 9001 is an internationally recognized quality management standard...",
   "sources": [
     { "title": "ISO 9001 Certification", "score": 0.92 }
+  ],
+  "matches": [
+    { "id": "chunk-42", "score": 0.92, "metadata": { "title": "ISO 9001 Certification", "r2_key": "site/pages/iso-9001/chunk-0.json" } }
+  ],
+  "graph": null,
+  "cached": false,
+  "possibleQuestions": [
+    "What are the ISO 9001 requirements?",
+    "How long does certification take?"
   ]
 }
 ```
+
+**Response fields:** `answer` (Markdown), `sources` `[{title, score}]`, `matches` (full retrieval matches incl. metadata), `graph` `{context, cypher}|null` (GraphRAG context when used), `cached` (boolean), `possibleQuestions` (3–5 suggested follow-up questions generated from the answer; best-effort, `[]` on errors/fast-path answers/aborted requests).
 
 **Response (cached):**
 ```json
@@ -162,7 +173,10 @@ x-company-name: popularcert
   "success": true,
   "answer": "...",
   "sources": [...],
-  "cached": true
+  "matches": [...],
+  "graph": null,
+  "cached": true,
+  "possibleQuestions": [...]
 }
 ```
 
@@ -199,14 +213,10 @@ x-company-name: popularcert
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `question` | string | Yes | The user's question |
-| `history` | array | No | Conversation history |
-
-**Response:** `text/event-stream`
+| `history` | array | No | Conversation history |**Response:** `text/event-stream`
 
 ```
-data: {"token":"__START_RESPONSE__"}
-
-data: {"sources":[{"title":"ISO 9001 in Angola","score":0.86},{"title":"ISO Certification in Seoul","score":0.85}]}
+data: {"__start":true,"sources":[{"title":"ISO 9001 in Angola","score":0.86}],"matches":[{"id":"chunk-1","score":0.86}],"graph":null}
 
 data: {"token":"ISO"}
 
@@ -215,18 +225,20 @@ data: {"token":" 9001"}
 data: {"token":" is"}
 
 data: {"token":" an"}
-
+data: {"possibleQuestions":["What are the ISO 9001 requirements?","How long does certification take?"]}
 data: [DONE]
 ```
 
 **Event Types:**
 | Event | Format | Description |
 |-------|--------|-------------|
-| Start sentinel | `data: {"token":"__START_RESPONSE__"}` | Sent before the first real token; clears the client's "Thinking..." state |
-| Sources | `data: {"sources":[{title, score}]}` | Retrieval sources for RAG answers (same shape as the non-streaming `/ask` response); emitted before tokens |
+| Start | `data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}\|null}` | Structured start frame carrying retrieval metadata before the first token |
 | Token | `data: {"token":"..."}` | Each streamed token |
-| Done | `data: [DONE]` | Stream completed successfully |
+| Possible questions | `data: {"possibleQuestions":[...]}` | 3–5 suggested follow-up questions generated from the answer; rendered as clickable chips by the Test AI page. Best-effort — empty/omitted on errors, canned fast-path answers, aborted requests |
 | Error | `data: {"error":"..."}` | Error occurred |
+| Done | `data: [DONE]` | Stream completed successfully |
+
+> **Legacy frames:** the standalone `data: {"sources":[...]}` frame and the `data: {"token":"__START_RESPONSE__"}` sentinel are still parsed by clients but only emitted as the preamble of `__start:false` start frames (empty-question / fast-path / error responses). The structured `__start` frame replaced both on RAG answers.
 
 **Client Example (JavaScript):**
 ```javascript
@@ -263,6 +275,32 @@ while (true) {
 **Abort Handling:**
 - Closing the SSE connection automatically aborts the request
 - 30-second timeout on the LLM streaming call
+
+---
+
+### Ask Suggestions
+
+**Endpoint:** `GET /ask/suggestions`
+
+**Description:** Returns per-company starter questions for the Test AI page's empty conversation state, generated from the company's knowledge base (top chunks → small LLM). Same auth as `/ask` (`x-company-name` header, optional per-company `x-api-key`) and AI-tier rate limit (20 req/min). Best-effort: `questions: []` when the index is empty or credentials are missing. The portal caches the result per company (24h) and falls back to static starters on failure.
+
+**Request:**
+```http
+GET /ask/suggestions HTTP/1.1
+x-company-name: popularcert
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "questions": [
+    "What services does this company offer?",
+    "How long does certification take?",
+    "What are the first steps to get started?"
+  ]
+}
+```
 
 ---
 

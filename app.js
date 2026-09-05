@@ -10,6 +10,9 @@ import cloudflareRoutes from "./routes/cloudflare.js";
 import authRoutes from "./routes/auth.js";
 import logsRoutes from "./routes/logs.js";
 import gatewayRoutes from "./mysql/gateway-router.js";
+import publicAssistantRoutes from "./routes/public-assistants.js";
+
+import workflowTriggerRoutes from "./routes/workflow-triggers.js";
 import { createAskRouter, aiLimiter } from "./routes/ask.js";
 import { env } from "./env.js";
 import { requireAdmin, verifyToken, extractToken, AUTH_ENABLED } from "./auth.js";
@@ -19,6 +22,8 @@ import { isAllowedOrigin } from "./utils/request-context.js";
 import requestLogger from "./utils/request-logger.js";
 import { runHealthCheck, runDetailedHealthCheck } from "./utils/health-check.js";
 import { migrate } from "./mysql/migrate.js";
+import { liftLegacyWebhooks } from "./mysql/routes/webhooks.js";
+import { startPurgeScheduler } from "./mysql/services/workflow-run-purge.js";
 import swaggerUi from "swagger-ui-express";
 import openapi from "./docs/openapi.js";
 
@@ -26,7 +31,18 @@ import openapi from "./docs/openapi.js";
 // 🔹 APP & CONFIG
 // --------------------------
 const app = express();
+app.disable("x-powered-by");
 const PORT = parseInt(env.PORT, 10);
+
+// --------------------------
+// 🔹 CRASH GUARD — prevent silent process exits
+// --------------------------
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught exception:", err.stack || err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled rejection:", reason?.stack || reason);
+});
 
 // Trust proxy: with `true` every client controls X-Forwarded-For, so req.ip
 // (and therefore every rate limiter key) can be rotated per request. Keep the
@@ -113,7 +129,11 @@ app.use("/cloudflare", requireAdmin, cronRoutes);
 app.use("/cloudflare", requireAdmin, cloudflareRoutes);
 app.use("/auth", authRoutes);
 app.use("/logs", requireAdmin, logsRoutes);
+// Public routes MUST be mounted before /gateway (which has requireAdmin).
+app.use("/gateway/public", publicAssistantRoutes);
 app.use("/gateway", requireAdmin, gatewayRoutes);
+// Public workflow trigger routes (webhook endpoints).
+app.use("/webhooks", workflowTriggerRoutes);
 app.use(createAskRouter());
 
 // --------------------------
@@ -167,6 +187,13 @@ app.get("/", (req, res) => {
     uptime: process.uptime(),
     timestamp: Date.now(),
   });
+});
+
+app.get("/favicon.ico", (_req, res) => {
+  if (hasWeb) {
+    return res.redirect(301, "/favicon.svg");
+  }
+  res.status(204).end();
 });
 
 app.get("/_health", async (_req, res) => {
@@ -309,6 +336,12 @@ if (process.env.CONFIG_STORE === "mysql") {
   } catch (err) {
     console.error("⚠️  Auto-migration failed:", err.message);
   }
+  // Lift legacy db/webhooks.json entries into MySQL once (best-effort)
+  try {
+    await liftLegacyWebhooks();
+  } catch (err) {
+    console.error("⚠️  Legacy webhook lift failed:", err.message);
+  }
 }
 app.listen(PORT, (err) => {
   if (err) {
@@ -323,4 +356,12 @@ Local:     http://localhost:${PORT}
 Endpoints: POST /ask
            POST /ask-stream
   `);
+
+  // Start workflow run purge scheduler (daily at 3 AM, 30-day retention)
+  try {
+    startPurgeScheduler();
+    console.log("🧹 Workflow run purge scheduler started (daily at 3 AM, 30-day retention)");
+  } catch {
+    // Best-effort — purge scheduler is optional
+  }
 });

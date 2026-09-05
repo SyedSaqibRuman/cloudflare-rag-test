@@ -4,9 +4,9 @@
 // Replaced the former 3-tab modal with a linear wizard to match the design doc.
 // --------------------------
 
-import { useEffect, useRef, useState } from "react";
-import { createKb, updateKb, getKbOptions } from "../api";
-import { Modal, Button, Input, Select, TextArea, Spinner, Toggle } from "./ui";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createKb, updateKb, getKbOptions, api } from "../api";
+import { Modal, Button, Input, Select, TextArea, Spinner, Toggle, ArrowLeftIcon, ArrowRightIcon } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Step definitions
@@ -44,9 +44,21 @@ function parseSitemapUrl(config) {
 }
 
 function parseScope(config) {
-  if (!config) return { scope: "all", docLimit: "100" };
+  if (!config) return { scope: "all", docLimit: "100", selectedPages: "" };
   const raw = typeof config === "string" ? JSON.parse(config) : config;
-  return { scope: raw.scope || "all", docLimit: String(raw.docLimit || 100) };
+  const pages = Array.isArray(raw.selectedPages) ? raw.selectedPages.join("\n") : (raw.selectedPages || "");
+  return { scope: raw.scope || "all", docLimit: String(raw.docLimit || 100), selectedPages: pages };
+}
+
+/**
+ * Normalize webhook events to a comma-separated string for form state.
+ * The API stores/returns events as a JSON array (e.g. ["completed","failed"]);
+ * older rows or defaults may be plain strings. Both become "completed,failed".
+ */
+function toEventsString(value) {
+  if (!value) return "";
+  const list = Array.isArray(value) ? value : String(value).split(",");
+  return list.map((e) => String(e).trim()).filter(Boolean).join(",");
 }
 
 /** Step indicator — numbered pill bar at the top of the modal. */
@@ -145,6 +157,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     sitemapUrl: "",
     ingestScope: "all",
     docLimit: "100",
+    selectedPages: "",
     chunkSize: "512",
     chunkOverlap: "50",
     retrievalTopK: "10",
@@ -153,11 +166,13 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     enableGraphRag: false,
     webhookUrl: "",
     webhookSecret: "",
+    webhookEvents: "completed,failed",
   });
   const [options, setOptions] = useState({ vectorResources: [], storageResources: [], embeddingModels: [] });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const wasOpen = useRef(open);
+  const [advancedMode, setAdvancedMode] = useState(false);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -177,14 +192,17 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
         sitemapUrl: parseSitemapUrl(row?.source_config),
         ingestScope: parseScope(row?.source_config).scope,
         docLimit: parseScope(row?.source_config).docLimit,
+        selectedPages: parseScope(row?.source_config).selectedPages,
         chunkSize: String(row?.chunk_size ?? 512),
         chunkOverlap: String(row?.chunk_overlap ?? 50),
         retrievalTopK: String(row?.retrieval_top_k ?? 10),
         retrievalScoreThreshold: String(row?.retrieval_score_threshold ?? 0.7),
         enableHybridSearch: row ? !!row.enable_hybrid_search : true,
+        graphResourceId: row?.graph_resource_id ? String(row.graph_resource_id) : "",
         enableGraphRag: row ? !!row.enable_graph_rag : false,
         webhookUrl: row?.webhook_url ?? "",
         webhookSecret: "",
+        webhookEvents: toEventsString(row?.webhook_events) || "completed,failed",
       });
       setError(null);
       if (company) {
@@ -226,6 +244,9 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
               } : {}),
               scope: form.ingestScope || "all",
               docLimit: form.ingestScope === "limit" ? Number(form.docLimit) : undefined,
+              selectedPages: form.ingestScope === "selected"
+                ? form.selectedPages.split("\n").map((u) => u.trim()).filter(Boolean)
+                : undefined,
             }
           : undefined,
         chunkSize: Number(form.chunkSize),
@@ -233,8 +254,10 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
         retrievalTopK: Number(form.retrievalTopK),
         retrievalScoreThreshold: Number(form.retrievalScoreThreshold),
         enableHybridSearch: form.enableHybridSearch,
+        graphResourceId: numOrUndef(form.graphResourceId),
         enableGraphRag: form.enableGraphRag,
         webhookUrl: form.webhookUrl.trim() || null,
+        webhookEvents: form.webhookEvents || "completed,failed",
         ...(row
           ? form.webhookSecret.trim() && { webhookSecret: form.webhookSecret.trim() }
           : { webhookSecret: form.webhookSecret.trim() || null }),
@@ -249,44 +272,54 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     }
   };
 
+  // Build option lists — memoized so <select> elements don't re-mount on every
+  // keystroke, which previously caused dropdowns to auto-collapse in ~1–2s.
+  const { vectorOptions, storageOptions, graphOptions, modelOptions, selectedModel } = useMemo(() => {
+    const seenVector = new Set();
+    const vectorResourceOpts = [];
+    for (const r of options.vectorResources || []) {
+      const key = r.external_resource_id || r.resource_key;
+      if (seenVector.has(key)) continue;
+      seenVector.add(key);
+      vectorResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
+    }
+    for (const r of options.liveVectorResources || []) {
+      const key = r.name || r.id;
+      if (seenVector.has(key)) continue;
+      seenVector.add(key);
+      vectorResourceOpts.push({ value: key, label: `${r.name || r.id} (live)` });
+    }
+
+    const seenStorage = new Set();
+    const storageResourceOpts = [];
+    for (const r of options.storageResources || []) {
+      const key = r.external_resource_id || r.resource_key;
+      if (seenStorage.has(key)) continue;
+      seenStorage.add(key);
+      storageResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
+    }
+    for (const r of options.liveStorageResources || []) {
+      const key = r.name || r.id;
+      if (seenStorage.has(key)) continue;
+      seenStorage.add(key);
+      storageResourceOpts.push({ value: key, label: `${r.name || r.id} (live)` });
+    }
+
+    const graphResourceOpts = [];
+    for (const r of options.graphResources || []) {
+      graphResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
+    }
+
+    return {
+      vectorOptions: [OPTION_DEFAULT, ...vectorResourceOpts],
+      storageOptions: [OPTION_DEFAULT, ...storageResourceOpts],
+      graphOptions: [OPTION_DEFAULT, ...graphResourceOpts],
+      modelOptions: [OPTION_DEFAULT, ...(options.embeddingModels || []).map((m) => ({ value: String(m.id), label: `${m.provider_name} · ${m.model_name}` }))],
+      selectedModel: (options.embeddingModels || []).find((m) => String(m.id) === form.embeddingModelId),
+    };
+  }, [options, form.embeddingModelId]);
+
   if (!open) return null;
-
-  // Build option lists
-  const seenVector = new Set();
-  const vectorResourceOpts = [];
-  for (const r of options.vectorResources || []) {
-    const key = r.external_resource_id || r.resource_key;
-    if (seenVector.has(key)) continue;
-    seenVector.add(key);
-    vectorResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
-  }
-  for (const r of options.liveVectorResources || []) {
-    const key = r.name || r.id;
-    if (seenVector.has(key)) continue;
-    seenVector.add(key);
-    vectorResourceOpts.push({ value: key, label: `${r.name || r.id} (live)` });
-  }
-
-  const seenStorage = new Set();
-  const storageResourceOpts = [];
-  for (const r of options.storageResources || []) {
-    const key = r.external_resource_id || r.resource_key;
-    if (seenStorage.has(key)) continue;
-    seenStorage.add(key);
-    storageResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
-  }
-  for (const r of options.liveStorageResources || []) {
-    const key = r.name || r.id;
-    if (seenStorage.has(key)) continue;
-    seenStorage.add(key);
-    storageResourceOpts.push({ value: key, label: `${r.name || r.id} (live)` });
-  }
-
-  const vectorOptions = [OPTION_DEFAULT, ...vectorResourceOpts];
-  const storageOptions = [OPTION_DEFAULT, ...storageResourceOpts];
-  const modelOptions = [OPTION_DEFAULT, ...(options.embeddingModels || []).map((m) => ({ value: String(m.id), label: `${m.provider_name} · ${m.model_name}` }))];
-
-  const selectedModel = (options.embeddingModels || []).find((m) => String(m.id) === form.embeddingModelId);
 
   return (
     <Modal
@@ -299,7 +332,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
           <div>
             {step > 0 && (
               <Button variant="secondary" onClick={() => setStep((s) => s - 1)}>
-                ← Back
+                <ArrowLeftIcon className="h-3.5 w-3.5" /> Back
               </Button>
             )}
           </div>
@@ -307,7 +340,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
             <Button variant="secondary" onClick={onClose}>Cancel</Button>
             {step < STEPS.length - 1 ? (
               <Button onClick={() => setStep((s) => s + 1)} disabled={!canContinue()}>
-                Continue →
+                Continue <ArrowRightIcon className="h-3.5 w-3.5" />
               </Button>
             ) : (
               <Button onClick={submit} disabled={busy}>
@@ -378,34 +411,78 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
 
             {/* Scope selector for WordPress/URL */}
             {["wordpress", "url"].includes(form.sourceType) && (
-              <div className="mt-3 rounded-lg border border-slate-700/50 bg-slate-800/30 p-3">
-                <p className="mb-2 text-xs font-medium text-slate-400">Ingestion scope</p>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
-                    <input
-                      type="radio"
-                      name="ingestScope"
-                      value="all"
-                      checked={form.ingestScope === "all"}
-                      onChange={() => set("ingestScope", "all")}
-                      className="h-4 w-4 border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500"
-                    />
-                    <span>Entire website</span>
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300">
-                    <input
-                      type="radio"
-                      name="ingestScope"
-                      value="limit"
-                      checked={form.ingestScope === "limit"}
-                      onChange={() => set("ingestScope", "limit")}
-                      className="h-4 w-4 border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500"
-                    />
-                    <span>Limit documents</span>
-                  </label>
+              <div className="mt-4 space-y-3">
+                <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Ingestion Scope</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {/* Entire website */}
+                  <button
+                    type="button"
+                    onClick={() => set("ingestScope", "all")}
+                    className={`rounded-lg border p-3 text-left transition-all ${
+                      form.ingestScope === "all"
+                        ? "border-indigo-500 bg-indigo-500/10 shadow-md shadow-indigo-500/10"
+                        : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${
+                        form.ingestScope === "all" ? "border-indigo-400" : "border-slate-600"
+                      }`}>
+                        {form.ingestScope === "all" && <span className="h-2 w-2 rounded-full bg-indigo-400" />}
+                      </span>
+                      <span className="text-sm font-medium text-slate-200">Entire website</span>
+                    </div>
+                    <p className="mt-1 pl-7 text-[11px] text-slate-500">Fetch and index all available content</p>
+                  </button>
+
+                  {/* Custom limit */}
+                  <button
+                    type="button"
+                    onClick={() => set("ingestScope", "limit")}
+                    className={`rounded-lg border p-3 text-left transition-all ${
+                      form.ingestScope === "limit"
+                        ? "border-indigo-500 bg-indigo-500/10 shadow-md shadow-indigo-500/10"
+                        : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${
+                        form.ingestScope === "limit" ? "border-indigo-400" : "border-slate-600"
+                      }`}>
+                        {form.ingestScope === "limit" && <span className="h-2 w-2 rounded-full bg-indigo-400" />}
+                      </span>
+                      <span className="text-sm font-medium text-slate-200">Custom limit</span>
+                    </div>
+                    <p className="mt-1 pl-7 text-[11px] text-slate-500">Set a maximum number of documents</p>
+                  </button>
+
+                  {/* Selected pages */}
+                  {form.sourceType === "url" && (
+                    <button
+                      type="button"
+                      onClick={() => set("ingestScope", "selected")}
+                      className={`rounded-lg border p-3 text-left transition-all ${
+                        form.ingestScope === "selected"
+                          ? "border-indigo-500 bg-indigo-500/10 shadow-md shadow-indigo-500/10"
+                          : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${
+                          form.ingestScope === "selected" ? "border-indigo-400" : "border-slate-600"
+                        }`}>
+                          {form.ingestScope === "selected" && <span className="h-2 w-2 rounded-full bg-indigo-400" />}
+                        </span>
+                        <span className="text-sm font-medium text-slate-200">Selected pages</span>
+                      </div>
+                      <p className="mt-1 pl-7 text-[11px] text-slate-500">Pick specific URLs to ingest</p>
+                    </button>
+                  )}
                 </div>
+
+                {/* Limit input */}
                 {form.ingestScope === "limit" && (
-                  <div className="mt-2">
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-800/30 p-3">
                     <Input
                       label="Maximum documents"
                       type="number"
@@ -415,6 +492,20 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                       onChange={(e) => set("docLimit", e.target.value)}
                     />
                     <p className="mt-1 text-[11px] text-slate-600">Stop after processing this many documents</p>
+                  </div>
+                )}
+
+                {/* Selected pages URL list */}
+                {form.ingestScope === "selected" && form.sourceType === "url" && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-800/30 p-3">
+                    <TextArea
+                      label="Pages to ingest (one URL per line)"
+                      rows={4}
+                      placeholder={"https://example.com/about\nhttps://example.com/services\nhttps://example.com/contact"}
+                      value={form.selectedPages}
+                      onChange={(e) => set("selectedPages", e.target.value)}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-600">Only these specific pages will be fetched and indexed</p>
                   </div>
                 )}
               </div>
@@ -454,58 +545,123 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
       {/* ── Step 3: Storage & Search ────────────────────────────────── */}
       {step === 2 && (
         <div className="space-y-4">
-          <Section title="Vector Database" icon="🔮">
-            <Select
-              label="Vector Store"
-              options={vectorOptions}
-              value={form.vectorResourceId}
-              onChange={(e) => set("vectorResourceId", e.target.value)}
-            />
-            <p className="mt-1 text-[11px] text-slate-600">
-              Provider-agnostic — Cloudflare Vectorize, Pinecone, or any compatible store
-            </p>
-          </Section>
+          {/* Basic mode — simplified view */}
+          {!advancedMode && (
+            <>
+              <Section title="AI Search" icon="🔍">
+                <p className="mb-3 text-sm text-slate-400">
+                  We'll use recommended settings for your AI to search your content.
+                  You can customize these later in Advanced mode.
+                </p>
+                <div className="rounded-lg border border-slate-700/50 bg-slate-800/30 p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">✅</span>
+                    <div>
+                      <p className="text-sm font-medium text-slate-200">Recommended Settings</p>
+                      <p className="text-[11px] text-slate-500">
+                        Vector search, document storage, and AI embeddings configured automatically
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </Section>
+            </>
+          )}
 
-          <Section title="Object Storage" icon="☁️">
-            <Select
-              label="Document Storage"
-              options={storageOptions}
-              value={form.storageResourceId}
-              onChange={(e) => set("storageResourceId", e.target.value)}
-            />
-            <p className="mt-1 text-[11px] text-slate-600">
-              Chunked documents are stored here for retrieval
-            </p>
-          </Section>
+          {/* Advanced mode — full technical control */}
+          {advancedMode && (
+            <>
+              <Section title="Vector Database" icon="🗄️">
+                <Select
+                  label="Vector Store"
+                  options={vectorOptions}
+                  value={form.vectorResourceId}
+                  onChange={(e) => set("vectorResourceId", e.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-600">
+                  Where AI search indexes are stored (Cloudflare Vectorize, Pinecone, etc.)
+                </p>
+              </Section>
 
-          <Section title="Embedding" icon="🧠">
-            <Select
-              label="Embedding Model"
-              options={modelOptions}
-              value={form.embeddingModelId}
-              onChange={(e) => set("embeddingModelId", e.target.value)}
-            />
-            {selectedModel && (
-              <div className="mt-2 flex gap-4 text-[11px] text-slate-500">
-                <span>Provider: <span className="text-slate-300">{selectedModel.provider_name}</span></span>
-                {selectedModel.dimensions && <span>Dimensions: <span className="text-slate-300">{selectedModel.dimensions}</span></span>}
-              </div>
-            )}
-          </Section>
+              <Section title="Object Storage" icon="📦">
+                <Select
+                  label="Document Storage"
+                  options={storageOptions}
+                  value={form.storageResourceId}
+                  onChange={(e) => set("storageResourceId", e.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-600">
+                  Where your content documents are stored
+                </p>
+              </Section>
 
-          <Section title="Knowledge Graph" icon="🕸️" className="opacity-60">
-            <div className="flex items-center justify-between rounded-lg bg-slate-800/30 p-3">
-              <div>
-                <p className="text-sm font-medium text-slate-200">GraphRAG</p>
-                <p className="text-[11px] text-slate-500">Knowledge graph context (Neo4j — coming soon)</p>
-              </div>
-              <Toggle
-                checked={form.enableGraphRag}
-                onChange={(v) => set("enableGraphRag", v)}
-                disabled
-              />
-            </div>
-          </Section>
+              <Section title="AI Processing" icon="🧠">
+                <Select
+                  label="Embedding Model"
+                  options={modelOptions}
+                  value={form.embeddingModelId}
+                  onChange={(e) => set("embeddingModelId", e.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-600">
+                  The AI model that converts your text into searchable format
+                </p>
+                {selectedModel && (
+                  <div className="mt-2 flex gap-4 text-[11px] text-slate-500">
+                    <span>Provider: <span className="text-slate-300">{selectedModel.provider_name}</span></span>
+                    {selectedModel.dimensions && <span>Dimensions: <span className="text-slate-300">{selectedModel.dimensions}</span></span>}
+                  </div>
+                )}
+              </Section>
+
+              <Section title="Knowledge Graph" icon="🕸️">
+                <Select
+                  label="Graph Database"
+                  options={graphOptions}
+                  value={form.graphResourceId}
+                  onChange={(e) => {
+                    set("graphResourceId", e.target.value);
+                    if (e.target.value) set("enableGraphRag", true);
+                  }}
+                />
+                <p className="mt-1 text-[11px] text-slate-600">
+                  Optional — connects to Neo4j to map relationships between concepts
+                </p>
+                {form.graphResourceId && (
+                  <div className="mt-3 flex items-center justify-between rounded-lg bg-slate-800/30 p-3">
+                    <div>
+                      <p className="text-sm font-medium text-slate-200">Graph RAG</p>
+                      <p className="text-[11px] text-slate-500">Extract entities and relationships from content</p>
+                    </div>
+                    <Toggle
+                      checked={form.enableGraphRag}
+                      onChange={(v) => set("enableGraphRag", v)}
+                    />
+                  </div>
+                )}
+              </Section>
+            </>
+          )}
+
+          {/* Toggle between Basic and Advanced */}
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={() => setAdvancedMode(!advancedMode)}
+              className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2 text-xs text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-300"
+            >
+              {advancedMode ? (
+                <>
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 0 0 4.561 21h14.878a2 2 0 0 0 1.94-1.515L22 17" /></svg>
+                  Switch to Basic Mode
+                </>
+              ) : (
+                <>
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3v18m-6-6l6 6 6-6" /></svg>
+                  Advanced Settings
+                </>
+              )}
+            </button>
+          </div>
         </div>
       )}
 
@@ -563,6 +719,100 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
               />
             </div>
           </Section>
+
+          <Section title="Notifications" icon="🔔">
+            <div className="space-y-3">
+              <Input
+                label="Webhook URL"
+                placeholder="https://hooks.slack.com/services/... or https://example.com/webhook"
+                value={form.webhookUrl}
+                onChange={(e) => set("webhookUrl", e.target.value)}
+              />
+              <p className="-mt-1 text-[11px] text-slate-600">
+                Auto-detects Slack, Discord, or sends generic JSON payloads
+              </p>
+
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Input
+                    label="HMAC Secret (optional)"
+                    placeholder="For signature verification"
+                    value={form.webhookSecret}
+                    onChange={(e) => set("webhookSecret", e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">Notify on</label>
+                <div className="flex flex-wrap gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={form.webhookEvents.includes("completed")}
+                      onChange={(e) => {
+                        const events = toEventsString(form.webhookEvents).split(",").filter(Boolean);
+                        if (e.target.checked) events.push("completed");
+                        else { const i = events.indexOf("completed"); if (i >= 0) events.splice(i, 1); }
+                        set("webhookEvents", events.join(","));
+                      }}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500"
+                    />
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-emerald-400">✓</span> Completed
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={form.webhookEvents.includes("failed")}
+                      onChange={(e) => {
+                        const events = toEventsString(form.webhookEvents).split(",").filter(Boolean);
+                        if (e.target.checked) events.push("failed");
+                        else { const i = events.indexOf("failed"); if (i >= 0) events.splice(i, 1); }
+                        set("webhookEvents", events.join(","));
+                      }}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500"
+                    />
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-rose-400">✗</span> Failed
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              {form.webhookUrl && row && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await api(`/gateway/kbs/${row.kb_key}/webhook/test`, { method: "POST", company });
+                    } catch {
+                      // silent — test webhook is fire-and-forget
+                    }
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-700 hover:text-slate-100"
+                >
+                  🧪 Send test webhook
+                </button>
+              )}
+
+              {form.webhookUrl && (
+                <div className="rounded-lg bg-slate-800/30 p-3">
+                  <p className="text-[11px] font-medium text-slate-400">Payload preview</p>
+                  <pre className="mt-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-slate-900 p-2 text-[10px] text-slate-500">
+{JSON.stringify({
+  event: "ingestion.completed",
+  kbKey: form.kbKey || "my-kb",
+  companyName: company || "my-company",
+  timestamp: new Date().toISOString(),
+  stats: { documentsProcessed: 42, documentsSkipped: 5, chunksCreated: 380, durationMs: 12345, mode: form.ingestScope || "all" },
+}, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </Section>
         </div>
       )}
 
@@ -585,7 +835,9 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                   <ReviewRow label="URLs" value={`${form.urls.split("\n").filter(Boolean).length} configured`} />
                 )}
                 <ReviewRow label="Scope" value={
-                  form.ingestScope === "limit" ? `Limit ${form.docLimit} documents` : "Entire website"
+                  form.ingestScope === "limit" ? `Custom limit: ${form.docLimit} documents` :
+                  form.ingestScope === "selected" ? `Selected: ${form.selectedPages.split("\n").filter(Boolean).length} page(s)` :
+                  "Entire website"
                 } />
                 <div className="border-t border-slate-700/50" />
                 <ReviewRow label="Embedding" value={
@@ -601,7 +853,14 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                 <ReviewRow label="Chunking" value={`${form.chunkSize} chars · ${form.chunkOverlap} overlap`} />
                 <ReviewRow label="Retrieval" value={`Top-${form.retrievalTopK} · ≥ ${Number(form.retrievalScoreThreshold).toFixed(2)}`} />
                 <ReviewRow label="Hybrid search" value={form.enableHybridSearch ? "✓ Enabled" : "— Disabled"} />
-                <ReviewRow label="GraphRAG" value={form.enableGraphRag ? "✓ Enabled" : "— Disabled"} />
+                <ReviewRow label="Graph" value={
+                  form.graphResourceId
+                    ? `${graphOptions.find((o) => o.value === form.graphResourceId)?.label || "—"}${form.enableGraphRag ? " · GraphRAG ✓" : " · GraphRAG —"}`
+                    : "— Not configured"
+                } />
+                <div className="border-t border-slate-700/50" />
+                <ReviewRow label="Webhook" value={form.webhookUrl ? `🔔 ${form.webhookEvents || "all events"}` : "— Not configured"} />
+                {form.webhookUrl && <ReviewRow label="Webhook URL" value={form.webhookUrl.length > 40 ? form.webhookUrl.slice(0, 40) + '…' : form.webhookUrl} />}
               </dl>
             </div>
           </Section>

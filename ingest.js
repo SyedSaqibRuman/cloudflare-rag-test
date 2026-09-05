@@ -13,6 +13,7 @@
 import { createRegistry } from "./ingest/registry.js";
 import { runIngestion } from "./ingest/pipeline.js";
 import { resolveKbAdapters, resolveLegacyAdapters } from "./ingest/resolve.js";
+import { createGraphExtractor, createLlmEntityExtractor } from "./ingest/graph-extract.js";
 import { createSourceAdapter } from "./ingest/sources/index.js";
 import { fireIngestionWebhook } from "./ingest/webhooks.js";
 import { fetchPost, fetchPage, fetchWpByIds } from "./services/wp.js";
@@ -36,6 +37,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
     let registry = createRegistry(companyName);
     let kbId = null;
     let company = null;
+    let kb = null;
     let webhookConfig = null; // { webhookUrl, webhookSecret } from KB row
 
     // 🔹 Resolve adapters from the Knowledge Base or legacy config
@@ -47,7 +49,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
       company = await CompanyRepository.findByKey(companyName);
       if (!company) throw new NotFoundError(`Company '${companyName}' not found.`, "COMPANY_NOT_FOUND");
 
-      const kb = await KbRepository.findByKey(company.id, kbKey);
+      kb = await KbRepository.findByKey(company.id, kbKey);
       if (!kb) throw new NotFoundError(`Knowledge base '${kbKey}' not found.`, "KB_NOT_FOUND");
       kbId = kb.id;
 
@@ -73,7 +75,11 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
 
       // Store webhook config for post-ingest notifications
       if (kb.webhook_url) {
-        webhookConfig = { webhookUrl: kb.webhook_url, webhookSecret: kb.webhook_secret };
+        webhookConfig = {
+          webhookUrl: kb.webhook_url,
+          webhookSecret: kb.webhook_secret,
+          webhookEvents: kb.webhook_events || "completed,failed",
+        };
       }
 
       // Resolve the source adapter based on KB source_type
@@ -99,9 +105,39 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
       index = adapters.vector;
     }
 
+    // 🔹 Graph adapter: optional Neo4j extraction during ingestion
+    // Only when the KB explicitly enables GraphRAG (kb.enable_graph_rag)
+    let graphAdapter = null;
+    if (kbKey && company && kb?.enable_graph_rag) {
+      try {
+        const { getGraphConfig } = await import("./query/graph.js");
+        const graphConfig = getGraphConfig(companyName);
+        if (graphConfig) {
+          graphAdapter = createGraphExtractor({
+            companyName,
+            kbKey,
+            graphConfig,
+            extractEntities: createLlmEntityExtractor(companyName),
+          });
+          console.log(`🕸️ Graph extraction enabled for KB '${kbKey}'`);
+        }
+      } catch {
+        // Graph extraction is best-effort — missing deps or bad config
+      }
+    }
+
     try {
-      // Normalize scope: if only maxPages is provided (legacy), convert to limit scope
-      const ingestionScope = scope || (maxPages ? { scope: "limit", limit: maxPages } : { scope: "all" });
+      // Normalize scope: prefer the explicit scope from the API request;
+      // fall back to the KB's saved source_config (set during creation/edit);
+      // then fall back to legacy maxPages; finally default to "all".
+      let kbScope = null;
+      if (kb?.source_config) {
+        try {
+          const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
+          if (cfg.scope) kbScope = { scope: cfg.scope, limit: cfg.docLimit || undefined, items: cfg.selectedPages || undefined };
+        } catch { /* ignore parse errors */ }
+      }
+      const ingestionScope = scope || kbScope || (maxPages ? { scope: "limit", limit: maxPages } : { scope: "all" });
 
       const startedAt = Date.now();
       const stats = await runIngestion({
@@ -117,6 +153,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
         chunkOptions,
         scope: ingestionScope,
         setProgress,
+        graphAdapter,
       });
       const durationMs = Date.now() - startedAt;
 

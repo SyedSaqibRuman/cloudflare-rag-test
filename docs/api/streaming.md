@@ -34,9 +34,7 @@ curl -N -X POST http://localhost:3000/ask-stream \
 ```**Response:** `text/event-stream`
 
 ```
-data: {"token":"__START_RESPONSE__"}
-
-data: {"sources":[{"title":"ISO 9001 in Angola","score":0.86}]}
+data: {"__start":true,"sources":[{"title":"ISO 9001 in Angola","score":0.86}],"matches":[{"id":"chunk-1","score":0.86}],"graph":null}
 
 data: {"token":"ISO"}
 
@@ -46,6 +44,7 @@ data: {"token":" is"}
 
 data: {"token":" an"}
 data: {"token":" internationally"}
+data: {"possibleQuestions":["What are the ISO 9001 requirements?","How long does certification take?"]}
 data: [DONE]
 ```
 
@@ -53,11 +52,13 @@ data: [DONE]
 
 | Event | Description |
 |-------|-------------|
-| `data: {"token":"__START_RESPONSE__"}` | Sent before the first real token; clears the client's "Thinking..." state |
-| `data: {"sources":[{title, score}]}` | Retrieval sources for RAG answers (same shape as the non-streaming `/ask` response); emitted before tokens |
+| `data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}\|null}` | Structured start frame carrying retrieval metadata before the first token (same shapes as the non-streaming `/ask` response) |
 | `data: {"token":"..."}` | Each streamed token |
-| `data: [DONE]` | Stream completed successfully |
+| `data: {"possibleQuestions":[...]}` | 3–5 suggested follow-up questions generated from the answer (small LLM); rendered by the Test AI page as clickable "Suggested questions" chips. Best-effort — omitted/empty on errors, canned fast-path answers, or aborted requests |
 | `data: {"error":"..."}` | Error occurred |
+| `data: [DONE]` | Stream completed successfully |
+
+> **Legacy frames (still parsed by clients, no longer emitted on the normal path):** the standalone `data: {"sources":[...]}` frame and the `data: {"token":"__START_RESPONSE__"}` sentinel. The transport still sends the sentinel as the preamble of `__start:false` start frames (empty-question / fast-path / error responses); well-behaved clients filter it. The structured `__start` frame above replaced both on RAG answers.
 
 **Client Example (JavaScript):**
 ```javascript

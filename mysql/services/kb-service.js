@@ -40,6 +40,21 @@ function isPosInt(value) {
  * @param {Object} input
  * @returns {{ ok: boolean, value?: Object, errors?: Object<string,string> }}
  */
+/**
+ * Normalize webhook events to a JSON-safe format.
+ * Accepts: comma-separated string, JSON array, or null.
+ * Returns: JSON array string (for JSON column) or null.
+ */
+function normalizeWebhookEvents(value) {
+  if (!value) return null;
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === "string") {
+    const events = value.split(",").map((e) => e.trim()).filter(Boolean);
+    return events.length > 0 ? JSON.stringify(events) : null;
+  }
+  return null;
+}
+
 export function validateKbInput(input = {}) {
   const errors = {};
 
@@ -111,7 +126,7 @@ export function validateKbInput(input = {}) {
       kbName: input.kbName.trim(),
       description: input.description?.trim() || null,
       vectorResourceId: input.vectorResourceId ? Number(input.vectorResourceId) : null,
-      graphResourceId: null, // graph deferred in M2 — stored NULL (D11)
+      graphResourceId: input.graphResourceId ? Number(input.graphResourceId) : null,
       storageResourceId: input.storageResourceId ? Number(input.storageResourceId) : null,
       embeddingModelId: input.embeddingModelId ? Number(input.embeddingModelId) : null,
       chunkSize: Number(chunkSize),
@@ -124,7 +139,7 @@ export function validateKbInput(input = {}) {
       sourceConfig: input.sourceConfig || null,
       webhookUrl: input.webhookUrl || null,
       webhookSecret: input.webhookSecret || null,
-      webhookEvents: input.webhookEvents || null,
+      webhookEvents: normalizeWebhookEvents(input.webhookEvents),
       isActive: input.isActive !== false,
     },
   };
@@ -300,4 +315,99 @@ export async function removeKb(company, kbKey, actor = {}) {
     afterState: { kb_key: existing.kb_key },
     reason: actor.reason ?? "admin action",
   });
+}
+
+// Neo4j I/O caps — same budget as ingest/graph-extract.js so a stalled graph
+// can never hang an admin request.
+const GRAPH_DELETE_QUERY_TIMEOUT_MS = 20_000;
+const GRAPH_DELETE_CLOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve a promise or reject after `ms` — graph I/O must never hang a request.
+ * The losing promise keeps settling in the background; its rejection is
+ * handled by Promise.race, so no unhandled rejections.
+ */
+function withGraphTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Delete a KB's entities + relationships from the Neo4j knowledge graph.
+ * Uses the SAME graph connection the ingest pipeline resolves
+ * (getGraphConfig → company NEO4J_* config), so the button always cleans
+ * exactly what ingestion wrote. Best-effort like the rest of the graph
+ * pipeline: an unreachable graph returns `graphReachable: false` instead of
+ * failing the request, and the KB row itself is never touched.
+ *
+ * @param {Object} company
+ * @param {string} kbKey
+ * @returns {Promise<{ configured: boolean, graphReachable: boolean, nodesDeleted: number, relationshipsDeleted: number }>}
+ */
+export async function clearKbGraph(company, kbKey) {
+  // Resolve the same connection ingest uses.
+  const { getGraphConfig } = await import("../../query/graph.js");
+  const graph = getGraphConfig(company.company_key);
+  if (!graph) {
+    return { configured: false, graphReachable: false, nodesDeleted: 0, relationshipsDeleted: 0 };
+  }
+
+  let nodesDeleted = 0;
+  let relationshipsDeleted = 0;
+  let reachable = false;
+
+  try {
+    const neo4j = await import("neo4j-driver");
+    const driver = neo4j.default.driver(
+      graph.uri,
+      neo4j.default.auth.basic(graph.username, graph.password),
+      { connectionTimeout: 10_000, disableLosslessIntegers: true }
+    );
+    try {
+      const session = driver.session({
+        database: graph.database || "neo4j",
+        defaultAccessMode: neo4j.default.session.WRITE,
+      });
+      try {
+        // Count first (for the message + audit), then delete.
+        const countRes = await withGraphTimeout(
+          session.run(
+            "MATCH (e:Entity) WHERE e.kb_key = $kbKey " +
+            "OPTIONAL MATCH (e)-[r]-(neighbor) " +
+            "RETURN count(DISTINCT e) AS nodes, count(DISTINCT r) AS rels",
+            { kbKey }
+          ),
+          GRAPH_DELETE_QUERY_TIMEOUT_MS,
+          "Neo4j graph count"
+        );
+        const row = countRes.records[0];
+        nodesDeleted = row ? Number(row.get("nodes")) : 0;
+        relationshipsDeleted = row ? Number(row.get("rels")) : 0;
+        reachable = true;
+
+        if (nodesDeleted > 0) {
+          await withGraphTimeout(
+            session.run(
+              "MATCH (e:Entity) WHERE e.kb_key = $kbKey DETACH DELETE e",
+              { kbKey }
+            ),
+            GRAPH_DELETE_QUERY_TIMEOUT_MS,
+            "Neo4j graph delete"
+          );
+        }
+      } finally {
+        await withGraphTimeout(session.close(), GRAPH_DELETE_CLOSE_TIMEOUT_MS, "Neo4j session.close").catch(() => {});
+      }
+    } finally {
+      await withGraphTimeout(driver.close(), GRAPH_DELETE_CLOSE_TIMEOUT_MS, "Neo4j driver.close").catch(() => {});
+    }
+  } catch {
+    // Unreachable/timeout — report honestly; the KB row is untouched.
+    reachable = false;
+  }
+
+  return { configured: true, graphReachable: reachable, nodesDeleted, relationshipsDeleted };
 }

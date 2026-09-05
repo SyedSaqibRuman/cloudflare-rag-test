@@ -8,7 +8,8 @@
 import { useState, useCallback } from "react";
 import { listKbs, kbStatus, deleteKb, ingestKb, getKbProgress } from "../api";
 import SourcePagePicker from "./SourcePagePicker.jsx";
-import { Card, Button, Badge, Empty, StatCard, SkeletonCard, Spinner, Toast } from "../components/ui";
+import { Card, Button, Badge, Empty, StatCard, SkeletonCard, Spinner, Toast, InfoTip } from "../components/ui";
+import { getTermTooltip } from "../components/glossary";
 import { Popover, PopoverTrigger, PopoverContent, PopoverItem, PopoverSeparator } from "../components/ui/overlay";
 import { Pagination } from "../components/ui/pagination";
 import ScrollToTop from "../components/ui/ScrollToTop.jsx";
@@ -16,6 +17,7 @@ import { usePoll, useToast, usePagination } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
 import { useCompanies } from "../context";
 import KbModal from "../components/kb-modal";
+import { triggerNextStep } from "../components/NextStepPrompt";
 import { timeAgo, cx } from "../util";
 import { kbLifecycle } from "#shared/status.js";
 
@@ -35,11 +37,29 @@ export default function IngestionList({ navigate }) {
 
   const [selectedPages, setSelectedPages] = useState({});
   const [progress, setProgress] = useState({});
+  // KBs where ingest was recently triggered via the UI but the /status
+  // endpoint hasn't yet reported inProgress=true (fast-completing jobs).
+  const [recentlyStarted, setRecentlyStarted] = useState({});
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // Track which KBs were inProgress on the previous poll tick so we can
+  // detect completion and immediately refresh stats.
+  const wasInProgressRef = useCallback(() => {
+    const map = {};
+    for (const [key, s] of Object.entries(statuses)) {
+      if (s?.inProgress) map[key] = true;
+    }
+    return map;
+  }, [statuses]);
 
   const getScope = (key) => scopes[key] || { type: "all", limit: 100 };
   const setScope = (key, patch) => setScopes((prev) => ({ ...prev, [key]: { ...getScope(key), ...patch } }));
+
+  // Memoize modal callbacks to prevent re-rendering the Modal effect on every
+  // poll tick — the Modal's useEffect depends on onClose, and a new arrow
+  // function each render triggers a cleanup → focus() that closes native selects.
+  const closeCreate = useCallback(() => setCreateOpen(false), []);
+  const closeEdit = useCallback(() => setEditRow(null), []);
 
   const load = useCallback(async () => {
     if (!company) return;
@@ -76,14 +96,34 @@ export default function IngestionList({ navigate }) {
 
   const pollProgress = useCallback(async () => {
     if (!company || kbs.length === 0) return;
+
+    const prevInProgress = wasInProgressRef();
+    const justCompleted = [];
+
     const results = await Promise.allSettled(
       kbs.map(async (kb) => {
         const s = statuses[kb.kb_key];
-        if (!s?.inProgress) return null;
+        // Poll if: status says inProgress, recently triggered, or we already have
+        // progress data for this KB (need to detect completion).
+        const shouldPoll = s?.inProgress || recentlyStarted[kb.kb_key] || progress[kb.kb_key];
+        if (!shouldPoll) {
+          // KB was in progress on the previous tick but now it's not — it just finished.
+          if (prevInProgress[kb.kb_key]) {
+            justCompleted.push(kb.kb_key);
+          }
+          return null;
+        }
         const p = await getKbProgress(kb.kb_key, company);
+        // Detect completion: job just finished, or was never running in the first
+        // place (fast ingest completed before first poll).
+        const wasActive = s?.inProgress || recentlyStarted[kb.kb_key];
+        if (wasActive && !p?.running) {
+          justCompleted.push(kb.kb_key);
+        }
         return { key: kb.kb_key, progress: p };
       })
     );
+
     const map = {};
     for (const r of results) {
       if (r.status === "fulfilled" && r.value?.progress?.running) {
@@ -91,9 +131,51 @@ export default function IngestionList({ navigate }) {
       }
     }
     setProgress((prev) => ({ ...prev, ...map }));
-  }, [company, kbs, statuses]);
 
-  usePoll(pollProgress, 2000, [company, kbs, statuses]);
+    // Immediately refresh stats for KBs that just completed ingestion.
+    if (justCompleted.length > 0) {
+      const refreshed = await Promise.allSettled(
+        justCompleted.map(async (key) => {
+          const s = await kbStatus(key, company);
+          return { key, status: s };
+        })
+      );
+      setStatuses((prev) => {
+        const next = { ...prev };
+        for (const r of refreshed) {
+          if (r.status === "fulfilled") {
+            next[r.value.key] = r.value.status;
+            // Clear stale progress data for the completed KB.
+            setProgress((p) => {
+              const np = { ...p };
+              delete np[r.value.key];
+              return np;
+            });
+          }
+        }
+        return next;
+      });
+      // Clear recentlyStarted for completed KBs.
+      setRecentlyStarted((prev) => {
+        const next = { ...prev };
+        for (const key of justCompleted) delete next[key];
+        return next;
+      });
+      // Toast for each completed KB.
+      for (const key of justCompleted) {
+        const kb = kbs.find((k) => k.kb_key === key);
+        const name = kb?.kb_name || key;
+        // Use the refreshed status if available, else the existing one.
+        const s = refreshed.find((r) => r.status === "fulfilled" && r.value?.key === key)?.value?.status
+          ?? statuses[key];
+        const chunks = s?.lastIngestion?.chunksCreated ?? 0;
+        const docs = s?.lastIngestion?.documentsProcessed ?? 0;
+        notify(`✅ Ingestion complete for '${name}': ${docs} doc${docs === 1 ? "" : "s"}, ${chunks} chunk${chunks === 1 ? "" : "s"}.`);
+      }
+    }
+  }, [company, kbs, statuses, recentlyStarted, wasInProgressRef]);
+
+  usePoll(pollProgress, 2000, [company, kbs, statuses, recentlyStarted]);
 
   useHeaderActions(
     <div className="flex items-center justify-end gap-2">
@@ -129,6 +211,7 @@ export default function IngestionList({ navigate }) {
       scope = { scope: "all" };
     }
     setIngesting((prev) => ({ ...prev, [kb.kb_key]: true }));
+    setRecentlyStarted((prev) => ({ ...prev, [kb.kb_key]: true }));
     try {
       await ingestKb(kb.kb_key, company, scope);
       const label = type === "limit" ? `limit ${limit}` : type === "selected" ? `${(selectedPages[kb.kb_key] || []).length} pages` : "all";
@@ -160,6 +243,7 @@ export default function IngestionList({ navigate }) {
   }, 0);
   const activeCount = kbs.filter((kb) => kb.status === "active").length;
   const indexingCount = kbs.filter((kb) => kb.status === "indexing").length;
+  const errorCount = kbs.filter((kb) => kb.status === "error").length;
 
   // ── Client-side search + lifecycle filter over the current page ───────
   const filteredKbs = kbs.filter((kb) => {
@@ -243,11 +327,10 @@ export default function IngestionList({ navigate }) {
           <SkeletonCard rows={4} />
         ) : kbs.length === 0 ? (
           <Empty message="No knowledge bases yet. Create one to start ingesting content." />
-        ) : filteredKbs.length === 0 ? (
-          <Empty message={`No knowledge bases match ${statusFilter !== "all" ? `the “${statusFilter}” filter` : `“${search}”`}.`} />
         ) : (
           <div className="space-y-4">
-            {/* ── Search + lifecycle filter bar ─────────────────────── */}
+            {/* ── Search + lifecycle filter bar. Rendered whenever KBs exist
+                 so a no-match search can be cleared without reloading. ── */}
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative min-w-[12rem] flex-1">
                 <svg aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -280,6 +363,9 @@ export default function IngestionList({ navigate }) {
               </div>
             </div>
 
+            {filteredKbs.length === 0 ? (
+              <Empty message={`No knowledge bases match ${statusFilter !== "all" ? `the “${statusFilter}” filter` : `“${search}”`}.`} />
+            ) : (
             <div className="grid gap-4 lg:grid-cols-2">
             {filteredKbs.map((kb) => {
               const s = statuses[kb.kb_key];
@@ -361,15 +447,18 @@ export default function IngestionList({ navigate }) {
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       <span className="inline-flex min-w-0 items-center gap-1" title={`Embedding model`}>
                         <span className="uppercase tracking-wider">Embedding</span>
+                        <InfoTip content={getTermTooltip("embedding-model")} />
                         <span className="truncate text-slate-400">{shortenModel(kb.embedding_model_name)}</span>
                       </span>
                       <span className="inline-flex min-w-0 items-center gap-1" title={`Vector index: ${vectorIndex}`}>
                         <IconLayers />
+                        <InfoTip content={getTermTooltip("vector-index")} />
                         <span className="truncate text-slate-400">{vectorIndex}</span>
                       </span>
                       {storageLabel(kb) && (
                         <span className="inline-flex min-w-0 items-center gap-1" title={`Storage bucket: ${storageLabel(kb)}`}>
                           <IconBucket />
+                          <InfoTip content={getTermTooltip("object-storage")} />
                           <span className="truncate text-slate-400">{storageLabel(kb)}</span>
                         </span>
                       )}
@@ -377,9 +466,10 @@ export default function IngestionList({ navigate }) {
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="inline-flex items-center gap-1">
                         chunk <span className="text-slate-400">{kb.chunk_size}</span>/ overlap <span className="text-slate-400">{kb.chunk_overlap}</span>
+                        <InfoTip content={getTermTooltip("chunk-size")} />
                       </span>
-                      {kb.enable_hybrid_search ? <Badge tone="green">Hybrid ✓</Badge> : null}
-                      {kb.enable_graph_rag ? <Badge tone="indigo">GraphRAG ✓</Badge> : null}
+                      {kb.enable_hybrid_search ? <Badge tone="green">Hybrid ✓ <InfoTip content={getTermTooltip("hybrid-search")} /></Badge> : null}
+                      {kb.enable_graph_rag ? <Badge tone="indigo">GraphRAG ✓ <InfoTip content={getTermTooltip("graph-rag")} /></Badge> : null}
                       {lastRun?.durationMs != null && (
                         <span className="inline-flex items-center gap-1">
                           last <span className="text-slate-400">{(lastRun.durationMs / 1000).toFixed(1)}s</span>
@@ -390,27 +480,37 @@ export default function IngestionList({ navigate }) {
 
                   {/* ── Actions ──────────────────────────────────── */}
                   <div className="mt-auto flex items-center justify-between gap-2 pt-3">
-                    <div className="inline-flex">
+                    <Popover className="w-auto">
+                      <div className="inline-flex items-stretch">
+                      {/* Primary Ingest (main segment) */}
                       <Button
+                        variant="primary"
                         onClick={() => startIngestion(kb)}
                         disabled={ingesting[kb.kb_key]}
-                        className="rounded-r-none px-3 py-1 text-xs"
+                        className="h-9 rounded-l-lg rounded-r-none border-r border-indigo-600/60 px-5 text-xs"
                         title={`Ingest (${scope.type === "all" ? "all documents" : scope.type === "limit" ? `max ${scope.limit}` : "selected pages"})`}
                       >
                         {ingesting[kb.kb_key] ? <Spinner className="h-3 w-3" /> : "Ingest"}
                       </Button>
-                      <Popover>
-                        <PopoverTrigger asChild>
+                      {/* Chevron segment — same control, subtle divider */}
+                      <PopoverTrigger asChild>
                           <button
                             type="button"
                             disabled={ingesting[kb.kb_key]}
                             title="Ingest scope"
-                            className="inline-flex items-center rounded-r-lg border border-l-0 border-slate-600 bg-slate-800 px-1.5 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-200 disabled:opacity-50"
+                            aria-label="Ingest scope"
+                            className="inline-flex h-9 w-8 shrink-0 items-center justify-center rounded-r-lg bg-indigo-500 text-white transition-colors hover:bg-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:opacity-50"
                           >
-                            <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="currentColor"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" /></svg>
+                            <svg className="h-3 w-3" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" /></svg>
                           </button>
                         </PopoverTrigger>
-                        <PopoverContent align="start" side="top" sideOffset={6} className={`${scope.type === "selected" ? "min-w-[22rem]" : "min-w-[13rem]"} p-1`}>
+                      </div>
+                      <PopoverContent
+                        align="start"
+                        side="top"
+                        sideOffset={8}
+                        className={scope.type === "selected" ? "min-w-[22rem] p-1" : "w-48 p-1"}
+                      >
                           <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">Ingest scope</p>
                           <PopoverItem
                             onClick={() => setScope(kb.kb_key, { type: "all" })}
@@ -466,22 +566,22 @@ export default function IngestionList({ navigate }) {
                             </div>
                           )}
                         </PopoverContent>
-                      </Popover>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button variant="secondary" className="px-2 py-1 text-[11px]" onClick={() => setEditRow(kb)}>
+                    </Popover>
+                    <div className="flex items-center gap-2">
+                      <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => setEditRow(kb)}>
                         Edit
                       </Button>
-                      <Button variant="secondary" className="px-2 py-1 text-[11px]" onClick={() => navigate(`ingestion/kbs/${kb.kb_key}`)}>
+                      <Button variant="secondary" className="h-9 px-3 text-xs" onClick={() => navigate(`ingestion/kbs/${kb.kb_key}`)}>
                         Open
                       </Button>
                       <button
                         type="button"
                         title={`Delete ${kb.kb_key}`}
+                        aria-label={`Delete ${kb.kb_key}`}
                         onClick={() => remove(kb)}
-                        className="rounded p-1.5 text-slate-500 transition-colors hover:bg-rose-500/15 hover:text-rose-300"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-rose-500/15 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
                       >
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                         </svg>
                       </button>
@@ -491,6 +591,7 @@ export default function IngestionList({ navigate }) {
               );
             })}
             </div>
+            )}
           </div>
         )}
       </Card>
@@ -543,10 +644,11 @@ export default function IngestionList({ navigate }) {
         open={createOpen}
         row={null}
         company={company}
-        onClose={() => setCreateOpen(false)}
+        onClose={closeCreate}
         onSaved={async () => {
-          setCreateOpen(false);
+          closeCreate();
           notify("Knowledge base created.");
+          triggerNextStep("kb-created");
           await load();
         }}
       />
@@ -554,9 +656,9 @@ export default function IngestionList({ navigate }) {
         open={!!editRow}
         row={editRow}
         company={company}
-        onClose={() => setEditRow(null)}
+        onClose={closeEdit}
         onSaved={async () => {
-          setEditRow(null);
+          closeEdit();
           notify("Knowledge base updated.");
           await load();
         }}

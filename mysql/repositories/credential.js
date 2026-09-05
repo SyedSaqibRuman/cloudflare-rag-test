@@ -219,5 +219,32 @@ export const CredentialRepository = {
     const [result] = await pool.query(`DELETE FROM credentials WHERE id = ?`, [id]);
     return result.affectedRows > 0;
   },
+
+  /**
+   * Check if a model is allowed for a credential via credential_model_access.
+   * Returns { allowed: boolean, access?: object, reason?: string }.
+   */
+  async checkModelAccess(credentialId, modelId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT cma.id, cma.is_enabled, cma.rate_limit_per_min, cma.rate_limit_per_day,
+              cma.monthly_quota_tokens, cma.monthly_quota_used_tokens,
+              cma.is_default_for_category, cma.notes
+         FROM credential_model_access cma
+        WHERE cma.credential_id = ? AND cma.provider_model_id = ?`,
+      [credentialId, modelId]
+    );
+    if (!rows.length) {
+      return { allowed: false, reason: "No access grant found for this credential/model pair." };
+    }
+    const access = mapRow(rows[0]);
+    if (!access.is_enabled) {
+      return { allowed: false, access, reason: "Model access is disabled for this credential." };
+    }
+    if (access.monthly_quota_tokens && access.monthly_quota_used_tokens >= access.monthly_quota_tokens) {
+      return { allowed: false, access, reason: "Monthly token quota exceeded." };
+    }
+    return { allowed: true, access };
+  },
 };
 

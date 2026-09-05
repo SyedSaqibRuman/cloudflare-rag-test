@@ -3,7 +3,7 @@
 // slice of page state + callbacks; all data loading and handlers stay in
 // page.jsx. Extracted so the page file is just the stateful shell + cards.
 // --------------------------
-import { Button, Empty, Input, Modal, Select, Spinner, Toggle } from "../../components/ui";
+import { Button, Empty, Input, Modal, Select, Spinner, Toggle, ArrowRightIcon } from "../../components/ui";
 import { AuthFields, ResourceConfigFields } from "./fields";
 
 // -------- Add / edit credential --------
@@ -92,7 +92,7 @@ export function CredentialModal({
               ? "Credential key is immutable."
               : keyTouched
                 ? "Manual value — type in the name field to re-sync it."
-                : "Auto-generated from the name (lowercase, spaces → _)."}
+                : <>Auto-generated from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> _).</>}
           </p>
         </div>
         {environments?.length > 0 && (
@@ -357,7 +357,7 @@ export function ResourceModal({
             <p className="mt-1.5 text-[11px] text-slate-500">
               {resKeyTouched
                 ? "Manual key — type in the name field to re-sync it."
-                : "Key auto-generates from the name (lowercase, spaces → -)."}
+                : <>Key auto-generates from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> -).</>}
             </p>
           )}
         </div>

@@ -9,10 +9,41 @@ const CACHE_MAX_SIZE = 200;
 /** @type {Map<string, { value: any, expiry: number, company?: string }>} */
 const cache = new Map();
 
-export function getCacheKey(question, companyName, assistantKey = "") {
-  // The assistant scopes the answer persona (system prompt / model / KBs), so
-  // switching assistants must not serve stale cached answers.
-  const key = `${companyName || ""}:${assistantKey || ""}:${question}`;
+/**
+ * Generate a cache key that includes the full retrieval binding fingerprint.
+ *
+ * ADR-012 Phase 1: Cache key isolation.
+ * The key must encode every factor that can change the answer without
+ * changing the question text:
+ *   - companyName (tenant isolation)
+ *   - assistantKey (persona + model + KB binding)
+ *   - embeddingModel (different models = different vector spaces)
+ *   - vectorIndex (different indexes = different retrieval results)
+ *   - llmModel (different LLMs = different answers)
+ *   - question (the rewritten search query)
+ *
+ * When any of these changes, the cache key changes and stale answers
+ * from incompatible vector spaces or LLM models are never served.
+ *
+ * @param {string} question — the rewritten search query
+ * @param {string} companyName
+ * @param {string} [assistantKey=""]
+ * @param {object} [binding={}] — retrieval binding fingerprint
+ * @param {string} [binding.embeddingModel=""] — e.g. "@cf/baai/bge-base-en-v1.5"
+ * @param {string} [binding.vectorIndex=""] — e.g. "popularcert-index"
+ * @param {string} [binding.llmModel=""] — e.g. "@cf/meta/llama-3.1-8b-instruct-fp8"
+ * @returns {string} — MD5 hex digest
+ */
+export function getCacheKey(question, companyName, assistantKey = "", binding = {}) {
+  const parts = [
+    companyName || "",
+    assistantKey || "",
+    binding.embeddingModel || "",
+    binding.vectorIndex || "",
+    binding.llmModel || "",
+    question,
+  ];
+  const key = parts.join(":");
   return crypto.createHash("md5").update(key).digest("hex");
 }
 

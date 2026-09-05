@@ -16,14 +16,16 @@ import path from "path";
 import { load as cheerioLoad } from "cheerio";
 import mammoth from "mammoth";
 
-// pdf-parse is a CJS module — lazy-import to avoid ESM issues
-let pdfParse;
+// pdf-parse v2 is an ESM module exporting a PDFParse class (no default export,
+// and the old v1 `pdfParse(buffer)` call API is gone) — lazy-import so this
+// module loads with zero dependencies and parse errors stay local.
+let PDFParseClass;
 async function loadPdfParse() {
-  if (!pdfParse) {
+  if (!PDFParseClass) {
     const mod = await import("pdf-parse");
-    pdfParse = mod.default || mod;
+    PDFParseClass = mod.PDFParse || mod.default;
   }
-  return pdfParse;
+  return PDFParseClass;
 }
 
 const UPLOAD_DIR = "content";
@@ -81,10 +83,16 @@ async function readFileAsItem(filePath, companyName) {
 
   switch (ext) {
     case ".pdf": {
-      // PDF → extract text using pdf-parse
+      // PDF → extract text using pdf-parse v2 (`new PDFParse({ data }).getText()`)
       const buffer = fs.readFileSync(filePath);
-      const parsePdf = await loadPdfParse();
-      const pdfData = await parsePdf(buffer);
+      const PDFParse = await loadPdfParse();
+      const parser = new PDFParse({ data: buffer });
+      let pdfData;
+      try {
+        pdfData = await parser.getText();
+      } finally {
+        try { await parser.destroy(); } catch { /* best-effort worker cleanup */ }
+      }
       title = pdfData.info?.Title || title;
       // Convert extracted text to HTML paragraphs
       contentHtml = textToHtml(pdfData.text);

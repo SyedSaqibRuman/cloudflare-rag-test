@@ -39,6 +39,9 @@ const ASSISTANT = {
   enable_graph_context: true,
   primary_kb_id: 11,
   graph_resource_id: 22,
+  enable_function_calling: false,
+  tools: null,
+  assistant_variables: [],
 };
 const KB = { id: 11, vector_external_id: "kb-vector-index" };
 const GRAPH_RESOURCE = { id: 22, config: { database_name: "29de2844" } };
@@ -109,6 +112,8 @@ test("resolveAssistantOverrides maps the assistant into pipeline overrides", asy
       assistantKey: "support-bot",
       assistantName: "Support Bot",
       systemPrompt: "You are Support Bot.",
+      guardrailPrompt: null,
+      blockedTopics: null,
       variables: [],
       model: "@cf/meta/llama-3.1-8b-instruct-fp8",
       temperature: 0.2,
@@ -116,6 +121,8 @@ test("resolveAssistantOverrides maps the assistant into pipeline overrides", asy
       vectorIndex: "kb-vector-index",
       graphDatabase: "29de2844",
       enableGraph: true,
+      enableFunctionCalling: false,
+      tools: null,
     });
   } finally {
     restore();

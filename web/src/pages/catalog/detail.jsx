@@ -156,7 +156,7 @@ export function CatalogDetail({
         onProviderChanged={async () => {
           await loadDetail();
           try {
-            setProviders((await listProviders()).items ?? []);
+            setProviders((await listProviders({ perPage: 500 })).items ?? []);
           } catch {
             /* best-effort */
           }

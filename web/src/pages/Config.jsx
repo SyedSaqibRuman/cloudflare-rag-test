@@ -45,7 +45,7 @@ export default function Config() {
   const [storageResources, setStorageResources] = useState([]);
   const [graphResources, setGraphResources] = useState([]);
   const [resourcesNote, setResourcesNote] = useState(null);
-  // Company's gateway assistants — the selected one drives the chatbot.
+  // Company's gateway assistants — the selected one drives the ask API.
   const [assistants, setAssistants] = useState([]);
   const [assistantsNote, setAssistantsNote] = useState(null);
   const [activeTab, setActiveTab] = useState("general");
@@ -89,7 +89,7 @@ export default function Config() {
     let live = true;
     (async () => {
       try {
-        const result = await listProviders();
+        const result = await listProviders({ perPage: 500 });
         if (live) {
           setProviders(result.items ?? result);
           setCatalogNote(null);
@@ -178,7 +178,7 @@ export default function Config() {
       } catch {
         if (live) {
           setAssistants([]);
-          setAssistantsNote("Could not load assistants — the chatbot will use the company defaults.");
+          setAssistantsNote("Could not load assistants — the ask API will use the company defaults.");
         }
       }
     })();
@@ -326,8 +326,8 @@ export default function Config() {
     return opts;
   };
 
-  // Assistant select options — the selected assistant drives the chatbot's
-  // persona (system prompt / model / KB / graph) on the ask endpoints.
+  // Assistant select options — the selected assistant drives the ask API's
+  // persona (system prompt / model / KB / graph).
   const assistantOptions = () => {
     const opts = [{ value: "", label: "— No assistant (company defaults) —" }];
     for (const a of assistants) {
@@ -445,7 +445,7 @@ export default function Config() {
                   {assistantsNote && <p className="mt-1.5 text-xs text-amber-300">{assistantsNote}</p>}
                   {draft?.ASSISTANT_KEY && (
                     <p className="mt-1.5 text-xs text-slate-500">
-                      The chatbot will use this assistant's system prompt, model, knowledge bases and graph settings
+                      The ask API will use this assistant's system prompt, model, knowledge bases and graph settings
                       instead of the company defaults below.
                     </p>
                   )}

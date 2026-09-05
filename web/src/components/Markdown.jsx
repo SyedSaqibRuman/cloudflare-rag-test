@@ -60,7 +60,22 @@ export default function Markdown({ text }) {
   const blocks = [];
   let list = null;
   let block = null;
+  let codeBlock = null; // { lang, lines } when inside a fenced ``` block
   let key = 0;
+
+  const flushCodeBlock = () => {
+    if (!codeBlock) return;
+    const { lang, lines: codeLines } = codeBlock;
+    blocks.push(
+      <pre
+        key={key++}
+        className={`mb-2 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 p-3 text-[13px] leading-relaxed ${lang ? "language-" + lang : ""}`}
+      >
+        <code className="font-mono text-slate-200">{codeLines.join("\n")}</code>
+      </pre>
+    );
+    codeBlock = null;
+  };
 
   const flushBlock = () => {
     if (block) {
@@ -86,6 +101,22 @@ export default function Markdown({ text }) {
   };
 
   for (const line of lines) {
+    const fence = line.match(/^```(\w*)\s*$/);
+    if (fence) {
+      flushBlock();
+      flushList();
+      if (codeBlock) {
+        flushCodeBlock();
+      } else {
+        codeBlock = { lang: fence[1], lines: [] };
+      }
+      continue;
+    }
+    if (codeBlock) {
+      codeBlock.lines.push(line);
+      continue;
+    }
+
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
     const bullet = line.match(/^[-*]\s+(.*)$/);
     const numbered = line.match(/^\d+[.)]\s+(.*)$/);
@@ -127,6 +158,7 @@ export default function Markdown({ text }) {
   }
   flushBlock();
   flushList();
+  flushCodeBlock(); // unclosed fence at end of answer
 
   return <div className="break-words text-sm text-slate-200">{blocks}</div>;
 }

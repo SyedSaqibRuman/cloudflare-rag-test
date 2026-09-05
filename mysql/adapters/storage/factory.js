@@ -10,6 +10,7 @@ import { S3Adapter } from "./s3.js";
 export function createStoreAdapter(providerKey, credentials) {
   switch (providerKey) {
     case "cloudflare":
+    case "cloudflare_r2":
       return new CloudflareR2Adapter(credentials);
 
     case "aws":

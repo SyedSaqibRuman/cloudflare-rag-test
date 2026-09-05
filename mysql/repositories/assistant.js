@@ -49,14 +49,21 @@ export const AssistantRepository = {
 
   async create(companyId, input) {
     const pool = await getPool();
+    // Before inserting, hard-delete any soft-deleted row with the same key
+    // so the unique constraint doesn't block re-creation.
+    await pool.query(
+      `DELETE FROM assistants WHERE company_id = ? AND assistant_key = ? AND deleted_at IS NOT NULL`,
+      [companyId, input.assistantKey]
+    );
     const [result] = await pool.query(
       `INSERT INTO assistants
          (company_id, assistant_key, assistant_name, description,
           credential_id, model_id, model_key, system_prompt, assistant_variables,
+          guardrail_prompt, blocked_topics,
           temperature, max_tokens, enable_function_calling, enable_streaming,
           tools, primary_kb_id, kb_ids, enable_graph_context,
           graph_resource_id, is_active, is_public)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.assistantKey,
@@ -67,6 +74,8 @@ export const AssistantRepository = {
         input.modelKey ?? null,
         input.systemPrompt ?? null,
         input.variables?.length ? JSON.stringify(input.variables) : null,
+        input.guardrailPrompt ?? null,
+        input.blockedTopics ?? null,
         input.temperature ?? 0.7,
         input.maxTokens ?? 4096,
         input.enableFunctionCalling ?? true,
@@ -93,6 +102,8 @@ export const AssistantRepository = {
       modelId: "model_id",
       modelKey: "model_key",
       systemPrompt: "system_prompt",
+      guardrailPrompt: "guardrail_prompt",
+      blockedTopics: "blocked_topics",
       variables: "assistant_variables",
       temperature: "temperature",
       maxTokens: "max_tokens",

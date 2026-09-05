@@ -1,3 +1,4 @@
+import { forwardRef } from "react";
 import { cx, slugify } from "./helpers";
 
 // ------------------------------------------------------------------
@@ -48,12 +49,13 @@ export function IconButton({ title, className, children, ...props }) {
 // ------------------------------------------------------------------
 // Input
 // ------------------------------------------------------------------
-export function Input({ className, label, error, name, id, ...props }) {
+export const Input = forwardRef(function Input({ className, label, error, name, id, ...props }, ref) {
   const fieldId = id || (label ? slugify(label) : name);
   return (
     <label className="block">
       {label && <span className="block text-xs font-medium text-slate-400 mb-1.5">{label}</span>}
       <input
+        ref={ref}
         id={fieldId}
         name={name || fieldId}
         className={cx(
@@ -66,7 +68,7 @@ export function Input({ className, label, error, name, id, ...props }) {
       {error && <span className="block text-xs text-rose-400 mt-1">{error}</span>}
     </label>
   );
-}
+});
 
 // ------------------------------------------------------------------
 // Select

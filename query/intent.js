@@ -1,4 +1,50 @@
 import { buildResponses } from "./prompts.js";
+import { getConfig } from "../config/index.js";
+
+/** Escape a string so it can be used inside a RegExp as a literal substring. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Parse a newline-separated blocked-topics string ("topic A\ntopic B") into
+ * case-insensitive substring regexes. Unparseable lines are skipped.
+ */
+function parseBlockedTopics(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const regexes = [];
+  for (const line of raw.split("\n")) {
+    const topic = line.trim();
+    if (!topic) continue;
+    try {
+      regexes.push(new RegExp(escapeRegExp(topic), "i"));
+    } catch {
+      /* skip unparseable line */
+    }
+  }
+  return regexes;
+}
+
+/**
+ * True when the question contains any topic from a blocked-topics string.
+ * Shared by the company config check and the per-assistant guardrail check
+ * (an assistant's BLOCKED_TOPICS adds to — never replaces — company patterns).
+ */
+export const matchesBlockedTopics = (q, blockedTopics) =>
+  parseBlockedTopics(blockedTopics).some((p) => p.test(q));
+
+/**
+ * Parse a company's BLOCKED_TOPICS config into substring regexes.
+ * Best-effort — missing config or unknown companies yield nothing.
+ */
+function companyBlockedPatterns(companyName) {
+  if (!companyName) return [];
+  try {
+    return parseBlockedTopics(getConfig(companyName)?.BLOCKED_TOPICS);
+  } catch {
+    return [];
+  }
+}
 
 // --------------------------
 // REGEX PATTERNS
@@ -27,6 +73,13 @@ const BLOCKED_PATTERNS = [
   /write.*poem/i, /tell.*joke/i, /write.*story/i, /generate.*code/i,
   /\bmovie\b/i, /\bsong\b/i, /\brecipe\b/i,
   /^(test|testing|ping|hello world|dummy|sample|asdf|qwerty|foo|bar)$/i,
+  // Off-topic: code / programming requests (keep the assistant focused on
+  // certification topics, even when phrased as a "study" or "example" ask)
+  /write.*(code|program|script|function|class)/i,
+  /\b(create|build|make|generate)\b.*\b(code|program|script|function|class|app|application|website|game|software|calculator)\b/i,
+  /^(basic|simple|small|hello world)\s+.*\b(program|code|script)\b/i,
+  /\b(how do i|how to)\s+(write|create|build|make|code)\b.*\b(code|program|script|function|class|app|website|game)\b/i,
+  /\bprogramming\s+(help|tutorial|example|lesson|question)\b/i,
 ];
 
 const CONTACT_PATTERNS = [
@@ -65,7 +118,10 @@ export const isOfficeQuery = (q) => OFFICE_PATTERNS.some((p) => p.test(q));
 export const isHelpQuery = (q) => HELP_PATTERNS.some((p) => p.test(q));
 export const isIdentityQuery = (q) => IDENTITY_PATTERNS.some((p) => p.test(q));
 export const isContactQuery = (q) => CONTACT_PATTERNS.some((p) => p.test(q));
-export const isBusinessQuery = (q) => !BLOCKED_PATTERNS.some((p) => p.test(q));
+export const isBusinessQuery = (q, companyName = null) => {
+  if (BLOCKED_PATTERNS.some((p) => p.test(q))) return false;
+  return !companyBlockedPatterns(companyName).some((p) => p.test(q));
+};
 export const isDiscoveryQuery = (q) => DISCOVERY_PATTERNS.some((p) => p.test(q));
 
 // Strips greeting/intro filler, then checks if remainder is too short with no intent words.
@@ -94,7 +150,7 @@ export function checkFastPath(question, companyName, assistantName = null) {
   }
 
   if (isIdentityQuery(question)) return R.identity;
-  if (!isBusinessQuery(question)) return R.blocked;
+  if (!isBusinessQuery(question, companyName)) return R.blocked;
   if (isContactQuery(question)) return R.contact;
   if (isDiscoveryQuery(question)) return R.discovery;
   if (isOfficeQuery(question)) return R.office;

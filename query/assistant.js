@@ -1,5 +1,5 @@
 // --------------------------
-// ASSISTANT RESOLUTION — selected chatbot assistant → pipeline overrides
+// ASSISTANT RESOLUTION — selected assistant → pipeline overrides
 // When a company has ASSISTANT_KEY set in its config store, the ask pipeline
 // resolves that assistant (gateway MySQL row) and uses its persona settings —
 // system prompt, model, temperature, primary KB's vector index, and graph
@@ -38,8 +38,8 @@ export function isRunnableModel(modelKey) {
  *   assistantKey: string, assistantName?: string,
  *   systemPrompt?: string|null, variables?: Array<{key:string,value:string}>,
  *   model?: string|null, temperature?: number, maxTokens?: number,
- *   vectorIndex?: string|null, graphDatabase?: string|null,
- *   enableGraph?: boolean,
+ *   vectorIndex?: string|null, embeddingModel?: string|null,
+ *   graphDatabase?: string|null, enableGraph?: boolean,
  * }>}
  */
 export async function resolveAssistantOverrides(companyName) {
@@ -61,6 +61,10 @@ export async function resolveAssistantOverrides(companyName) {
       assistantKey,
       assistantName: assistant.assistant_name || null,
       systemPrompt: assistant.system_prompt || null,
+      // Per-assistant guardrails — override the company's config keys at ask
+      // time (guardrail prompt > company GUARDRAIL_PROMPT > built-in).
+      guardrailPrompt: assistant.guardrail_prompt || null,
+      blockedTopics: assistant.blocked_topics || null,
       variables: assistant.assistant_variables?.length ? assistant.assistant_variables.map((v) => ({ key: String(v.key), value: String(v.value) })) : [],
       // Catalog model_key (e.g. @cf/... or gpt-4o). The pipeline only executes
       // @cf/ models today — the runnable gate lives in answer.js.
@@ -70,13 +74,25 @@ export async function resolveAssistantOverrides(companyName) {
       vectorIndex: null,
       graphDatabase: null,
       enableGraph: Boolean(assistant.enable_graph_context),
+      // Function calling support — tools array is JSON-parsed from the DB column.
+      enableFunctionCalling: Boolean(assistant.enable_function_calling),
+      tools: assistant.tools ? (typeof assistant.tools === 'string' ? JSON.parse(assistant.tools) : assistant.tools) : null,
     };
 
-    // Primary KB → its vector index (the index the chatbot should search).
+    // Primary KB → its vector index (the index the assistant should search).
     // Mirrors the ingest resolution (kb.vector_external_id → config fallback).
+    // Also extract the embedding model for cache key isolation (ADR-012).
     if (assistant.primary_kb_id) {
       const kb = await KbRepository.findById(assistant.primary_kb_id);
-      if (kb) overrides.vectorIndex = kb.vector_external_id || null;
+      if (kb) {
+        overrides.vectorIndex = kb.vector_external_id || null;
+        // Embedding model: KB's binding → company config fallback.
+        if (kb.embedding_model_provider && kb.embedding_model_id) {
+          const { ModelRepository } = await import("../mysql/repositories.js");
+          const model = await ModelRepository.findById(kb.embedding_model_id);
+          if (model) overrides.embeddingModel = model.model_key || null;
+        }
+      }
     }
 
     // Graph resource → its database name (overrides the config NEO4J_DATABASE).
@@ -90,5 +106,28 @@ export async function resolveAssistantOverrides(companyName) {
     return overrides;
   } catch {
     return null; // best-effort — any failure means no assistant overrides
+  }
+}
+
+/**
+ * Check if the assistant's credential allows the assigned model.
+ * Uses credential_model_access table — the authorization gate.
+ * @param {string} companyName
+ * @param {object} assistant — resolved assistant overrides (must have assistantKey)
+ * @returns {Promise<{ allowed: boolean, reason?: string } | null>}
+ */
+export async function checkModelAccess(companyName, assistant) {
+  if (!assistant?.assistantKey) return null;
+  try {
+    const { CompanyRepository, AssistantRepository, CredentialRepository } = await import(
+      "../mysql/repositories.js"
+    );
+    const company = await CompanyRepository.findByKey(companyName);
+    if (!company) return null;
+    const full = await AssistantRepository.findByKey(company.id, assistant.assistantKey);
+    if (!full || !full.credential_id || !full.model_id) return null;
+    return await CredentialRepository.checkModelAccess(full.credential_id, full.model_id);
+  } catch {
+    return null; // best-effort — DB errors should not block the ask path
   }
 }

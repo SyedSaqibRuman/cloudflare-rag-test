@@ -14,4 +14,7 @@ export { AuditRepository } from "./audit.js";
 export { EndpointRepository } from "./endpoint.js";
 export { PricingRepository } from "./pricing.js";
 export { KbRepository } from "./kb.js";
+export { UsageRepository } from "./usage.js";
+export { WorkflowRepository } from "./workflow.js";
+export { WorkflowRunRepository } from "./workflow-run.js";
 export { CatalogImportRepository } from "./catalog-import.js";

@@ -54,5 +54,27 @@ export function createRegistry(companyName, kbKey = null, meta = null) {
     countDocuments() {
       return Object.keys(data).filter((k) => !k.startsWith("__")).length;
     },
+    /**
+     * Return all processed document entries (key → modifiedDate),
+     * excluding __meta / __metaFingerprint.
+     * @returns {Array<{ key: string, modifiedAt: string, type: string, slug: string }>}
+     */
+    listEntries() {
+      return Object.keys(data)
+        .filter((k) => !k.startsWith("__"))
+        .map((key) => {
+          // key format: "type-slug" (e.g. "post-my-blog-post", "page-contact")
+          const idx = key.indexOf("-");
+          const type = idx > 0 ? key.slice(0, idx) : "unknown";
+          const slug = idx > 0 ? key.slice(idx + 1) : key;
+          return { key, modifiedAt: data[key], type, slug };
+        });
+    },
+    /**
+     * Return the raw data map (for advanced consumers).
+     */
+    toJSON() {
+      return { ...data };
+    },
   };
 }

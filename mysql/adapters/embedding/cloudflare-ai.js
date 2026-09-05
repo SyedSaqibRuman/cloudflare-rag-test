@@ -10,7 +10,7 @@ export class CloudflareAIEmbeddingAdapter {
     this.accountId = credentials.accountId;
     this.apiToken = credentials.apiToken;
     this.modelKey = modelKey;
-    this.cf = new Cloudflare({ apiToken: this.apiToken });
+    this.cf = new Cloudflare({ apiToken: this.apiToken, accountId: this.accountId });
   }
 
   async embed(text) {
@@ -19,9 +19,13 @@ export class CloudflareAIEmbeddingAdapter {
     }
 
     const response = await this.cf.ai.run(this.modelKey, {
+      account_id: this.accountId,
       text: text,
     });
 
-    return response.data;
+    // CF SDK returns { data: [{shape, data}], shape, pooling, usage }
+    // Extract the raw embedding array for the first (and only) input text
+    const first = response.data?.[0];
+    return first?.data || first || response.data;
   }
 }

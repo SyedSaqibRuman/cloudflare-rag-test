@@ -68,6 +68,13 @@ export class AuthorizationError extends AppError {
   }
 }
 
+/** 403 — request origin not allowed. */
+export class ForbiddenError extends AppError {
+  constructor(message = "Forbidden.", code = "FORBIDDEN") {
+    super(message, 403, code);
+  }
+}
+
 /** 404 — requested entity does not exist. */
 export class NotFoundError extends AppError {
   constructor(message, code = "NOT_FOUND") {

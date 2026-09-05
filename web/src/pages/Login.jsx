@@ -50,10 +50,10 @@ export default function LoginPage() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-50" translate="no">
-                PopularCert Admin
+                PopularCert AI
               </h1>
               <p className="mt-1 text-sm text-slate-400">
-                Sign in to manage tenants, configuration, and pipelines
+                Build AI assistants that answer questions using your content
               </p>
             </div>
           </div>
@@ -123,11 +123,7 @@ export default function LoginPage() {
             {busy ? "Signing in…" : "Sign In"}
           </Button>
 
-          <p className="mt-4 text-center text-xs text-slate-500">
-            Credentials come from <code className="font-mono" translate="no">ADMIN_USERNAME</code> and{" "}
-            <code className="font-mono" translate="no">ADMIN_PASSWORD</code> in{" "}
-            <code className="font-mono" translate="no">.env</code>.
-          </p>
+
         </form>
       </main>
     </div>

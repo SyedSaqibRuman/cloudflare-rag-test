@@ -89,6 +89,8 @@ export default function Catalog({ navigate, path }) {
     <CatalogList
       search={cat.search}
       setSearch={cat.setSearch}
+      categoryFilter={cat.categoryFilter}
+      setCategoryFilter={cat.setCategoryFilter}
       providers={cat.providers}
       loading={cat.loading}
       error={cat.error}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { askStream, resetAskCache } from "../api";
+import { askStream, resetAskCache, listAssistants, getAskSuggestions } from "../api";
 import { useCompanies } from "../context";
 import { Button, Badge, ErrorBanner } from "../components/ui";
 import Markdown from "../components/Markdown";
@@ -7,6 +7,39 @@ import { useHeaderActions } from "../components/Layout";
 
 const fmtMs = (ms) => (ms == null ? "—" : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`);
 const fmtNum = (n) => n.toLocaleString();
+
+// Fallback starter questions — used when the per-company KB-generated
+// suggestions aren't available (no credentials, empty index, or API failure).
+const FALLBACK_STARTERS = [
+  "What services does this company offer?",
+  "How long does certification take?",
+  "What are the first steps to get started?",
+  "What documents or requirements are needed?",
+];
+
+// KB-generated starters cost a small-LLM call, so cache them per company in
+// localStorage for 24h instead of regenerating on every page load.
+const STARTERS_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+function loadCachedStarters(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const { ts, questions } = JSON.parse(raw);
+    if (!ts || Date.now() - ts > STARTERS_CACHE_TTL) return null;
+    return Array.isArray(questions) && questions.length ? questions : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedStarters(key, questions) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), questions }));
+  } catch {
+    /* storage full/unavailable — cache is best-effort */
+  }
+}
 
 export default function AskConsole() {
   const { company, companies } = useCompanies();
@@ -19,9 +52,12 @@ export default function AskConsole() {
   const [live, setLive] = useState(null);
   const [last, setLast] = useState(null);
   const [session, setSession] = useState({ requests: 0, tokens: 0, ttfbSum: 0, ttfbCount: 0 });
+  const [assistants, setAssistants] = useState([]);
+  const [selectedAssistant, setSelectedAssistant] = useState("");
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
+  const [starters, setStarters] = useState(FALLBACK_STARTERS);
   const startRef = useRef(0);
   const firstTokenRef = useRef(null);
   const tokenCountRef = useRef(0);
@@ -32,15 +68,56 @@ export default function AskConsole() {
 
   useEffect(() => {
       setApiKey(localStorage.getItem(`ask-api-key:${company || ""}`) || "");
+      setSelectedAssistant(""); // reset when company changes
     }, [company]);
+
+    // Load assistants for the selected company
+    useEffect(() => {
+      if (!company) { setAssistants([]); return; }
+      listAssistants(company).then((r) => setAssistants(r.items ?? [])).catch(() => setAssistants([]));
+    }, [company]);
+
+    // Load KB-generated starter questions (cached 24h per company, fallback
+    // static). Re-runs when the API key changes (debounced) so key-gated
+    // companies get KB-aware starters once the user pastes their key.
+    useEffect(() => {
+      if (!company) {
+        setStarters(FALLBACK_STARTERS);
+        return;
+      }
+      const cacheKey = `ask-starters:${company}`;
+      const cached = loadCachedStarters(cacheKey);
+      if (cached) {
+        setStarters(cached);
+        return;
+      }
+      setStarters(FALLBACK_STARTERS); // show static instantly, upgrade when KB questions arrive
+      let cancelled = false;
+      const timer = setTimeout(() => {
+        getAskSuggestions(company, apiKey || undefined)
+          .then((questions) => {
+            if (cancelled) return;
+            const list = Array.isArray(questions) && questions.length ? questions.slice(0, 4) : FALLBACK_STARTERS;
+            setStarters(list);
+            if (list !== FALLBACK_STARTERS) saveCachedStarters(cacheKey, list);
+          })
+          .catch(() => {
+            if (!cancelled) setStarters(FALLBACK_STARTERS);
+          });
+      }, 600);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }, [company, apiKey]);
 
     const setApiKeyForCompany = (value) => {
       setApiKey(value);
       localStorage.setItem(`ask-api-key:${company || ""}`, value);
     };
 
-  const send = async () => {
-    const question = input.trim();
+  const send = async (override) => {
+    const question = (override ?? input).trim();
     if (!question || streaming) return;
     if (!company) {
       setError("Select a company in the sidebar before asking a question.");
@@ -75,6 +152,7 @@ export default function AskConsole() {
         history,
         company,
         apiKey: apiKey || undefined,
+        assistantKey: selectedAssistant || undefined,
         signal: controller.signal,
         onToken: (token) => {
           if (!started) {
@@ -161,45 +239,24 @@ export default function AskConsole() {
   };
 
   const avgTtfb = session.ttfbCount ? session.ttfbSum / session.ttfbCount : null;
-  const metrics = (
-    <div className="hidden items-center gap-2 xl:flex" title="Streaming metrics">
-      {(live || last) && (
-        <Badge tone={live ? "indigo" : "slate"} className="tabular-nums">
-          {live ? (
-            <>
-              <span className="text-slate-400">TTFB</span> {fmtMs(live.ttfbMs)}
-              <span className="text-slate-400">·</span> {fmtNum(live.tokens)} tok
-            </>
-          ) : (
-            <>
-              <span className="text-slate-400">TTFB</span> {fmtMs(last.ttfbMs)}
-              <span className="text-slate-400">·</span> {fmtMs(last.totalMs)}
-              <span className="text-slate-400">·</span> {fmtNum(last.tokens)} tok
-            </>
-          )}
-        </Badge>
-      )}
-      {session.requests > 0 && (
-        <Badge tone="cyan" className="tabular-nums">
-          <span className="text-slate-400">Σ</span> {session.requests} req · {fmtNum(session.tokens)} tok · avg {fmtMs(avgTtfb)}
-          <button
-            type="button"
-            onClick={resetSession}
-            title="Reset session stats"
-            aria-label="Reset session stats"
-            className="ml-0.5 rounded-full px-1 text-slate-500 transition-colors hover:bg-slate-700 hover:text-slate-100"
-          >
-            ×
-          </button>
-        </Badge>
-      )}
-    </div>
-  );
+
 
   useHeaderActions(
     <div className="flex items-center justify-end gap-2">
-      {metrics}
       <Badge tone={company ? "green" : "amber"}>{company ? `Company: ${company}` : "No company selected"}</Badge>
+      {assistants.length > 0 && (
+        <select
+          value={selectedAssistant}
+          onChange={(e) => setSelectedAssistant(e.target.value)}
+          className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          title="Select an assistant persona (optional)"
+        >
+          <option value="">Default assistant</option>
+          {assistants.map((a) => (
+            <option key={a.id} value={a.assistant_key}>{a.assistant_name}</option>
+          ))}
+        </select>
+      )}
       {company && (
         <input
           type="password"
@@ -231,6 +288,42 @@ export default function AskConsole() {
 
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
+      {/* Metrics bar — shown below header when data is available */}
+      {(live || last || session.requests > 0) && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {(live || last) && (
+            <Badge tone={live ? "indigo" : "slate"} className="tabular-nums">
+              {live ? (
+                <>
+                  <span className="text-slate-400">TTFB</span> {fmtMs(live.ttfbMs)}
+                  <span className="text-slate-400">·</span> {fmtNum(live.tokens)} tok
+                </>
+              ) : (
+                <>
+                  <span className="text-slate-400">TTFB</span> {fmtMs(last.ttfbMs)}
+                  <span className="text-slate-400">·</span> {fmtMs(last.totalMs)}
+                  <span className="text-slate-400">·</span> {fmtNum(last.tokens)} tok
+                </>
+              )}
+            </Badge>
+          )}
+          {session.requests > 0 && (
+            <Badge tone="cyan" className="tabular-nums">
+              <span className="text-slate-400">Σ</span> {session.requests} req · {fmtNum(session.tokens)} tok · avg {fmtMs(avgTtfb)}
+              <button
+                type="button"
+                onClick={resetSession}
+                title="Reset session stats"
+                aria-label="Reset session stats"
+                className="ml-0.5 rounded-full px-1 text-slate-500 transition-colors hover:bg-slate-700 hover:text-slate-100"
+              >
+                ×
+              </button>
+            </Badge>
+          )}
+        </div>
+      )}
+
       <div role="log" aria-live="polite" className="flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/70 p-5">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
@@ -241,6 +334,24 @@ export default function AskConsole() {
             <p className="mt-1 max-w-sm text-xs text-slate-500">
               Questions are answered using the company's vector knowledge base, hybrid search, and its configured LLM.
             </p>
+            {company && (
+              <div className="mt-6">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Try asking</p>
+                <div className="mt-2 flex max-w-md flex-wrap justify-center gap-1.5">
+                  {starters.map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      onClick={() => send(q)}
+                      disabled={streaming}
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-left text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-5">
@@ -279,22 +390,6 @@ export default function AskConsole() {
                       </div>
                     )}
 
-                    {msg.matches?.length > 0 && msg.content !== "" && (
-                      <div className="mt-2 border-t border-slate-800 pt-2.5">
-                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Matches ({msg.matches.length})</p>
-                        <ol className="space-y-1">
-                          {msg.matches.map((m, mi) => (
-                            <li key={mi} className="flex items-baseline gap-2 text-xs text-slate-400">
-                              <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-300">
-                                {typeof m.score === "number" ? m.score.toFixed(2) : "—"}
-                              </span>
-                              <span className="line-clamp-1">{m.metadata?.title || m.id || "Untitled"}</span>
-                            </li>
-                          ))}
-                        </ol>
-                      </div>
-                    )}
-
                     {msg.graph?.cypher && msg.content !== "" && (
                       <div className="mt-2 border-t border-slate-800 pt-2.5">
                         <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Graph Knowledge</p>
@@ -313,8 +408,9 @@ export default function AskConsole() {
                             <button
                               key={qi}
                               type="button"
-                              onClick={() => setInput(q)}
-                              className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-left text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                              onClick={() => send(q)}
+                              disabled={streaming}
+                              className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-left text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200 disabled:cursor-not-allowed disabled:opacity-60"
                             >
                               {q}
                             </button>
@@ -353,7 +449,7 @@ export default function AskConsole() {
               Stop
             </Button>
           ) : (
-            <Button onClick={send} disabled={!input.trim() || !company}>
+            <Button onClick={() => send()} disabled={!input.trim() || !company}>
               Send
             </Button>
           )}

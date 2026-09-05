@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "node:crypto";
 import rateLimit from "express-rate-limit";
 import { askQuestion, askQuestionStream } from "../query/index.js";
+import { generateStarterQuestions } from "../query/suggestions.js";
 import { createStreamTransport } from "../query/stream-contract.js";
 import { clearCompanyCache } from "../query/cache.js";
 import { getCompanyConfig } from "../config/index.js";
@@ -84,7 +85,7 @@ export async function askJsonHandler(pipeline, req, res) {
   const abortController = new AbortController();
   req.on("close", () => abortController.abort());
   try {
-    const { question, history = [] } = req.body;
+    const { question, history = [], assistantKey } = req.body;
 
     if (!question?.trim()) {
       return res.status(400).json({ success: false, error: "Question is required" });
@@ -94,9 +95,27 @@ export async function askJsonHandler(pipeline, req, res) {
       return res.status(400).json({ success: false, error: "History must be an array" });
     }
 
-    const result = await pipeline.askQuestion(question, history, req.companyName, {
-      signal: abortController.signal,
-    });
+    // Temporarily override ASSISTANT_KEY if provided
+    let prevKey = null;
+    if (assistantKey) {
+      const { updateConfig, getCompanyConfig } = await import("../config/index.js");
+      prevKey = getCompanyConfig(req.companyName)?.ASSISTANT_KEY;
+      await updateConfig(req.companyName, { ASSISTANT_KEY: assistantKey });
+    }
+
+    let result;
+    try {
+      result = await pipeline.askQuestion(question, history, req.companyName, {
+        signal: abortController.signal,
+      });
+    } finally {
+      // Restore previous ASSISTANT_KEY
+      if (assistantKey) {
+        const { updateConfig } = await import("../config/index.js");
+        const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
+        await updateConfig(req.companyName, restore);
+      }
+    }
     // Client gone before the answer landed — nothing to write to.
     if (abortController.signal.aborted || res.destroyed) return;
     return res.json({ success: true, ...result });
@@ -113,7 +132,7 @@ export async function askJsonHandler(pipeline, req, res) {
 export async function askStreamHandler(pipeline, req, res) {
   let transport = null;
   try {
-    const { question, history = [] } = req.body;
+    const { question, history = [], assistantKey } = req.body;
 
     // --------------------------
     // 🔹 VALIDATION
@@ -152,9 +171,27 @@ export async function askStreamHandler(pipeline, req, res) {
     });
 
     // --------------------------
+    // 🔹 ASSISTANT OVERRIDE
+    // --------------------------
+    let prevKey = null;
+    if (assistantKey) {
+      const { updateConfig, getCompanyConfig } = await import("../config/index.js");
+      prevKey = getCompanyConfig(req.companyName)?.ASSISTANT_KEY;
+      await updateConfig(req.companyName, { ASSISTANT_KEY: assistantKey });
+    }
+
+    // --------------------------
     // 🔹 EXECUTE STREAM
     // --------------------------
-    await pipeline.askQuestionStream(question, history, transport, req.companyName);
+    try {
+      await pipeline.askQuestionStream(question, history, transport, req.companyName);
+    } finally {
+      if (assistantKey) {
+        const { updateConfig } = await import("../config/index.js");
+        const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
+        await updateConfig(req.companyName, restore);
+      }
+    }
 
     // --------------------------
     // 🔹 FINISH STREAM
@@ -189,6 +226,22 @@ export async function askStreamHandler(pipeline, req, res) {
 }
 
 // --------------------------
+// GET /ask/suggestions — per-company starter questions for the Test AI empty
+// state. Runs the same company + per-company API-key gates as /ask and sits
+// behind the AI limiter (each call costs one small-LLM request). Best-effort:
+// an empty index or missing credentials returns { questions: [] }.
+// --------------------------
+export async function askSuggestionsHandler(req, res) {
+  try {
+    const questions = await generateStarterQuestions(req.companyName);
+    return res.json({ success: true, questions });
+  } catch (err) {
+    console.error("❌ /ask/suggestions Error:", err);
+    return res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+}
+
+// --------------------------
 // POST /ask/reset — conversation reset for one company
 // Clears the in-memory answer cache for this company so the next question
 // re-runs the full RAG pipeline (no cached answers, no stale context). Gated
@@ -207,6 +260,7 @@ export function createAskRouter({ pipeline = { askQuestion, askQuestionStream } 
   const router = express.Router();
   router.post("/ask", requireCompany, requireAskApiKey, aiLimiter, (req, res) => askJsonHandler(pipeline, req, res));
   router.post("/ask-stream", requireCompany, requireAskApiKey, aiLimiter, (req, res) => askStreamHandler(pipeline, req, res));
+  router.get("/ask/suggestions", requireCompany, requireAskApiKey, aiLimiter, askSuggestionsHandler);
   router.post("/ask/reset", requireCompany, requireAskApiKey, resetCacheHandler);
   return router;
 }

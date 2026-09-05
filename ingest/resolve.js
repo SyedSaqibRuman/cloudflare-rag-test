@@ -21,7 +21,7 @@ import {
   resolveEmbeddingModel,
 } from "../mysql/services/provider-connection-resolver.js";
 import { decryptCredential } from "../mysql/services/credential-service.js";
-import { CredentialRepository } from "../mysql/repositories.js";
+import { CredentialRepository, ResourceRepository } from "../mysql/repositories.js";
 
 // ------------------------------------------------------------------
 // PUBLIC: resolveKbAdapters
@@ -41,12 +41,15 @@ export async function resolveKbAdapters(kb, company, companyName) {
   // 🔹 1. Storage adapter (KB's storage_resource_id → provider credential → adapter)
   if (kb.storage_resource_id) {
     try {
-      const conn = await resolveResourceConnection(kb.storage_resource_id);
+      const resourceRow = await ResourceRepository.findById(kb.storage_resource_id);
+      if (!resourceRow) throw new Error(`Resource #${kb.storage_resource_id} not found`);
+      const conn = await resolveResourceConnection(resourceRow);
+      const normCreds = normalizeCredential(conn.credentials);
       result.store = createStoreAdapter(conn.providerKey, {
-        ...conn.credentials,
+        ...normCreds,
         companyName,
         bucketName:
-          conn.credentials.bucketName || kb.storage_external_id || null,
+          normCreds.bucketName || kb.storage_external_id || null,
       });
     } catch (err) {
       console.warn(`⚠️ Storage adapter resolution failed: ${err.message}`);
@@ -64,7 +67,7 @@ export async function resolveKbAdapters(kb, company, companyName) {
         modelInfo.provider.id
       );
       const decryptedCred = cred
-        ? decryptCredential(cred.encrypted_credentials)
+        ? normalizeCredential(decryptCredential(cred.encrypted_credentials))
         : {};
 
       result.embedding = createEmbeddingAdapter(
@@ -82,13 +85,16 @@ export async function resolveKbAdapters(kb, company, companyName) {
   //    embedding generation without hardcoding a specific AI provider.
   if (kb.vector_resource_id) {
     try {
-      const conn = await resolveResourceConnection(kb.vector_resource_id);
+      const resourceRow = await ResourceRepository.findById(kb.vector_resource_id);
+      if (!resourceRow) throw new Error(`Resource #${kb.vector_resource_id} not found`);
+      const conn = await resolveResourceConnection(resourceRow);
+      const normCreds = normalizeCredential(conn.credentials);
       result.vector = createVectorAdapter(
         conn.providerKey,
         {
-          ...conn.credentials,
+          ...normCreds,
           vectorIndexName:
-            conn.credentials.vectorIndexName || kb.vector_external_id || null,
+          normCreds.vectorIndexName || kb.vector_external_id || null,
           embeddingModel: kb.model_key || null,
           companyName,
         },
@@ -146,6 +152,32 @@ export function resolveLegacyAdapters(companyName, config) {
   );
 
   return { store, embedding, vector };
+}
+
+// ------------------------------------------------------------------
+// HELPER: normalizeCredential
+// ------------------------------------------------------------------
+
+/**
+ * Normalize snake_case credential fields to camelCase.
+ * Gateway credentials store fields as `api_token`, `account_id`, etc.
+ * but adapters expect `apiToken`, `accountId`, etc.
+ * @param {Object} cred
+ * @returns {Object}
+ */
+function normalizeCredential(cred) {
+  if (!cred || typeof cred !== "object") return cred || {};
+  const map = {
+    api_token: "apiToken",
+    account_id: "accountId",
+    access_key_id: "accessKeyId",
+    secret_access_key: "secretAccessKey",
+  };
+  const out = {};
+  for (const [k, v] of Object.entries(cred)) {
+    out[map[k] || k] = v;
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------

@@ -572,8 +572,7 @@ router.delete(
       // assistants.credential_id is a NOT-NULL RESTRICT FK, so a credential
       // referenced by an assistant can never be hard-deleted underneath it.
       // Without force that's a refusal with a clear message; with force the
-      // referencing assistants are hard-deleted first (audited per row —
-      // chatbots cascade on assistant delete).
+      // referencing assistants are hard-deleted first (audited per row).
       const assistantBlockers = credsToPurge.length
         ? await AssistantRepository.listByCredentialIds(credsToPurge.map((c) => c.id))
         : [];

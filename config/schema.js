@@ -19,9 +19,15 @@ const URL_KEYS = ["BASE_URL", "CONTACT_US_URL", "LOCATIONS_URL", "SERVICES_URL"]
 const STRING_KEYS = ["CONSULTANT_NAME", "COMPANY_NAME"];
 const PROMPT_KEYS = ["SYSTEM_PROMPT"];
 
+/** Customizable topic guardrails. GUARDRAIL_PROMPT is appended to the system
+ * message (empty string = built-in default guardrail); BLOCKED_TOPICS is a
+ * newline-separated list of keywords/phrases that are refused up-front by the
+ * intent fast-path before any AI call is made. */
+const GUARDRAIL_KEYS = ["GUARDRAIL_PROMPT", "BLOCKED_TOPICS"];
+
 const RESOURCE_KEYS = ["VECTOR_INDEX", "R2_BUCKET_NAME"];
 
-/** Selected chatbot assistant (gateway assistants.assistant_key) — the ask
+/** Selected assistant (gateway assistants.assistant_key) — the ask
  * pipeline resolves this assistant and uses its system prompt / model /
  * temperature / KB / graph settings instead of the raw company defaults. */
 const ASSISTANT_KEYS = ["ASSISTANT_KEY"];
@@ -52,6 +58,7 @@ export const COMPANY_KEYS = [
   ...URL_KEYS,
   ...STRING_KEYS,
   ...PROMPT_KEYS,
+  ...GUARDRAIL_KEYS,
   ...RESOURCE_KEYS,
   ...ASSISTANT_KEYS,
   ...CREDENTIAL_KEYS,
@@ -59,7 +66,7 @@ export const COMPANY_KEYS = [
   ...PROVIDER_KEY,
 ];
 
-export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, RESOURCE_KEYS, ASSISTANT_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, GUARDRAIL_KEYS, RESOURCE_KEYS, ASSISTANT_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
 
 /**
  * Sectioned grouping of company config keys, used by the API (GET /config) and
@@ -71,6 +78,7 @@ export const CONFIG_SECTIONS = [
   { section: "MODELS", keys: [...PROVIDER_KEY, ...MODEL_KEYS, ...DIMENSION_KEYS] },
   { section: "STORAGE", keys: RESOURCE_KEYS },
   { section: "ASSISTANT", keys: ASSISTANT_KEYS },
+  { section: "GUARDRAIL", keys: GUARDRAIL_KEYS },
   { section: "CREDENTIALS", keys: CREDENTIAL_KEYS },
 ];
 
@@ -130,6 +138,8 @@ export const DEFAULT_COMPANY = {
   RERANKING_MODEL: "@cf/baai/bge-reranker-base",
   VECTOR_INDEX: "",
   R2_BUCKET_NAME: "",
+  GUARDRAIL_PROMPT: "",
+  BLOCKED_TOPICS: "",
   SYSTEM_PROMPT: `You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}. Do not deny being an AI if asked.
 
 ## Rules
