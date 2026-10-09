@@ -1,7 +1,16 @@
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { runPipeline } from "../answer.js";
 import { runtimeConfig, getDefaultCompanyConfig } from "../../config/index.js";
+import { closePool } from "../../mysql/pool.js";
+
+// runPipeline best-effort logs usage via the lazy MySQL pool (logUsage in
+// answer.js). When .env has live MySQL creds this opens a real pooled socket
+// that otherwise keeps the process alive after the last test — close it so the
+// suite exits cleanly. No-op when the pool was never opened.
+after(async () => {
+  await closePool();
+});
 
 if (!Object.keys(runtimeConfig.COMPANIES).length) {
   runtimeConfig.COMPANIES.testco = getDefaultCompanyConfig();
@@ -217,5 +226,58 @@ describe("runPipeline", () => {
 
     assert.deepEqual(tokens, ["Hello", " world"]);
     assert.equal(result.answer, "Hello world");
+  });
+
+  // --------------------------
+  // MODEL-ACCESS GATE
+  // The gate only applies to a RUNNABLE assistant model — the one the pipeline
+  // actually executes. A non-runnable catalog model falls back to the company's
+  // own LLM, so gating it would deny (and blank) an answer that never needed
+  // that credential. Regression for the Test AI page's blank responses.
+  // --------------------------
+  it("denies an ask when the runnable assistant model has no access grant", async () => {
+    let llmCalled = false;
+    const result = await runPipeline({
+      question: "gate denial",
+      companyName: "testco",
+      llmCall: async () => { llmCalled = true; return { response: "should not reach" }; },
+      steps: {
+        ...makeSteps({
+          resolveAssistantOverrides: async () => ({
+            assistantKey: "asst-1",
+            model: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          }),
+        }),
+        checkModelAccess: async () => ({ allowed: false, reason: "No access grant found for this credential/model pair." }),
+      },
+    });
+
+    assert.equal(llmCalled, false);
+    assert.match(result.answer, /Model access denied/);
+    assert.equal(result.denied, true);
+  });
+
+  it("skips the gate for a non-runnable assistant model (company LLM answers)", async () => {
+    let gateChecked = false;
+    let llmCalled = false;
+    const result = await runPipeline({
+      question: "gate skipped",
+      companyName: "testco",
+      llmCall: async () => { llmCalled = true; return { response: "A class is a blueprint." }; },
+      steps: {
+        ...makeSteps({
+          resolveAssistantOverrides: async () => ({
+            assistantKey: "muse",
+            model: "poolside/laguna-s-2.1:free",
+          }),
+        }),
+        checkModelAccess: async () => { gateChecked = true; return { allowed: false, reason: "nope" }; },
+      },
+    });
+
+    assert.equal(gateChecked, false);
+    assert.equal(llmCalled, true);
+    assert.equal(result.answer, "A class is a blueprint.");
+    assert.equal(result.denied, undefined);
   });
 });

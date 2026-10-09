@@ -77,7 +77,9 @@ Body: `{ credentialId? | providerKey(+credentialKey?+environmentKey?), model?, m
 Body analogous with `texts:string[]` → vector arrays normalized per executor translators.
 
 ### GET /kbs/options
-→ `options:{vectorResources[], storageResources[], graphResources[], embeddingModels[], liveVectorResources[], liveStorageResources[]}` mixing registry rows + real account resources.
+→ `options:{vectorResources[], incapableVectorResources[], storageResources[], graphResources[], embeddingModels[], availableEmbeddingModels[], unavailableEmbeddingModels[], liveVectorResources[], liveStorageResources[]}` mixing registry rows + real account resources.
+
+`availableEmbeddingModels` is what the wizard's Embedding Model dropdown renders: a model is offered only when its provider has an embedding adapter **and** the company holds an active credential for it (`shared/embedding-capability.js` — the catalog is global, so the raw `embeddingModels` list includes providers the tenant can't call, which would otherwise fail at ingest with "Unsupported embedding provider" or a 401). `unavailableEmbeddingModels` lets the UI say how many are hidden and why.
 
 ### Other groups
 providers(models nested,endpoints,pricing,import) · credentials(lifecycle+verify+rotate+model-access) · resources(provision/live-list) · kbs operations · assistants CRUD · ingestion control · health — paths inventoried in [[Routes Map]]; field-level detail consult openapi.json or handler source before coding against them.

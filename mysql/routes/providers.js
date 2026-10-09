@@ -10,6 +10,7 @@ import {
   CredentialRepository,
   ResourceRepository,
   AssistantRepository,
+  KbRepository,
   AuditRepository,
 } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
@@ -316,6 +317,41 @@ router.delete(
   })
 );
 
+// DELETE /gateway/providers/:key/models — bulk delete EVERY catalog model of
+// the provider ("Delete All Models"). Pricing and credential_model_access
+// rows CASCADE with each model, so tenant grants for the provider disappear
+// with them. Audited as one entry with the removed count.
+router.delete(
+  "/providers/:key/models",
+  wrap(async (req, res) => {
+    const provider = await Registry.getProvider(req.params.key);
+    if (!provider) {
+      return res.status(404).json({ success: false, error: `Unknown provider '${req.params.key}'.` });
+    }
+    const removed = await ModelRepository.removeByProvider(provider.id);
+    Registry.invalidateRegistry();
+
+    await AuditRepository.log({
+      companyId: null,
+      ...actorFromReq(req),
+      action: "provider.models.bulk_deleted",
+      entityType: "provider",
+      entityId: provider.id,
+      afterState: { provider_key: req.params.key, models_removed: removed },
+      reason: "catalog update (bulk delete all models)",
+      isSensitive: false,
+    });
+
+    return res.json({
+      success: true,
+      removed,
+      message: removed
+        ? `${removed} model${removed === 1 ? "" : "s"} deleted for '${req.params.key}'.`
+        : `No models to delete for '${req.params.key}'.`,
+    });
+  })
+);
+
 // Provider category/auth-type ENUMs live in shared/catalog-enums.js (mirror
 // the providers.primary_service_category + providers.auth_type columns).
 
@@ -614,6 +650,9 @@ router.delete(
       }
       const resourcesToPurge = force ? resources : resources.filter((r) => r.deleted_at);
       for (const row of resourcesToPurge) {
+        // Force can't be blocked by KB bindings, so clear them instead — no KB
+        // is left with a dangling resource pointer ("Resource #N not found").
+        const unboundKbs = await KbRepository.clearResourceBinding(row.id);
         await ResourceRepository.removePermanent(row.id);
         await AuditRepository.log({
           companyId: row.company_id,
@@ -621,7 +660,7 @@ router.delete(
           action: "resource.deleted",
           entityType: "provider_resource",
           entityId: row.id,
-          afterState: { resource_key: row.resource_key, provider_key: req.params.key, forced: force },
+          afterState: { resource_key: row.resource_key, provider_key: req.params.key, forced: force, unbound_kbs: unboundKbs },
           reason: force
             ? "admin action (force provider delete)"
             : "provider delete (soft-deleted resource cleanup)",
@@ -650,7 +689,7 @@ router.delete(
 router.post(
   "/providers/:key/models/fetch",
   wrap(async (req, res) => {
-    const { companyKey, credentialId } = req.body || {};
+    const { companyKey, credentialId, verify } = req.body || {};
     if (!companyKey) {
       return res.status(400).json({ success: false, error: "companyKey is required (models are fetched through a company credential)." });
     }
@@ -662,6 +701,9 @@ router.post(
       companyKey,
       providerKey: req.params.key,
       credentialId: credentialId || null,
+      // Verified sync is the default: only models that actually respond to a
+      // chat ping are upserted. verify:false opts out (raw listing upsert).
+      verify: verify !== false,
     });
     Registry.invalidateRegistry();
     await AuditRepository.log({
@@ -675,12 +717,21 @@ router.post(
         company_key: companyKey,
         fetched: result.fetched,
         skipped: !!result.skipped,
+        dropped: result.dropped?.length ?? 0,
         models: result.models.map((m) => m.modelKey),
       },
       reason: "admin action",
       isSensitive: false,
     });
-    return res.json({ success: true, ...result });
+    return res.json({
+      success: true,
+      ...result,
+      message: result.verification
+        ? result.verification.inconclusive
+          ? `Provider looks down — ${result.verification.timeouts} timeout(s), 0 responders among ${result.verification.chatAdvertised} advertised chat model(s). Nothing fetched; catalog unchanged. Retry when the provider recovers.`
+          : `Fetched ${result.fetched} model(s); ${result.verification.chatResponding}/${result.verification.chatAdvertised} advertised chat model(s) responded — ${result.dropped.length} dead/unresponsive dropped.`
+        : `Fetched ${result.fetched} model(s).`,
+    });
   })
 );
 

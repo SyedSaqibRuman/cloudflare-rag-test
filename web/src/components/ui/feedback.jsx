@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { cx, tones } from "./helpers";
+import { subscribeToasts, dismissToast } from "../../toast-store";
 
 // ------------------------------------------------------------------
 // Badge
@@ -47,20 +49,72 @@ export function ErrorBanner({ message, onDismiss }) {
 }
 
 // ------------------------------------------------------------------
-// Toast
+// Toast (single, legacy-compatible) — renders the newest global toast.
+// Pages using <Toast message={toast?.msg} tone={toast?.tone} /> keep working
+// unchanged; new code should render <ToastViewport /> once in App instead.
 // ------------------------------------------------------------------
 const toastMap = {
-  green: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
-  red: "border-rose-500/40 bg-rose-500/15 text-rose-200",
+  green: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+  red: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+  amber: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+  indigo: "border-indigo-500/40 bg-indigo-500/15 text-indigo-300",
+  cyan: "border-cyan-500/40 bg-cyan-500/15 text-cyan-300",
+  slate: "border-slate-500/40 bg-slate-500/15 text-slate-300",
 };
+
+const toastIcon = { green: "✓", red: "✕", amber: "⚠", indigo: "ℹ", cyan: "ℹ", slate: "ℹ" };
 
 export function Toast({ message, tone = "green" }) {
   if (!message) return null;
+  return <ToastCard message={message} tone={tone} />;
+}
+
+/** One toast card — glassy surface that reads in both themes, icon + text + dismiss. */
+export function ToastCard({ message, tone = "green", onClose, toastId: _toastId }) {
   return (
-    <div role="status" aria-live="polite" className="fixed bottom-6 right-6 z-50 animate-in">
-      <div className={cx("rounded-lg border px-4 py-3 text-sm shadow-xl backdrop-blur", toastMap[tone], "bg-slate-900/90")}>
-        {message}
-      </div>
+    <div
+      role="status"
+      aria-live="polite"
+      className={cx(
+        "toast-pop-in pointer-events-auto flex w-80 max-w-[calc(100vw-3rem)] items-start gap-2.5 rounded-xl border px-3.5 py-3 text-sm shadow-xl backdrop-blur-md",
+        toastMap[tone] || toastMap.green,
+        "bg-slate-900/95 dark:bg-slate-900/95"
+      )}
+    >
+      <span aria-hidden className="mt-px shrink-0 font-bold">{toastIcon[tone] || "ℹ"}</span>
+      <span className="min-w-0 flex-1 break-words">{message}</span>
+      {onClose && (
+        <button
+          onClick={onClose}
+          aria-label="Dismiss notification"
+          className="-mr-1 shrink-0 rounded px-1 text-base leading-none opacity-60 transition hover:opacity-100"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ToastViewport — the single app-wide toast outlet. Subscribes to the global
+ * toast store and renders the stack bottom-right. Mount once (App.jsx).
+ */
+export function ToastViewport() {
+  const [items, setItems] = useState([]);
+  useEffect(() => subscribeToasts(setItems), []);
+  if (!items.length) return null;
+  return (
+    <div className="pointer-events-none fixed bottom-6 right-6 z-[100] flex flex-col-reverse gap-2">
+      {items.map((t) => (
+        <ToastCard
+          key={t.id}
+          toastId={t.id}
+          message={t.msg}
+          tone={t.tone}
+          onClose={() => dismissToast(t.id)}
+        />
+      ))}
     </div>
   );
 }

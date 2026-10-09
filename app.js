@@ -45,21 +45,27 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Trust proxy: with `true` every client controls X-Forwarded-For, so req.ip
-// (and therefore every rate limiter key) can be rotated per request. Keep the
-// backwards-compatible default outside production, but set an explicit hop
-// count ("1") or proxy IPs (comma-separated) in production via TRUST_PROXY.
+// (and therefore every rate limiter key) can be rotated per request — measured
+// live: rotating the header produced 30 unthrottled logins where a fixed value
+// correctly 429'd after 10.
+//
+// DEFAULT IS FALSE (secure by default). An unset TRUST_PROXY must NOT mean
+// "trust the whole chain"; operators behind a proxy opt in explicitly with a hop
+// count ("1") or proxy IPs (comma-separated). The cost of the safe default is
+// that, behind a proxy, all clients share the proxy IP as their limiter key —
+// which is why we warn loudly instead of silently choosing for them.
 function parseTrustProxy(value) {
-  if (value === undefined || value === "" || value === "true") return true;
-  if (value === "false") return false;
+  if (value === undefined || value === "" || value === "false") return false;
+  if (value === "true") return true;
   const n = Number(value);
   if (Number.isInteger(n) && n > 0) return n;
   return value.split(",").map((s) => s.trim()).filter(Boolean);
 }
 const trustProxy = parseTrustProxy(env.TRUST_PROXY);
 app.set("trust proxy", trustProxy);
-if (trustProxy === true && env.NODE_ENV === "production") {
+if (trustProxy === true) {
   console.warn(
-    "⚠️  TRUST_PROXY=true in production — rate-limit keys can be spoofed via X-Forwarded-For. Set TRUST_PROXY to your proxy hop count (e.g. 1) or its IPs."
+    "⚠️  TRUST_PROXY=true — rate-limit keys can be spoofed via X-Forwarded-For. Prefer an explicit hop count (e.g. 1) or the proxy's IPs."
   );
 }
 
@@ -71,8 +77,9 @@ const hasWeb = fs.existsSync(WEB_INDEX);
 // --------------------------
 // 🔹 MIDDLEWARE
 // --------------------------
-app.set("trust proxy", true);
-
+// Trust proxy is configured ONCE, above (parseTrustProxy(env.TRUST_PROXY)).
+// Do not re-set it here: a stray `app.set("trust proxy", true)` would let every
+// client rotate its rate-limit key via X-Forwarded-For.
 app.use(cors({
   origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
@@ -118,8 +125,13 @@ const globalLimiter = rateLimit({
 // authenticated admin sessions). Note: must use a wrapper function instead of
 // a regex path pattern because Express 5 does not apply middleware correctly
 // when passed via app.use(regex, fn).
+const STATIC_PREFIXES = ["/assets/"];
 app.use((req, res, next) => {
   if (req.path === "/") return next();
+  // Static SPA assets bypass the API limiter: a portal load fetches several
+  // chunks at once and throttling those breaks page loads before any session
+  // token exists to exempt.
+  if (STATIC_PREFIXES.some((p) => req.path.startsWith(p))) return next();
   if (AUTH_ENABLED && verifyToken(extractToken(req))) return next();
   return globalLimiter(req, res, next);
 });
@@ -341,6 +353,14 @@ if (process.env.CONFIG_STORE === "mysql") {
     await liftLegacyWebhooks();
   } catch (err) {
     console.error("⚠️  Legacy webhook lift failed:", err.message);
+  }
+  // Re-register paused (suspended) jobs from the last run so they can be
+  // resumed after a restart (best-effort — MySQL down → nothing restored).
+  try {
+    const { restoreSuspendedJobs } = await import("./cron/lifecycle.js");
+    await restoreSuspendedJobs();
+  } catch (err) {
+    console.error("⚠️  Paused-job restore failed:", err.message);
   }
 }
 app.listen(PORT, (err) => {

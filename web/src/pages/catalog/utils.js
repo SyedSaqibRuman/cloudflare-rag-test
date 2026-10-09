@@ -11,6 +11,7 @@ import {
 // __tests__/serves-models.test.js under bare `node --test`, which cannot
 // resolve Vite aliases (and rejects "../" escapes in "imports" targets).
 import { diagnoseError } from "../../../../shared/error-tag.js";
+import { parseUtcDate } from "../../util.js";
 
 // Alias for the shared 9Router diagnosis tag (backend calls it diagnoseError;
 // the portal calls it errorTag). Single source of truth: shared/error-tag.js.
@@ -86,10 +87,12 @@ export function hasResourceTemplates(detail) {
 }
 
 // Relative time for the card error badge ("3m ago"), 9Router-style.
+// parseUtcDate (web/src/util.js) treats naive DB datetimes as UTC — MySQL
+// DATETIME strings carry no timezone marker and would otherwise parse as
+// browser-local, skewing every relative time by the UTC offset.
 export function timeAgo(v) {
-  if (!v) return null;
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return null;
+  const d = parseUtcDate(v);
+  if (!d) return null;
   const diff = Math.max(0, Date.now() - d.getTime());
   const s = Math.floor(diff / 1000);
   if (s < 60) return `${s}s ago`;

@@ -4,7 +4,7 @@
 // batch test results modal.
 // --------------------------
 import { lazy, Suspense } from "react";
-import { Button, Card, Empty, Spinner, Toast } from "../../components/ui";
+import { Button, Card, Empty, Spinner } from "../../components/ui";
 import { TYPE_SECTIONS } from "./constants";
 import { ProviderCard, TestResultsView } from "./components";
 import { ChunkErrorBoundary } from "./chunk-error-boundary";
@@ -35,7 +35,6 @@ export function CatalogList({
   compatibleCreated,
   testResults,
   setTestResults,
-  toast,
   categoryFilter,
   setCategoryFilter,
   matchSearch,
@@ -166,7 +165,7 @@ export function CatalogList({
         <>
           {!hasAnyResult && (
             <div className="rounded-xl border border-dashed border-slate-700 py-8 text-center">
-              <span aria-hidden="true" className="mb-2 block text-[32px] text-slate-600">🔍</span>
+              <span aria-hidden="true" className="mb-2 block text-[32px] text-slate-500">🔍</span>
               <p className="text-sm text-slate-500">No providers match your search</p>
             </div>
           )}
@@ -257,7 +256,7 @@ export function CatalogList({
         </div>
       )}
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

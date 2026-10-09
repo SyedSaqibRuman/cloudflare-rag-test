@@ -166,6 +166,38 @@ test("rejects oversized guardrail fields", () => {
   assert.ok(topics.errors.blockedTopics);
 });
 
+test("accepts and normalizes blockedPatterns (literals + /regex/ lines)", () => {
+  const result = validateAssistantInput({
+    ...VALID_INPUT,
+    blockedPatterns: "\n  crypto\n/write.*haiku/i\n\n",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.blockedPatterns, "crypto\n/write.*haiku/i");
+});
+
+test("blockedPatterns defaults to null when omitted/empty", () => {
+  const empty = validateAssistantInput({ ...VALID_INPUT, blockedPatterns: "   " });
+  assert.equal(empty.ok, true);
+  assert.equal(empty.value.blockedPatterns, null);
+  const omitted = validateAssistantInput(VALID_INPUT);
+  assert.equal(omitted.value.blockedPatterns, null);
+});
+
+test("rejects invalid /regex/ lines and oversized blockedPatterns", () => {
+  const bad = validateAssistantInput({ ...VALID_INPUT, blockedPatterns: "crypto\n/([unclosed/" });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.blockedPatterns.includes("invalid pattern"));
+  const many = validateAssistantInput({
+    ...VALID_INPUT,
+    blockedPatterns: Array.from({ length: 101 }, (_, i) => `pat-${i}`).join("\n"),
+  });
+  assert.equal(many.ok, false);
+  assert.ok(many.errors.blockedPatterns);
+  const huge = validateAssistantInput({ ...VALID_INPUT, blockedPatterns: "a".repeat(8001) });
+  assert.equal(huge.ok, false);
+  assert.ok(huge.errors.blockedPatterns);
+});
+
 test("rejects temperature outside 0-2 and non-numeric", () => {
   for (const bad of [-0.1, 2.1, "abc", NaN, Infinity]) {
     const result = validateAssistantInput({ ...VALID_INPUT, temperature: bad });
@@ -229,6 +261,7 @@ test("accepts a fully valid input and returns the normalized value", () => {
     systemPrompt: "You are helpful",
     guardrailPrompt: null,
     blockedTopics: null,
+    blockedPatterns: null,
     temperature: 1.2,
     maxTokens: 2048,
     enableFunctionCalling: false,

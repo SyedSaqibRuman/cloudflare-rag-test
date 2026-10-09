@@ -10,6 +10,7 @@ import indexesRouter from "./cloudflare/indexes.js";
 import bucketsRouter from "./cloudflare/buckets.js";
 import configRouter from "./cloudflare/config.js";
 import promptRouter from "./cloudflare/prompt.js";
+import setupStatusRouter from "./cloudflare/setup-status.js";
 
 const router = express.Router();
 
@@ -26,5 +27,7 @@ router.use("/buckets", bucketsRouter);
 router.use("/config", configRouter);
 // 4. System prompt
 router.use("/prompt", promptRouter);
+// 5. Setup checkpoints (GET /setup-status) — company configuration progress
+router.use("/setup-status", setupStatusRouter);
 
 export default router;

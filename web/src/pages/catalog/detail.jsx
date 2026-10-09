@@ -3,17 +3,20 @@
 // Header with badges/links, connections, models, environments, resources,
 // test/delete modals.
 // --------------------------
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import { listProviders } from "../../api";
-import { Badge, Button, Card, SkeletonCard, Spinner, Toast } from "../../components/ui";
+import { Badge, Button, Card, SkeletonCard, Spinner } from "../../components/ui";
 import { categoryTone, groupFor, isAnthropicCompatible, isOpenAICompatible } from "./constants";
 import { ConnectionsCard } from "./connections-card";
 import { EnvironmentsCard, ResourcesCard } from "../credentials/cards";
 import { ChunkErrorBoundary } from "./chunk-error-boundary";
 import { hasResourceTemplates, servesModels, usesEnvironments } from "./utils";
+import { managesVectorResources } from "./vector-providers.js";
+import { safeLinkUrl } from "../../markdown-sanitize.js";
 
 const ModelsCard = lazy(() => import("./models-card").then((m) => ({ default: m.ModelsCard })));
 const CloudflareResourcesCard = lazy(() => import("./cloudflare-resources-card").then((m) => ({ default: m.CloudflareResourcesCard })));
+const VectorResourcesCard = lazy(() => import("./vector-resources-card").then((m) => ({ default: m.VectorResourcesCard })));
 const ProviderTestModal = lazy(() => import("./modals").then((m) => ({ default: m.ProviderTestModal })));
 const DeleteProviderModal = lazy(() => import("./modals").then((m) => ({ default: m.DeleteProviderModal })));
 
@@ -34,7 +37,6 @@ export function CatalogDetail({
   companyEnvs,
   error,
   notify,
-  toast,
   loadDetail,
   testOpen,
   setTestOpen,
@@ -58,6 +60,9 @@ export function CatalogDetail({
 
   const showModels = servesModels(providerKey, provider, detail);
   const showEnvironments = usesEnvironments(providerKey, companyKey, companyEnvs, creds);
+  // Bumped when the live VectorResourcesCard creates/deletes a store, forcing
+  // the generic registry ResourcesCard below to remount and re-list.
+  const [resourceVersion, setResourceVersion] = useState(0);
 
   return (
     <div className="space-y-6">
@@ -86,7 +91,10 @@ export function CatalogDetail({
         </div>
         <div className="ml-auto flex items-center gap-2">
           {(() => {
-            const primary = provider?.websiteUrl || provider?.documentationUrl;
+            // Catalog rows are admin-authored but bulk-importable — pass the
+            // rendered href through the shared scheme sanitizer; an unsafe
+            // websiteUrl falls back to the docs URL, then drops the link.
+            const primary = safeLinkUrl(provider?.websiteUrl) || safeLinkUrl(provider?.documentationUrl);
             if (primary) {
               return (
                 <a
@@ -104,7 +112,7 @@ export function CatalogDetail({
                 </a>
               );
             }
-            const url = (detail?.authForm || []).map((f) => helpTextUrl(f.field_help_text)).find(Boolean);
+            const url = safeLinkUrl((detail?.authForm || []).map((f) => helpTextUrl(f.field_help_text)).find(Boolean));
             return url ? (
               <a
                 href={url}
@@ -182,9 +190,28 @@ export function CatalogDetail({
             <CloudflareResourcesCard companyKey={companyKey} providerKey={providerKey} notify={notify} />
           </Suspense>
         </ChunkErrorBoundary>
-      ) : hasResourceTemplates(detail) ? (
-        <ResourcesCard companyKey={companyKey} providerKey={providerKey} providers={providers} notify={notify} />
       ) : null}
+      {managesVectorResources(providerKey) && (
+        <ChunkErrorBoundary>
+          <Suspense fallback={<Card><SkeletonCard rows={2} /></Card>}>
+            <VectorResourcesCard
+              companyKey={companyKey}
+              providerKey={providerKey}
+              notify={notify}
+              onResourceChange={() => setResourceVersion((v) => v + 1)}
+            />
+          </Suspense>
+        </ChunkErrorBoundary>
+      )}
+      {hasResourceTemplates(detail) && (
+        <ResourcesCard
+          key={`resources-${resourceVersion}`}
+          companyKey={companyKey}
+          providerKey={providerKey}
+          providers={providers}
+          notify={notify}
+        />
+      )}
 
       {/* Modals */}
       {testOpen && (
@@ -214,7 +241,7 @@ export function CatalogDetail({
         </ChunkErrorBoundary>
       )}
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

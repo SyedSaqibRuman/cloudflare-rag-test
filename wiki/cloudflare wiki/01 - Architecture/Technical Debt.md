@@ -49,8 +49,8 @@ Each item labeled **Confirmed issue** / **Potential issue** / **Recommendation**
 ## TD-8 · Sparse structured progress for long ingestions — Recommendation
 - `mysql/routes/ingestion.js GET /gateway/ingest/status/:companyName` comments admit documentCount/vectorCount placeholders ("we would need to store this"); KB detail gets stats persisted post-completion instead. Consider streaming progress events via registry/pipeline hook (`setProgress` exists end-to-end but isn't surfaced).
 
-## TD-9 · Fast-path ordering vs assistant persona — Potential nuance, not defect
-- `runPipeline` computes fast-path canned replies *before* resolving assistant overrides; greeting/identity copy uses company defaults. Documented behavior of record: [[Data Flow]].
+## TD-9 · Fast-path ordering vs assistant persona — RESOLVED 2026-09-17
+- Fixed: `runPipeline` now resolves assistant overrides **before** calling `checkFastPath`, passing the assistant's name into the identity fast-path — "What is your name?" answers with the assistant persona (e.g. Muse) instead of the company's canned consultant. Residual nuance: greeting/contact/discovery copy other than identity still uses company defaults; the assistant's `system_prompt` applies to all RAG answers. Documented behavior of record: [[Data Flow]].
 
 ## Positive debt-prevention patterns worth keeping
 

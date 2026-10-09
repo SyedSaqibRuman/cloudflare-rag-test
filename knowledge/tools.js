@@ -143,7 +143,7 @@ export async function searchKnowledge(session, { companyName, query, kbKey = nul
      OPTIONAL MATCH (e)-[r]-(n:Entity)
      RETURN e.id AS id, e.name AS name, e.type AS type, e.kb_key AS kbKey,
             e.confidence AS confidence, count(DISTINCT r) AS relationshipCount
-     ORDER BY e.name LIMIT $limit`,
+     ORDER BY e.name LIMIT toInteger($limit)`,
     params
   );
   return res.records.map((r) => ({
@@ -194,7 +194,7 @@ export async function findRelatedEntities(session, { companyName, kbKey, entityI
     `MATCH (e:Entity {id: $id})-[r${typeClause}*1..${depth}]-(n:Entity)
      WHERE n.company = $company AND n.kb_key = $kb AND n.id <> $id
      RETURN DISTINCT n.id AS id, n.name AS name, n.type AS type, n.kb_key AS kbKey
-     ORDER BY n.name LIMIT $limit`,
+     ORDER BY n.name LIMIT toInteger($limit)`,
     params
   );
   return res.records.map((r) => ({

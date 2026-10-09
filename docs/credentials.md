@@ -33,7 +33,9 @@ Credentials are **per-company, per-provider API keys** stored in the AI gateway 
 1. The route validates `providerKey`, `credentialKey`, and `credentialName` (400 if missing), and the provider must exist.
 2. `validateFieldsAgainstSchema` checks the submitted fields against the provider's auth schema — required fields present, values matching their `validation_regex` (400 `Invalid credential fields.` with per-field errors otherwise).
 3. Each field is **encrypted** (`encryptCredential`) into `gcm:` blobs; the blob and `encryption_version` are persisted; `credential.created` is audit-logged (sensitive).
-4. Returns **201** with `credentialId`.
+4. Before the insert, any **soft-deleted** credential with the same key (company + provider + environment) is permanently purged — soft-deleted rows are invisible to the app but would still occupy the unique index, blocking recreation of a key you just deleted.
+5. `credential_key` is unique **per company + provider + environment** (`uk_company_provider_env_cred`) — the same key may exist in different companies, or under different providers in the same company (migration `029` dropped the old global `uk_credential_key`, which wrongly made keys unique across ALL tenants). A collision returns **409 `CREDENTIAL_KEY_EXISTS`** with an actionable message instead of a raw 500.
+6. Returns **201** with `credentialId`.
 
 ---
 

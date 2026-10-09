@@ -11,12 +11,15 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   bulkSetModelAccess,
+  deleteAllProviderModels,
   deleteProviderModel,
   executeChat,
   fetchProviderModels,
   listCredentialModels,
   listCredentials,
   listProviderModels,
+  pruneDeadModels,
+  testProviderModels,
   updateProviderModel,
 } from "../../api";
 import { Badge, Button, Card, Empty, IconButton, Spinner, SkeletonText } from "../../components/ui";
@@ -49,6 +52,12 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
   const [error, setError] = useState(null);
   const [modelModal, setModelModal] = useState(null); // null | { row? }
   const [testState, setTestState] = useState({}); // modelId -> { ok, latencyMs?, error? } | "busy"
+  // Batch "Test All" sweep — per-model results keyed by model id, a running
+  // progress counter, and the last run's summary/free-model list.
+  const [batchState, setBatchState] = useState({ busy: false, done: 0, total: 0, results: null, summary: null });
+  // "Prune dead models" — dry-run preview data + confirm flow.
+  const [prunePreview, setPrunePreview] = useState(null); // null | { prune, keep, okCount, summary }
+  const [pruneBusy, setPruneBusy] = useState(false);
   const [thinkingBusy, setThinkingBusy] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   // Enabled model-access grants across the company's credentials for this
@@ -136,6 +145,84 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
     }
   };
 
+  // Batch "Test All": one chat ping against every catalog chat model through
+  // the company's credential (server runs a bounded worker pool with a
+  // per-model timeout). Surfaces dead models (404 "Function not found"-style),
+  // capacity-blocked ones, and tags free-tier models that actually respond.
+  const testAllModels = async () => {
+    if (!companyKey) {
+      notify("Select a company first — the model sweep runs through its credential.", "red");
+      return;
+    }
+    const chatModels = models.filter((m) => m.category === "chat");
+    if (!chatModels.length || batchState.busy) return;
+    setBatchState({ busy: true, done: 0, total: chatModels.length, results: null, summary: null });
+    setError(null);
+    try {
+      const r = await testProviderModels(companyKey, {
+        providerKey,
+        category: "chat",
+        modelIds: chatModels.map((m) => m.id),
+      });
+      // Paint per-model verdicts onto the cards (same shape single Test uses).
+      const perModel = {};
+      for (const res of r.results) {
+        if (res.modelId != null) {
+          perModel[res.modelId] = res.ok
+            ? { ok: true, latencyMs: res.latencyMs }
+            : { ok: false, error: res.error };
+        }
+      }
+      setTestState((s) => ({ ...s, ...perModel }));
+      setBatchState({ busy: false, done: r.summary.total, total: r.summary.total, results: perModel, summary: r.summary, free: r.freeWorkingModels });
+      notify(`Test All done: ${r.summary.ok}/${r.summary.total} working${r.summary.freeWorking ? ` · ${r.summary.freeWorking} free` : ""}.`, r.summary.ok ? undefined : "red");
+    } catch (e) {
+      setBatchState((s) => ({ ...s, busy: false }));
+      setError(`Test All failed: ${e.message}`);
+    }
+  };
+
+  // Prune dead models: dry-run sweep first (preview what would be deleted),
+  // then a guarded delete on confirm. Only hard-404 "function not found"
+  // models are pruned; timeouts/soft failures are always kept server-side.
+  const openPrunePreview = async () => {
+    if (!companyKey) {
+      notify("Select a company first — the sweep runs through its credential.", "red");
+      return;
+    }
+    if (pruneBusy || batchState.busy) return;
+    setPruneBusy(true);
+    setError(null);
+    try {
+      const r = await pruneDeadModels(companyKey, { providerKey, dryRun: true });
+      if (!r.prune.length) {
+        notify(`No dead models to prune — ${r.okCount} working, ${r.keep.length} timeout/soft-failure kept.`, "slate");
+        return;
+      }
+      setPrunePreview(r);
+    } catch (e) {
+      setError(`Prune preview failed: ${e.message}`);
+    } finally {
+      setPruneBusy(false);
+    }
+  };
+
+  const confirmPrune = async () => {
+    if (pruneBusy) return;
+    setPruneBusy(true);
+    setError(null);
+    try {
+      const r = await pruneDeadModels(companyKey, { providerKey, dryRun: false });
+      setPrunePreview(null);
+      await load();
+      notify(r.message || `Pruned ${r.deleted.length} dead model(s).`);
+    } catch (e) {
+      setError(`Prune failed: ${e.message}`);
+    } finally {
+      setPruneBusy(false);
+    }
+  };
+
   // Thinking dropdown — applies the chosen mode to EVERY catalog model of the
   // provider (per-model PUT), so the header control matches 9Router's
   // "Thinking: Auto" semantics. Models the executor treats as auto keep it.
@@ -181,6 +268,7 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
   // Pull the provider's live model list through the company's credential and
   // upsert into the catalog ("Fetch Models").
   const [fetchBusy, setFetchBusy] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const fetchModels = async () => {
     if (!companyKey) {
       notify("Select a company first — models are fetched through its credential.", "red");
@@ -195,12 +283,35 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
         notify("No /models endpoint for this provider — nothing to fetch.", "slate");
       } else {
         await load();
-        notify(`Fetched ${r.fetched} model${r.fetched === 1 ? "" : "s"} from '${providerKey}'.`);
+        // Verified sync: the server probes every advertised chat model and only
+        // upserts responders — prefer its richer message (includes drop counts).
+        notify(r.message || `Fetched ${r.fetched} model${r.fetched === 1 ? "" : "s"} from '${providerKey}'.`);
       }
     } catch (e) {
       setError(e.message);
     } finally {
       setFetchBusy(false);
+    }
+  };
+
+  // Bulk "Delete All Models" — removes every catalog model of the provider
+  // (pricing + credential model-access grants CASCADE with them). Guarded by
+  // a confirm dialog that names the provider and the exact count.
+  const removeAllModels = async () => {
+    if (!models.length || bulkDeleteBusy) return;
+    const label = models.length === 1 ? `the 1 model of '${providerKey}'` : `all ${models.length} models of '${providerKey}'`;
+    if (!window.confirm(`Delete ${label}? Their pricing rows and any credential model-access grants are removed with them. This cannot be undone.`)) return;
+    setBulkDeleteBusy(true);
+    setError(null);
+    try {
+      const r = await deleteAllProviderModels(providerKey);
+      await load();
+      await loadGrants();
+      notify(r.message || `Deleted ${r.removed} model(s) from '${providerKey}'.`);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBulkDeleteBusy(false);
     }
   };
 
@@ -215,13 +326,46 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
       subtitle={`${models.length} model${models.length === 1 ? "" : "s"} in the catalog`}
       actions={
         <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={() => setModelModal({})}>
+            + Add Model
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={testAllModels}
+            disabled={batchState.busy || !companyKey || !models.some((m) => m.category === "chat")}
+            title={
+              companyKey
+                ? "Ping every chat model through the company's credential — dead and capacity-blocked models get flagged"
+                : "Select a company first"
+            }
+          >
+            {batchState.busy ? (
+              <>
+                <Spinner className="h-3.5 w-3.5" /> Testing {batchState.done}/{batchState.total}
+              </>
+            ) : (
+              "Test All"
+            )}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={openPrunePreview}
+            disabled={pruneBusy || batchState.busy || !companyKey || !models.length}
+            title={
+              companyKey
+                ? "Run a sweep and remove models the provider no longer serves (function-not-found 404s only)"
+                : "Select a company first"
+            }
+          >
+            {pruneBusy ? <Spinner className="h-3.5 w-3.5" /> : "Prune Dead"}
+          </Button>
           <Button
             variant="secondary"
             onClick={fetchModels}
             disabled={fetchBusy || !companyKey}
             title={
               companyKey
-                ? "Pull the provider's live model list through the company's credential"
+                ? "Fetch the provider's live model list and keep only models that actually respond (dead ones are dropped)"
                 : "Select a company first"
             }
           >
@@ -257,11 +401,67 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
           >
             {bulkBusy ? <Spinner className="h-3.5 w-3.5" /> : enabledGrants === 0 ? "Enable All" : "Disable All"}
           </Button>
+          <Button
+            variant="secondary"
+            onClick={removeAllModels}
+            disabled={bulkDeleteBusy || models.length === 0}
+            title={
+              models.length
+                ? `Delete all ${models.length} catalog model(s) of this provider (pricing + grants removed with them)`
+                : "No models to delete"
+            }
+            className="border-rose-500/30 text-rose-300 hover:border-rose-500/60 hover:bg-rose-500/10"
+          >
+            {bulkDeleteBusy ? <Spinner className="h-3.5 w-3.5" /> : "Delete All"}
+          </Button>
         </div>
       }
     >
       {error && (
         <div role="alert" className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{error}</div>
+      )}
+      {batchState.summary && (
+        <div className="mb-3 rounded-lg border border-slate-700/60 bg-slate-900/60 p-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge tone={batchState.summary.failed === 0 ? "green" : "amber"}>
+              {batchState.summary.ok}/{batchState.summary.total} working
+            </Badge>
+            {batchState.summary.timeouts > 0 && <Badge tone="slate">{batchState.summary.timeouts} timed out</Badge>}
+            <Badge tone="cyan">avg {batchState.summary.avgLatencyMs ?? "—"}ms</Badge>
+          </div>
+          {batchState.free?.length > 0 && (
+            <div className="mt-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Free models working right now</p>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {batchState.free.map((f) => (
+                  <Badge key={f.modelKey} tone="green">
+                    {f.modelKey} · {f.latencyMs}ms
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+          {batchState.results &&
+            Object.entries(batchState.results).some(([, v]) => !v.ok) && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-[11px] text-slate-500 hover:text-slate-300">
+                  Show {Object.values(batchState.results).filter((v) => !v.ok).length} failing model(s)
+                </summary>
+                <ul className="mt-1 space-y-0.5">
+                  {Object.entries(batchState.results)
+                    .filter(([, v]) => !v.ok)
+                    .map(([id, v]) => {
+                      const m = models.find((x) => String(x.id) === String(id));
+                      return (
+                        <li key={id} className="text-[11px] text-rose-300">
+                          ✕ <code className="font-mono">{m?.model_key || id}</code> — {v.error}
+                        </li>
+                      );
+                    })}
+                </ul>
+              </details>
+            )}
+        </div>
       )}
       {loading ? (
         <SkeletonText lines={3} className="py-4" />
@@ -294,6 +494,9 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
                     </p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       <Badge tone={categoryTone(m.category)}>{m.category}</Badge>
+                      {batchState.results?.[m.id]?.ok && (m.input_price_per_million === 0 || /(^|[-._:/])free([-.:/_].*)?$/i.test(m.model_key)) && (
+                        <Badge tone="green">free</Badge>
+                      )}
                       {thinkingBadge(m.thinking_mode)}
                       {m.supports_streaming && <Badge tone="cyan">stream</Badge>}
                       {m.supports_function_calling && <Badge tone="indigo">tools</Badge>}
@@ -334,9 +537,36 @@ export function ModelsCard({ providerKey, companyKey, notify }) {
         </div>
       )}
 
-      <div className="mt-4">
-        <Button variant="secondary" onClick={() => setModelModal({})}>+ Add Model</Button>
-      </div>
+      {prunePreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" role="dialog" aria-modal="true" aria-label="Prune dead models preview">
+          <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-slate-100">Prune dead models — preview</h3>
+            <p className="mt-1 text-xs text-slate-400">
+              Fresh sweep: {prunePreview.summary?.ok ?? prunePreview.okCount} working · {prunePreview.prune.length} dead · {prunePreview.keep.length} timeout/soft-failure.
+              Only definitively dead models (function-not-found 404s) are removed — timeouts and soft failures are always kept.
+            </p>
+            <ul className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+              {prunePreview.prune.map((p) => (
+                <li key={p.modelId ?? p.modelKey} className="text-[11px] text-rose-300">
+                  ✕ <code className="font-mono">{p.modelKey}</code>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPrunePreview(null)} disabled={pruneBusy}>
+                Cancel
+              </Button>
+              <Button
+                onClick={confirmPrune}
+                disabled={pruneBusy}
+                className="border-rose-500/40 bg-rose-500/10 text-rose-200 hover:border-rose-500/70"
+              >
+                {pruneBusy ? <Spinner className="h-3.5 w-3.5" /> : `Delete ${prunePreview.prune.length} dead model(s)`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ModelModal
         open={modelModal !== null}

@@ -22,6 +22,7 @@ const {
   ResourceRepository,
   AssistantRepository,
   AuditRepository,
+  KbRepository,
 } = await import("../repositories.js");
 const Registry = await import("../services/provider-registry.js");
 const gatewayRouter = (await import("../gateway-router.js")).default;
@@ -289,6 +290,7 @@ async function stubReferencedDelete({ creds = [], resources = [], assistants = [
     }),
     stub(CredentialRepository, "listByProvider", async () => creds),
     stub(ResourceRepository, "listByProvider", async () => resources),
+    stub(KbRepository, "clearResourceBinding", async () => []),
     stub(AssistantRepository, "listByCredentialIds", async (credentialIds) =>
       assistants.filter((a) => credentialIds.includes(a.credential_id))
     ),

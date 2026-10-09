@@ -6,6 +6,20 @@ const BASE = "";
 const AUTH_PATHS = ["/cloudflare", "/gateway", "/auth", "/logs"];
 import { getToken, onUnauthorized } from "./auth";
 import { applyAskFrame } from "./ask-stream-contract.js";
+import { pushToast } from "./toast-store";
+
+// Mutations auto-toast: success uses the server's message field when present,
+// failures toast the error text — so EVERY action in the portal gets visible
+// feedback even where a page forgot to notify(). Callers that render richer
+// inline feedback (banners, forms) pass { silent: true } and keep doing their
+// own UX. GETs never toast (polling would spam).
+const SILENT = new WeakSet();
+const SILENT_ERRORS = new WeakSet();
+export function silentRequest(promiseOrFn) {
+  const p = typeof promiseOrFn === "function" ? promiseOrFn() : promiseOrFn;
+  SILENT.add(p);
+  return p;
+}
 
 function authHeaders(path) {
   const t = getToken();
@@ -14,7 +28,7 @@ function authHeaders(path) {
   return { Authorization: `Bearer ${t}` };
 }
 
-export async function api(path, { method = "GET", body, company, headers = {}, query } = {}) {
+export async function api(path, { method = "GET", body, company, headers = {}, query, toast, silent, silentError } = {}) {
   const h = { ...headers, ...authHeaders(path) };
   if (company) h["x-company-name"] = company;
   if (body !== undefined) h["Content-Type"] = "application/json";
@@ -31,13 +45,25 @@ export async function api(path, { method = "GET", body, company, headers = {}, q
   }
 
   let res;
+  const promise = fetch(url, {
+    method,
+    headers: h,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (silent) SILENT.add(promise); // per-call opt-out — caller owns ALL feedback
+  if (silentError) SILENT_ERRORS.add(promise); // suppress ONLY the error toast — caller renders errors inline (success toast still fires)
   try {
-    res = await fetch(url, {
-      method,
-      headers: h,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    res = await promise;
   } catch {
+    // Network-level failure on a mutation → toast it too (the page's own
+    // catch still runs for inline handling).
+    if (
+      method !== "GET" &&
+      !SILENT.has(promise) &&
+      AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`))
+    ) {
+      pushToast("Cannot reach the API server.", "red");
+    }
     throw new Error("Cannot reach the API server.");
   }
 
@@ -58,7 +84,37 @@ export async function api(path, { method = "GET", body, company, headers = {}, q
       (Array.isArray(data?.errors) && data.errors.join(", ")) ||
       data?.message ||
       `Request failed (HTTP ${res.status})`;
-    throw new Error(msg);
+    // Auto-toast mutation failures (not polling GETs, not opted-out calls,
+    // not /ask paths which surface errors in the chat UI, not 401 which is
+    // handled by the login redirect).
+    if (
+      method !== "GET" &&
+      res.status !== 401 &&
+      !SILENT.has(promise) &&
+      !SILENT_ERRORS.has(promise) &&
+      AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`))
+    ) {
+      pushToast(msg, "red");
+    }
+    const err = new Error(msg);
+    // Structured verdicts from the server (e.g. the KB embedding probe) ride
+    // on the thrown error so pages can decode them into richer UI.
+    if (data?.probe) err.probe = data.probe;
+    throw err;
+  }
+
+  // Auto-toast mutation successes that carry a server message. Errors always
+  // toast (they were already emitted above). Pages that notify() their own
+  // (richer) success phrasing pass { toast: false } to skip ONLY the success
+  // toast — error toasts still fire for them.
+  if (
+    method !== "GET" &&
+    data?.message &&
+    toast !== false &&
+    !SILENT.has(promise) &&
+    AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`))
+  ) {
+    pushToast(data.message, "green");
   }
   return data;
 }
@@ -315,6 +371,9 @@ export const updateProviderModel = (providerKey, id, body) =>
 export const deleteProviderModel = (providerKey, id) =>
   api(`/gateway/providers/${encodeURIComponent(providerKey)}/models/${id}`, { method: "DELETE" });
 
+export const deleteAllProviderModels = (providerKey) =>
+  api(`/gateway/providers/${encodeURIComponent(providerKey)}/models`, { method: "DELETE" });
+
 export const getResourceTemplates = (providerKey) =>
   api(`/gateway/providers/${encodeURIComponent(providerKey)}/resources`).then((d) => d.templates || []);
 
@@ -328,6 +387,18 @@ export const bulkSetModelAccess = (body) =>
   api("/gateway/credentials/model-access/bulk", { method: "POST", body });
 
 // ---------------------------------------------------------------------------
+// Setup checkpoints — company configuration progress (sequential stepper)
+// ---------------------------------------------------------------------------
+export const getSetupStatus = (company) =>
+  api("/cloudflare/setup-status", { company }).then((d) => ({
+    complete: !!d.complete,
+    doneCount: d.doneCount ?? 0,
+    total: d.total ?? 0,
+    next: d.next || null,
+    steps: d.steps || [],
+  }));
+
+// ---------------------------------------------------------------------------
 // AI Gateway — knowledge bases (per-company, x-company-name scoped)
 // ---------------------------------------------------------------------------
 export const listKbs = (company, { page, perPage } = {}) =>
@@ -336,13 +407,14 @@ export const listKbs = (company, { page, perPage } = {}) =>
     pagination: d.pagination,
   }));
 
-export const createKb = (body, company) => api("/gateway/kbs", { method: "POST", body, company });
+export const createKb = (body, company, opts = {}) =>
+  api("/gateway/kbs", { method: "POST", body, company, silentError: opts.silentError });
 
 export const getKb = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}`, { company }).then((d) => d.kb);
 
-export const updateKb = (key, body, company) =>
-  api(`/gateway/kbs/${encodeURIComponent(key)}`, { method: "PUT", body, company });
+export const updateKb = (key, body, company, opts = {}) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}`, { method: "PUT", body, company, silentError: opts.silentError });
 
 export const deleteKb = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}`, { method: "DELETE", company });
@@ -361,11 +433,31 @@ export const ingestKb = (key, company, scope) =>
 export const kbStatus = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/status`, { company }).then((d) => d.status);
 
+/** KB health: flags KBs whose last ingest predates their index's created_on (stale-index detection). */
+export const kbHealth = (company) =>
+  api("/gateway/kbs/health", { company });
+
+/** Sitemap discovery preview for a website URL (KB wizard, spec §30). */
+export const discoverWebsite = (company, websiteUrl) =>
+  api("/gateway/kbs/discover-website", { method: "POST", company, body: { websiteUrl } });
+
 export const listSourcePages = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/source-pages`, { company }).then((d) => d.pages || []);
 
 export const getKbProgress = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/ingest-progress`, { company });
+
+/** Stop a running ingest job (abort at the next loop boundary). */
+export const stopIngestJob = (company, kbKey) =>
+  api("/cloudflare/job/stop", { method: "POST", body: { jobId: "ingest", companyName: company, kbKey } });
+
+/** Pause a running ingest job — suspends at the next document boundary. */
+export const pauseIngestJob = (company, kbKey) =>
+  api("/cloudflare/job/pause", { method: "POST", body: { jobId: "ingest", companyName: company, kbKey } });
+
+/** Resume a paused ingest job (fresh run; completed docs are skipped). */
+export const resumeIngestJob = (company, kbKey) =>
+  api("/cloudflare/job/resume", { method: "POST", body: { jobId: "ingest", companyName: company, kbKey } });
 
 export const getKbOptions = (company) => api("/gateway/kbs/options", { company }).then((d) => d.options);
 
@@ -423,6 +515,52 @@ export const clearKbDocuments = (key, company) =>
 export const listKbDocuments = (key, company) =>
   api(`/gateway/kbs/${encodeURIComponent(key)}/documents`, { company });
 
+/** Preview one ingested document (assembled from its stored R2 chunks).
+ *  Returns { title, url, content, chunkCount, truncated, storagePrefix }. */
+export const previewIngestedDocument = (key, docKey, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/documents/preview/${encodeURIComponent(docKey)}`, { company });
+
+/** Fetch a single uploaded file for inline preview.
+ *  Returns either:
+ *   - { kind: "docx-text", text, name } for .docx
+ *   - { kind: "blob", blob, mime, name } for everything else
+ *
+ *  Always uses the authenticated /gateway path so the admin token gets
+ *  attached. For DOCX we do a second fetch to obtain a downloadable blob.
+ */
+export async function previewKbDocument(key, fileId, company) {
+  const path = `/gateway/kbs/${encodeURIComponent(key)}/documents/${encodeURIComponent(fileId)}`;
+  const h = { ...authHeaders(path), "x-company-name": company };
+  const res = await fetch(`${BASE}${path}`, { headers: h });
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = `Request failed (HTTP ${res.status})`;
+    try { msg = JSON.parse(text).error || msg; } catch { /* keep default */ }
+    throw new Error(msg);
+  }
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    // DOCX path — server returned extracted text + the original blob
+    // (read it for the download button).
+    const data = await res.json();
+    if (data.kind === "docx-text") {
+      const blobRes = await fetch(`${BASE}${path}`, { headers: h });
+      const blob = await blobRes.blob();
+      return { kind: "docx-text", text: data.text, blob, name: data.name };
+    }
+    throw new Error("Unexpected preview response.");
+  }
+  const blob = await res.blob();
+  return { kind: "blob", blob, mime: ct, name: fileId };
+}
+
+/** Delete a single uploaded file from a KB. */
+export const deleteKbDocument = (key, fileId, company) =>
+  api(`/gateway/kbs/${encodeURIComponent(key)}/documents/${encodeURIComponent(fileId)}`, {
+    method: "DELETE",
+    company,
+  });
+
 // ---------------------------------------------------------------------------
 // KB Custom Q&A — direct answers that override the RAG pipeline
 // ---------------------------------------------------------------------------
@@ -474,6 +612,25 @@ export const deleteCloudflareResource = (companyKey, type, id) =>
     method: "DELETE",
   });
 
+// Live non-Cloudflare vector stores (Qdrant collections / Pinecone indexes /
+// Weaviate classes). Creating one also registers it as a vector_index resource
+// so the KB wizard can bind it.
+export const listVectorResources = (companyKey, provider) =>
+  api(`/gateway/companies/${encodeURIComponent(companyKey)}/vector/resources/${encodeURIComponent(provider)}`).then(
+    (d) => d.resources
+  );
+
+export const createVectorResource = (companyKey, provider, body) =>
+  api(`/gateway/companies/${encodeURIComponent(companyKey)}/vector/resources/${encodeURIComponent(provider)}`, {
+    method: "POST",
+    body,
+  });
+
+export const deleteVectorResource = (companyKey, provider, name) =>
+  api(`/gateway/companies/${encodeURIComponent(companyKey)}/vector/resources/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+
 export const updateResource = (id, body) =>
   api(`/gateway/resources/${id}`, { method: "PUT", body });
 
@@ -488,17 +645,17 @@ export const listAssistants = (company, { page, perPage } = {}) =>
     pagination: d.pagination,
   }));
 
-export const createAssistant = (body, company) =>
-  api("/gateway/assistants", { method: "POST", body, company });
+export const createAssistant = (body, company, opts = {}) =>
+  api("/gateway/assistants", { method: "POST", body, company, ...opts });
 
 export const getAssistant = (key, company) =>
   api(`/gateway/assistants/${encodeURIComponent(key)}`, { company }).then((d) => d.assistant);
 
-export const updateAssistant = (key, body, company) =>
-  api(`/gateway/assistants/${encodeURIComponent(key)}`, { method: "PUT", body, company });
+export const updateAssistant = (key, body, company, opts = {}) =>
+  api(`/gateway/assistants/${encodeURIComponent(key)}`, { method: "PUT", body, company, ...opts });
 
-export const deleteAssistant = (key, company) =>
-  api(`/gateway/assistants/${encodeURIComponent(key)}`, { method: "DELETE", company });
+export const deleteAssistant = (key, company, opts = {}) =>
+  api(`/gateway/assistants/${encodeURIComponent(key)}`, { method: "DELETE", company, ...opts });
 
 export const testAssistant = (key, question, company, history = []) =>
   api(`/gateway/assistants/${encodeURIComponent(key)}/test`, {
@@ -507,11 +664,12 @@ export const testAssistant = (key, question, company, history = []) =>
     company,
   });
 
-export const duplicateAssistant = (key, newKey, company, newName) =>
+export const duplicateAssistant = (key, newKey, company, newName, opts = {}) =>
   api(`/gateway/assistants/${encodeURIComponent(key)}/duplicate`, {
     method: "POST",
     body: { newKey, newName },
     company,
+    ...opts,
   });
 
 // Execute a chat completion through a stored gateway credential (admin test call).
@@ -519,6 +677,27 @@ export const duplicateAssistant = (key, newKey, company, newName) =>
 //         model?, messages: [{ role, content }], options? }
 export const executeChat = (companyKey, body) =>
   api(`/gateway/companies/${encodeURIComponent(companyKey)}/execute/chat`, {
+    method: "POST",
+    body,
+    company: companyKey,
+  });
+
+// Batch "Test All" — one minimal chat completion against every catalog model of
+// a provider through the company's credential. body: { providerKey, credentialId?,
+// category?, modelIds?, concurrency?, timeoutMs? }. Returns { summary, results,
+// freeWorkingModels } — dead/404/hung models are flagged per-model.
+export const testProviderModels = (companyKey, body) =>
+  api(`/gateway/companies/${encodeURIComponent(companyKey)}/execute/test-models`, {
+    method: "POST",
+    body,
+    company: companyKey,
+  });
+
+// "Prune dead models" — run a fresh sweep and delete only the models the
+// provider definitively disowns (function-not-found 404s). dryRun (default)
+// returns the prune/keep preview; dryRun:false performs the guarded deletes.
+export const pruneDeadModels = (companyKey, body) =>
+  api(`/gateway/companies/${encodeURIComponent(companyKey)}/execute/prune-dead-models`, {
     method: "POST",
     body,
     company: companyKey,

@@ -317,7 +317,10 @@ mutating memory, so failed writes return `{ error }` and leave memory untouched.
   from `EMBEDDING_DIMENSIONS` map).
 - URLs: `BASE_URL`, `CONTACT_US_URL`, `LOCATIONS_URL`, `SERVICES_URL`.
 - Strings: `CONSULTANT_NAME`, `COMPANY_NAME`; `SYSTEM_PROMPT` (uses `{{VARIABLE}}`
-  templating resolved by `config/prompts.js`).
+  templating resolved by `config/prompts.js` — **no built-in variables**; the
+  values come from `PROMPT_VARIABLES` + the selected assistant's variables, see
+  [[Configuration]]). `PROMPT_VARIABLES` is a JSON array of `{key, value}` and
+  is returned under the `PROMPT` section of `GET /cloudflare/config`.
 - Guardrails: `GUARDRAIL_PROMPT` (extra system-message text), `BLOCKED_TOPICS`
   (newline-separated banned phrases → refused up-front, see §9).
 - Resources: `VECTOR_INDEX`, `R2_BUCKET_NAME`.
@@ -505,6 +508,11 @@ Q&A child rows.
 ```
 GET  /gateway/kbs                      list (paginated)
 POST /gateway/kbs                      create (validates, capacity + ownership)
+GET  /gateway/kbs/health               stale-index health report (flags KBs whose
+                                       last ingest predates their index's created_on —
+                                       proof an index recreation wiped their vectors;
+                                       only Cloudflare-family-bound KBs are checked,
+                                       others are reported uncheckable)
 GET  /gateway/kbs/options              create/edit options in one round trip
                                        (registry rows + live Cloudflare resources)
 GET  /gateway/kbs/:key                 detail
@@ -771,8 +779,9 @@ PUT/DELETE /cloudflare/presets/:id    update / delete
 POST /cloudflare/job/start            { jobId, companyName?, kbKey? }
 POST /cloudflare/job/stop             stop a standalone job
 GET  /cloudflare/jobs/running         running standalone jobs
-POST /cloudflare/cron/start           { jobId, schedule, companyName? }
-POST /cloudflare/cron/stop            stop a scheduler
+POST /cloudflare/cron/start           { jobId, schedule, companyName?, kbKey? } — kbKey schedules
+                                      the KB-driven ingest (verified at schedule time)
+POST /cloudflare/cron/stop            stop a scheduler { jobId?, companyName?, kbKey? }
 GET  /cloudflare/jobs                 registered job types
 GET  /cloudflare/status               status: { standalone:[], cron:[], presets }
 ```
@@ -1018,9 +1027,10 @@ Login is not a hash route: when admin auth is enabled and no valid token exists,
 
 ## 22. Testing
 
-Run `npm test` (equivalent of `node --test` with explicit globs per `__tests__` dir:
-`config`, `query`, `cron`, `ingest`, `routes`, `mysql`, `web/src/**`). Node's built-in
-runner + `node:assert/strict`, no Jest/Mocha/mock libs. Test seams:
+Run `npm test` (equivalent of `node --test` with explicit globs per `__tests__` dir —
+`config`, `query`, `cron`, `ingest`, `routes`, `mysql`, `knowledge`, `mcp`, `web/src/**`). Node's built-in
+runner + `node:assert/strict`, no Jest/Mocha/mock libs. **892/892 pass** (config 20, query 166, cron 44,
+ingest 110, routes 22, mysql 415, knowledge 41, mcp 17, web 57). Test seams:
 
 - ask route tests inject a fake pipeline via `createAskRouter({ pipeline })`,
   `process.chdir()` to a temp dir so `db/` is isolated (each test file = own process).

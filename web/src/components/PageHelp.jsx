@@ -111,7 +111,7 @@ const HELP_DATA = {
   },
 
   webhooks: {
-    title: "Notifications",
+    title: "Notifications (Experimental)",
     intro: "Get notified when things happen. Webhooks send alerts to external services (like Slack) when events occur.",
     features: [
       { icon: "➕", name: "Add Webhook", desc: "Set up a new notification. Enter the URL where alerts should be sent and choose which events trigger it." },

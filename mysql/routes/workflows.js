@@ -5,7 +5,7 @@
 import express from "express";
 import { WorkflowRepository } from "../repositories.js";
 import * as WorkflowService from "../services/workflow-service.js";
-import { runWorkflow, abortWorkflow, getRunStatus, listActiveRuns, scheduleWorkflow, unscheduleWorkflow, listScheduledWorkflows } from "../services/workflow-runner.js";
+import { runWorkflow, abortWorkflow, listActiveRuns, scheduleWorkflow, unscheduleWorkflow, listScheduledWorkflows } from "../services/workflow-runner.js";
 import { requireGatewayCompany } from "../services/company-scope.js";
 import { wrap } from "./helpers.js";
 import { parsePagination, paginate } from "./pagination.js";
@@ -127,7 +127,7 @@ router.get(
     const workflow = await WorkflowRepository.findByKey(req.company.id, req.params.key);
     if (!workflow) throw new NotFoundError(`Workflow '${req.params.key}' not found.`);
 
-    const { parsePagination, paginate } = await import("./pagination.js");
+    const { parsePagination } = await import("./pagination.js");
     const pagination = parsePagination(req);
 
     // Fetch persisted runs from MySQL.

@@ -26,6 +26,7 @@ pages/
   catalog/                list.jsx detail.jsx wizard.jsx wizard/{helpers,steps,inline-editor}.jsx
                           modals.jsx modals/{add-compatible-model...etc per file}
                           connections-card.jsx models-card.jsx cloudflare-resources-card.jsx
+                          vector-resources-card.jsx (live Qdrant/Pinecone/Weaviate stores) vector-providers.js (pure-JS per-provider metadata, node --test covered)
                           useCatalog.js constants.js utils.js icons.jsx components.jsx
                           chunk-error-boundary.jsx switcher? (switcher utils)
   credentials/            use-credential-modal.js modals.jsx cards.jsx fields.jsx helpers.js icons.jsx

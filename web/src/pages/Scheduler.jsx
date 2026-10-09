@@ -3,14 +3,14 @@
 // Replaces the standalone IngestionPipeline page by merging its content
 // into a tabbed layout alongside the existing job/cron/preset UI.
 // --------------------------
-import { useState } from "react";
-import { api, startIngestion, getIngestionJobs, getIngestionStatus, cancelIngestion } from "../api";
-import { Card, Button, Input, Select, Badge, Empty, Spinner, Modal, Toast, Tabs, TabPanel } from "../components/ui";
+import { useState, useEffect } from "react";
+import { api, startIngestion, getIngestionJobs, getIngestionStatus, cancelIngestion, listKbs } from "../api";
+import { Card, Button, Input, Select, Badge, Empty, Spinner, Modal, Tabs, TabPanel } from "../components/ui";
 import { useCompanies } from "../context";
 import { JOB_IDS } from "../models";
 import { usePoll, useToast } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
-import { formatDate } from "../util";
+import { formatDate, parseUtcDate } from "../util";
 
 const JOB_LABELS = {
   ingest: "Ingest Job",
@@ -42,12 +42,14 @@ export default function Scheduler() {
   const [status, setStatus] = useState(null);
   const [presets, setPresets] = useState([]);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   const [busy, setBusy] = useState(null);
   const [cronOpen, setCronOpen] = useState(false);
-  const [cronForm, setCronForm] = useState({ jobId: JOB_IDS[0], schedule: "0 6 * * *", companyName: company });
+  const [cronForm, setCronForm] = useState({ jobId: JOB_IDS[0], schedule: "0 6 * * *", companyName: company, kbKey: "" });
   const [presetModal, setPresetModal] = useState(null);
   const [presetForm, setPresetForm] = useState({ name: "", schedule: "" });
+  // KBs of the cron form's company — shown when scheduling an `ingest` job.
+  const [cronKbs, setCronKbs] = useState([]);
 
   // ── Ingestion state ──
   const [ingestionJobs, setIngestionJobs] = useState([]);
@@ -96,6 +98,31 @@ export default function Scheduler() {
 
   usePoll(loadAll, 5000, [company]);
 
+  // Keep the cron form's company in sync with the selected company — the form
+  // state is initialized once at mount, and scheduling against a stale tenant
+  // after a company switch would be surprising.
+  useEffect(() => {
+    setCronForm((f) => ({ ...f, companyName: company, kbKey: "" }));
+  }, [company]);
+
+  // Load the company's KBs whenever the cron modal is open for the ingest
+  // job — the KB select scopes the schedule to one knowledge base.
+  useEffect(() => {
+    if (!cronOpen || cronForm.jobId !== "ingest" || !cronForm.companyName) {
+      setCronKbs([]);
+      return undefined;
+    }
+    let cancelled = false;
+    listKbs(cronForm.companyName)
+      .then((d) => {
+        if (!cancelled) {
+          setCronKbs((d.items || []).map((k) => ({ value: k.kb_key, label: k.kb_name || k.kb_key })));
+        }
+      })
+      .catch(() => { if (!cancelled) setCronKbs([]); }); // best-effort — a legacy schedule is still possible
+    return () => { cancelled = true; };
+  }, [cronOpen, cronForm.jobId, cronForm.companyName]);
+
   const running = status?.standalone || [];
   const crons = status?.cron || [];
   const ingestRunning = ingestingStatus?.running || ingestingStatus?.status === "running";
@@ -117,12 +144,13 @@ export default function Scheduler() {
     }
   };
 
-  const stopJob = async (jobId, companyName) => {
+  const stopJob = async (jobId, companyName, kbKey) => {
     setBusy(jobId);
     setError(null);
     try {
       const body = { jobId };
       if (companyName) body.companyName = companyName;
+      if (kbKey) body.kbKey = kbKey;
       const res = await api("/cloudflare/job/stop", { method: "POST", body });
       notify(res.message || "Job stopped.");
       await load();
@@ -133,12 +161,13 @@ export default function Scheduler() {
     }
   };
 
-  const stopCron = async (jobId, companyName) => {
+  const stopCron = async (jobId, companyName, kbKey) => {
     setBusy(jobId);
     setError(null);
     try {
       const body = { jobId };
       if (companyName) body.companyName = companyName;
+      if (kbKey) body.kbKey = kbKey;
       const res = await api("/cloudflare/cron/stop", { method: "POST", body });
       notify(res.message || "Schedule stopped.");
       await load();
@@ -154,6 +183,9 @@ export default function Scheduler() {
     try {
       const body = { jobId: cronForm.jobId, schedule: cronForm.schedule };
       if (cronForm.companyName) body.companyName = cronForm.companyName;
+      // KB-scoped schedule — the cron tick will run the KB-driven ingest
+      // (kb's saved source config) instead of the legacy whole-company path.
+      if (cronForm.jobId === "ingest" && cronForm.kbKey) body.kbKey = cronForm.kbKey;
       const res = await api("/cloudflare/cron/start", { method: "POST", body });
       notify(res.message || "Cron scheduled.");
       setCronOpen(false);
@@ -327,7 +359,7 @@ export default function Scheduler() {
                       <div>
                         <p className="text-sm font-semibold text-slate-100">{JOB_LABELS[job.id] || job.name}</p>
                         <p className="mt-0.5 text-xs text-slate-500">{job.description || JOB_DESC[job.id] || "—"}</p>
-                        <p className="mt-1 text-[11px] font-mono text-slate-600">id: {job.id}</p>
+                        <p className="mt-1 text-[11px] font-mono text-slate-500">id: {job.id}</p>
                       </div>
                       <div className="flex shrink-0 flex-col gap-1.5">
                         <Button onClick={() => startJob(job.id, company)} disabled={busy === job.id}>
@@ -383,10 +415,11 @@ export default function Scheduler() {
                         <div>
                           <p className="text-sm font-medium text-slate-100">{JOB_LABELS[j.jobId] || j.jobId}</p>
                           <p className="text-xs text-slate-500">
-                            {j.companyName ? `Company: ${j.companyName}` : "Global"} · started {formatDate(j.startedAt)}
+                            {j.companyName ? `Company: ${j.companyName}` : "Global"}
+                            {j.kbKey ? ` · KB: ${j.kbKey}` : ""} · started {formatDate(j.startedAt)}
                           </p>
                         </div>
-                        <Button variant="danger" onClick={() => stopJob(j.jobId, j.companyName)} disabled={busy === j.jobId}>
+                        <Button variant="danger" onClick={() => stopJob(j.jobId, j.companyName, j.kbKey)} disabled={busy === j.jobId}>
                           {busy === j.jobId ? <Spinner className="h-3.5 w-3.5" /> : "Stop"}
                         </Button>
                       </div>
@@ -405,11 +438,12 @@ export default function Scheduler() {
                         <div>
                           <p className="text-sm font-medium text-slate-100">{JOB_LABELS[c.jobId] || c.jobId}</p>
                           <p className="text-xs text-slate-500">
-                            {c.companyName ? `Company: ${c.companyName}` : "Global"} · <span className="font-mono">{c.schedule}</span> · runs: <span className="tabular-nums">{c.runCount ?? 0}</span>
+                            {c.companyName ? `Company: ${c.companyName}` : "Global"}
+                            {c.kbKey ? ` · KB: ${c.kbKey}` : ""} · <span className="font-mono">{c.schedule}</span> · runs: <span className="tabular-nums">{c.runCount ?? 0}</span>
                           </p>
-                          {c.lastRun && <p className="text-[11px] text-slate-600">last run {formatDate(c.lastRun)}</p>}
+                          {c.lastRun && <p className="text-[11px] text-slate-500">last run {formatDate(c.lastRun)}</p>}
                         </div>
-                        <Button variant="danger" onClick={() => stopCron(c.jobId, c.companyName)} disabled={busy === c.jobId}>
+                        <Button variant="danger" onClick={() => stopCron(c.jobId, c.companyName, c.kbKey)} disabled={busy === c.jobId}>
                           {busy === c.jobId ? <Spinner className="h-3.5 w-3.5" /> : "Stop"}
                         </Button>
                       </div>
@@ -430,7 +464,7 @@ export default function Scheduler() {
                   <div>
                     <p className="text-sm font-medium text-slate-100">Ingestion in progress…</p>
                     <p className="text-xs text-slate-500 mt-1">
-                      Started {new Date(ingestingStatus?.startedAt || Date.now()).toLocaleString()} ·
+                      Started {parseUtcDate(ingestingStatus?.startedAt || Date.now())?.toLocaleString()} ·
                       {ingestingStatus?.documentCount || 0} documents processed
                     </p>
                   </div>
@@ -455,7 +489,7 @@ export default function Scheduler() {
                           {INGEST_JOB_LABELS[job.jobId] || job.jobId} · {job.companyName || "Global"}
                         </p>
                         <p className="text-xs text-slate-500 mt-1">
-                          {job.status} · {new Date(job.startedAt).toLocaleString()}
+                          {job.status} · {parseUtcDate(job.startedAt)?.toLocaleString()}
                         </p>
                       </div>
                       <Badge
@@ -482,7 +516,7 @@ export default function Scheduler() {
             <Button variant="secondary" onClick={() => setCronOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={startCron} disabled={!cronForm.jobId || !cronForm.schedule}>
+            <Button onClick={startCron} disabled={!cronForm.jobId || !cronForm.schedule || (cronForm.jobId === "ingest" && cronForm.kbKey && !cronForm.companyName)}>
               Schedule
             </Button>
           </>
@@ -492,9 +526,29 @@ export default function Scheduler() {
           <Select
             label="Job"
             value={cronForm.jobId}
-            onChange={(e) => setCronForm({ ...cronForm, jobId: e.target.value })}
+            onChange={(e) => setCronForm({ ...cronForm, jobId: e.target.value, kbKey: "" })}
             options={JOB_IDS.map((id) => ({ value: id, label: JOB_LABELS[id] || id }))}
           />
+          {cronForm.jobId === "ingest" && (
+            <div>
+              <Select
+                label="Knowledge base"
+                value={cronForm.kbKey}
+                onChange={(e) => setCronForm({ ...cronForm, kbKey: e.target.value })}
+                options={[
+                  { value: "", label: "Legacy company-wide ingest (no KB)" },
+                  ...cronKbs,
+                ]}
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                {cronForm.companyName
+                  ? cronKbs.length
+                    ? "Each tick runs the KB-driven ingest with the KB's saved source config."
+                    : "This company has no knowledge bases yet — create one on the Ingestion page."
+                  : "Pick a company to list its knowledge bases."}
+              </p>
+            </div>
+          )}
           <div>
             <Select
               label="Preset schedule"
@@ -680,7 +734,7 @@ export default function Scheduler() {
         </div>
       </Modal>
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

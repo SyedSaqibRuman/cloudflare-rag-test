@@ -353,3 +353,138 @@ test("neo4j probe: connection failures surface the driver error", async () => {
   assert.match(result.error, /Neo4j connection failed: No routing servers available/);
   assert.equal(typeof result.latencyMs, "number");
 });
+
+// ---- pinecone probe ----
+
+test("pinecone probe: GETs control-plane /indexes with Api-Key + version headers", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return { ok: true, status: 200, text: async () => "" };
+  };
+  try {
+    const result = await PROBES.pinecone({ api_key: "pc-test-key" });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://api.pinecone.io/indexes");
+    assert.equal(calls[0].opts.headers["Api-Key"], "pc-test-key");
+    assert.equal(calls[0].opts.headers["X-Pinecone-API-Version"], "2025-01");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pinecone probe: 401 becomes a readable auth error", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 401,
+    text: async () => JSON.stringify({ error: { message: "Invalid API key" } }),
+  });
+  try {
+    const result = await PROBES.pinecone({ api_key: "pc-bad" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "Invalid API key");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pinecone probe: missing key fails fast without a network call", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("fetch should not be called");
+  };
+  try {
+    const result = await PROBES.pinecone({});
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Pinecone API key missing/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("getProbe: pinecone resolves to the hand-written probe", () => {
+  const p = provider({ provider_key: "pinecone" });
+  assert.equal(getProbe("pinecone", p), PROBES.pinecone);
+});
+
+// ---- qdrant + weaviate probes ----
+
+test("qdrant probe: GETs {host}/collections and sends api-key only when provided", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return { ok: true, status: 200, text: async () => "" };
+  };
+  try {
+    const withKey = await PROBES.qdrant({ host: "https://xyz.cloud.qdrant.io:6333", api_key: "qd-key" });
+    assert.equal(withKey.ok, true);
+    assert.equal(calls[0].url, "https://xyz.cloud.qdrant.io:6333/collections");
+    assert.equal(calls[0].opts.headers["api-key"], "qd-key");
+
+    const noKey = await PROBES.qdrant({ host: "http://localhost:6333/" });
+    assert.equal(noKey.ok, true);
+    assert.equal(calls[1].url, "http://localhost:6333/collections");
+    assert.equal(calls[1].opts.headers["api-key"], undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("qdrant probe: missing host fails fast without a network call", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("fetch should not be called");
+  };
+  try {
+    const result = await PROBES.qdrant({});
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Qdrant host missing/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("weaviate probe: GETs {host}/v1/schema with Bearer auth only when provided", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return { ok: true, status: 200, text: async () => "" };
+  };
+  try {
+    const withKey = await PROBES.weaviate({ host: "https://xyz.weaviate.cloud", api_key: "wv-key" });
+    assert.equal(withKey.ok, true);
+    assert.equal(calls[0].url, "https://xyz.weaviate.cloud/v1/schema");
+    assert.equal(calls[0].opts.headers.Authorization, "Bearer wv-key");
+
+    const noKey = await PROBES.weaviate({ host: "http://localhost:8080" });
+    assert.equal(noKey.ok, true);
+    assert.equal(calls[1].opts.headers.Authorization, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("weaviate probe: missing host fails fast without a network call", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("fetch should not be called");
+  };
+  try {
+    const result = await PROBES.weaviate({});
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Weaviate host missing/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("getProbe: qdrant and weaviate resolve to hand-written probes", () => {
+  const p = provider({ provider_key: "qdrant" });
+  assert.equal(getProbe("qdrant", p), PROBES.qdrant);
+  assert.equal(getProbe("weaviate", p), PROBES.weaviate);
+});

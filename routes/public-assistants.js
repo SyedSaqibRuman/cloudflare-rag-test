@@ -71,26 +71,22 @@ router.post(
       return res.status(400).json({ success: false, error: "question is required." });
     }
 
-    // Temporarily set ASSISTANT_KEY so the pipeline resolves this assistant.
-    const { getCompanyConfig, updateConfig } = await import("../config/index.js");
+    // The assistant is request-scoped: it is threaded into the pipeline as an
+    // override, never written to the company's stored config (that write was a
+    // persist-first DB mutation on an unauthenticated route, and its restore was
+    // a no-op whenever the company had no prior ASSISTANT_KEY).
     const { askQuestion } = await import("../query/answer.js");
     const companyName = req.company.company_key;
-    const prevKey = getCompanyConfig(companyName)?.ASSISTANT_KEY;
 
-    await updateConfig(companyName, { ASSISTANT_KEY: assistant.assistant_key });
-    try {
-      const result = await askQuestion(String(question).trim(), history || [], companyName);
-      return res.json({
-        success: true,
-        answer: result.answer,
-        sources: result.sources || [],
-        cached: result.cached || false,
-      });
-    } finally {
-      // Restore previous ASSISTANT_KEY
-      const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
-      await updateConfig(companyName, restore);
-    }
+    const result = await askQuestion(String(question).trim(), history || [], companyName, {
+      assistantKey: assistant.assistant_key,
+    });
+    return res.json({
+      success: true,
+      answer: result.answer,
+      sources: result.sources || [],
+      cached: result.cached || false,
+    });
   })
 );
 
@@ -119,19 +115,15 @@ router.post(
     const { createStreamTransport } = await import("../query/stream-contract.js");
     const transport = createStreamTransport({ write: (chunk) => res.write(chunk) });
 
-    // Temporarily set ASSISTANT_KEY so the pipeline resolves this assistant.
-    const { getCompanyConfig, updateConfig } = await import("../config/index.js");
+    // Request-scoped assistant — see the non-streaming route above.
     const { askQuestionStream } = await import("../query/answer.js");
     const companyName = req.company.company_key;
-    const prevKey = getCompanyConfig(companyName)?.ASSISTANT_KEY;
 
-    await updateConfig(companyName, { ASSISTANT_KEY: assistant.assistant_key });
     try {
-      await askQuestionStream(String(question).trim(), history || [], transport, companyName);
+      await askQuestionStream(String(question).trim(), history || [], transport, companyName, {
+        assistantKey: assistant.assistant_key,
+      });
     } finally {
-      // Restore previous ASSISTANT_KEY
-      const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
-      await updateConfig(companyName, restore);
       res.end();
     }
   })

@@ -6,7 +6,7 @@
 // --------------------------
 import { CompanyRepository, KbRepository, CredentialRepository } from "../repositories.js";
 import { getRunningJobs } from "../../cron/index.js";
-import { NotFoundError } from "../../shared/errors.js";
+import { NotFoundError, ConflictError } from "../../shared/errors.js";
 
 /**
  * Build the audit actor object from an Express request.
@@ -70,7 +70,26 @@ export function findRunningIngestJob(companyKey, kbKey) {
       (j) =>
         j.jobId === "ingest" &&
         j.companyName === companyKey &&
-        j.kbKey === kbKey
+        j.kbKey === kbKey &&
+        j.status === "running"
+    ) || null
+  );
+}
+
+/**
+ * Find a PAUSED (suspended) ingest job for a company + KB, if any.
+ * @param {string} companyKey
+ * @param {string} kbKey
+ * @returns {Object|null}  The suspended job entry, or null.
+ */
+export function findPausedIngestJob(companyKey, kbKey) {
+  return (
+    getRunningJobs().find(
+      (j) =>
+        j.jobId === "ingest" &&
+        j.companyName === companyKey &&
+        j.kbKey === kbKey &&
+        j.status === "suspended"
     ) || null
   );
 }
@@ -117,4 +136,38 @@ export async function requireCredential(id) {
   const row = await CredentialRepository.findWithEncrypted(id);
   if (!row) throw new NotFoundError("Credential not found.");
   return row;
+}
+
+// --------------------------
+// RESOURCE → KB BINDING GUARD
+// A provider_resource can be bound to knowledge bases (vector_resource_id /
+// graph_resource_id / storage_resource_id). Deleting the row underneath a
+// bound KB leaves a stale pointer: ingest dies with "Vector store is not
+// configured" (bug fixed Sep 2026 — KB 'java-textbook' pointed at a
+// soft-deleted Qdrant resource) and retrieval silently loses the KB. Every
+// delete path that removes a resource row (or the live store behind one)
+// calls assertResourceNotKbBound FIRST and gets a 409 naming the KBs instead
+// of a latent breakage.
+// --------------------------
+
+/**
+ * Throw a 409 when a live KB still binds the given resource, listing the
+ * blocking KBs in the message so the admin can re-point or delete them first.
+ * @param {Object} resource   provider_resources row (mapRow shape — needs id,
+ *                            resource_key / resource_name).
+ * @param {string} [label]    Human label for the resource ("Qdrant Collection",
+ *                            "Resource", …) used in the error message.
+ * @returns {Promise<Array>}  The binding KB rows (empty when unbound).
+ * @throws {ConflictError}    When at least one active KB binds the resource.
+ */
+export async function assertResourceNotKbBound(resource, label = "Resource") {
+  const kbs = await KbRepository.listByResource(resource.id);
+  if (!kbs.length) return [];
+  const name = resource.resource_name || resource.resource_key || `#${resource.id}`;
+  const detail = kbs
+    .map((k) => `'${k.kb_key}' (as ${k.vector_resource_id === Number(resource.id) ? "vector" : k.graph_resource_id === Number(resource.id) ? "graph" : "storage"} resource)`)
+    .join(", ");
+  throw new ConflictError(
+    `${label} '${name}' is used by knowledge base(s): ${detail}. Re-point or delete the KB(s) before deleting this resource.`
+  );
 }

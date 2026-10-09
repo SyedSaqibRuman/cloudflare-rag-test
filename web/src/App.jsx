@@ -3,7 +3,7 @@ import { CompanyProvider } from "./context";
 import { AuthProvider, useAuth } from "./auth.jsx";
 import { useHashRoute } from "./hooks";
 import Layout from "./components/Layout";
-import { Spinner } from "./components/ui";
+import { Spinner, ToastViewport } from "./components/ui";
 import LoginPage from "./pages/Login";
 
 // --------------------------
@@ -129,11 +129,15 @@ function Gate() {
     );
   }
 
-  if (!authed) return <LoginPage />;
+  if (!authed) {
+    // Pure form login (POST /auth/login). "#login" and "#" both render the
+    // same login page — there is no separate sign-in route anymore.
+    return <LoginPage />;
+  }
 
   // Hash routes may carry a detail segment (e.g. "#catalog/cloudflare") — the
   // first segment picks the page; the rest is passed to the page as `path`.
-  const [seg, sub] = route.split("/");
+  const [seg] = route.split("/");
   let Page = PAGES[seg] || Dashboard;
 
 
@@ -146,6 +150,9 @@ function Gate() {
           </Suspense>
         </PageErrorBoundary>
       </Layout>
+      {/* App-wide toast outlet — one instance renders every toast pushed from
+          any page (useToast/notify) or from the api() mutation auto-toaster. */}
+      <ToastViewport />
     </CompanyProvider>
   );
 }

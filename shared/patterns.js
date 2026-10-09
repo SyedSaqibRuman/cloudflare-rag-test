@@ -13,3 +13,17 @@ export const MODEL_KEY_RE = /^[a-zA-Z0-9@][a-zA-Z0-9._:@/-]*$/;
 // Cloudflare resource names (vector indexes, R2 buckets, D1 databases, KV
 // namespaces): lowercase letters, digits, hyphens, underscores, 3-63 chars.
 export const RESOURCE_NAME_RE = /^[a-z0-9_-]{3,63}$/;
+
+// Vector-store resource names, per provider — each vendor enforces its OWN
+// charset, so the portal/server can't reuse RESOURCE_NAME_RE:
+//   pinecone — index name: lowercase letters/digits/hyphens, 1-45 chars,
+//              must start and end alphanumeric (Pinecone rejects otherwise)
+//   qdrant   — collection name: letters/digits/underscores/hyphens/dots
+//   weaviate — class name: MUST start with an uppercase letter; letters,
+//              digits, underscores only (Weaviate 422s lowercase classes)
+// Keys match the gateway provider_key values in mysql/routes/vector-resources.js.
+export const VECTOR_RESOURCE_NAME_RES = {
+  pinecone: /^[a-z0-9](?:[a-z0-9-]{0,43}[a-z0-9])?$/,
+  qdrant: /^[A-Za-z0-9][A-Za-z0-9_.-]{1,62}$/,
+  weaviate: /^[A-Z][A-Za-z0-9_]{2,62}$/,
+};

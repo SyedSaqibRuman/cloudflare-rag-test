@@ -5,13 +5,19 @@
 // --------------------------
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isRunnableModel } from "../assistant.js";
 
 // Stub the MySQL repositories before importing the module under test
+// (reserved for future wiring — see notes below)
+// eslint-disable-next-line no-unused-vars
 let mockAccess = null;
+// eslint-disable-next-line no-unused-vars
 let mockAssistant = null;
+// eslint-disable-next-line no-unused-vars
 let mockCompany = { id: 2, company_key: "popularcert" };
 
 // Mock the dynamic import in assistant.js
+// eslint-disable-next-line no-unused-vars
 const originalImport = globalThis.__import;
 
 // We test the pure logic by directly calling the function with injected deps.
@@ -105,11 +111,13 @@ test("checkModelAccess: allows when no quota limit set", () => {
 });
 
 test("runPipeline: denied model-access returns denial message", async () => {
-  // Simulate the pipeline with a denied model access
+  // Simulate the pipeline with a denied model access. The assistant's catalog
+  // model must be RUNNABLE for the gate to apply — a non-runnable model falls
+  // back to the company LLM and is therefore never gated (see the next test).
   const steps = {
     checkModelAccess: async () => ({ allowed: false, reason: "Model access is disabled." }),
     checkFastPath: () => null,
-    resolveAssistantOverrides: async () => ({ assistantKey: "test-bot" }),
+    resolveAssistantOverrides: async () => ({ assistantKey: "test-bot", model: "@cf/meta/llama-3.1-8b-instruct-fp8" }),
     rewriteFollowup: async (q) => q,
     getCacheKey: (q, c, a) => `${c}:${a}:${q}`,
     getCached: () => null,
@@ -131,6 +139,41 @@ test("runPipeline: denied model-access returns denial message", async () => {
 
   assert.equal(llmCalled, false, "LLM should not be called when model access is denied");
   assert.match(result.answer, /denied/i);
+  assert.equal(result.denied, true, "denial results are tagged so no suggestions are generated from them");
+});
+
+test("runPipeline: non-runnable assistant model skips the access gate (company LLM runs)", async () => {
+  // A catalog model the runtime cannot call (e.g. a third-party key) falls back
+  // to the company's own LLM — the assistant's credential grant is irrelevant,
+  // so gating on it would blank a perfectly answerable ask.
+  let gateChecked = false;
+  const steps = {
+    checkModelAccess: async () => { gateChecked = true; return { allowed: false, reason: "No access grant found for this credential/model pair." }; },
+    checkFastPath: () => null,
+    resolveAssistantOverrides: async () => ({ assistantKey: "muse", model: "poolside/laguna-s-2.1:free" }),
+    rewriteFollowup: async (q) => q,
+    getCacheKey: (q, c, a) => `${c}:${a}:${q}`,
+    getCached: () => null,
+    setCache: () => {},
+    retrieveContext: async () => ({ context: "some context", matches: [] }),
+    retrieveGraphContext: async () => null,
+    getSystemMessage: () => ({ role: "system", content: "You are helpful." }),
+    buildUserMessage: () => "user message",
+    buildResponses: () => ({ error: "error", noContext: "no context" }),
+  };
+
+  let llmCalled = false;
+  const result = await runPipelineWithSteps({
+    question: "What is a class in Java?",
+    companyName: "popularcert",
+    steps,
+    llmCall: async () => { llmCalled = true; return { response: "A class is a blueprint." }; },
+  });
+
+  assert.equal(gateChecked, false, "the gate must not run for a model that is never executed");
+  assert.equal(llmCalled, true, "the company LLM still answers");
+  assert.equal(result.answer, "A class is a blueprint.");
+  assert.equal(result.denied, undefined);
 });
 
 // Minimal runPipeline clone for testing (mirrors query/answer.js logic)
@@ -159,11 +202,18 @@ async function runPipelineWithSteps({ question, history = [], companyName, llmCa
   const assistant = await resolveAssistantOverrides(companyName);
   const R = buildResponses(companyName, assistant?.assistantName || null);
 
-  // Model-access gate
-  if (checkModelAccess && assistant?.assistantKey) {
+  // Model-access gate (mirrors query/answer.js: only for a runnable catalog model)
+  if (checkModelAccess && assistant?.assistantKey && isRunnableModel(assistant.model)) {
     const accessResult = await checkModelAccess(companyName, assistant);
     if (accessResult && !accessResult.allowed) {
-      return { answer: `Model access denied: ${accessResult.reason || "not authorized"}.`, sources: [], matches: [], graph: null, cached: false };
+      return {
+        answer: `Model access denied: ${accessResult.reason || "not authorized"}.`,
+        sources: [],
+        matches: [],
+        graph: null,
+        cached: false,
+        denied: true,
+      };
     }
   }
 

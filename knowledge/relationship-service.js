@@ -184,7 +184,7 @@ export async function listRelationships(session, { companyName, kbKey, entityId 
             type(r) AS type,
             b.id AS toId, b.name AS toName, b.type AS toType,
             r.confidence AS confidence, r.evidence AS evidence, r.created_at AS createdAt
-     ORDER BY r.created_at DESC LIMIT $limit`,
+     ORDER BY r.created_at DESC LIMIT toInteger($limit)`,
     params
   );
   return res.records.map((r) => ({

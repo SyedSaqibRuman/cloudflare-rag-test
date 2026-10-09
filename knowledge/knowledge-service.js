@@ -172,10 +172,8 @@ export async function findConflicts(companyName, kbKey) {
 export async function listReviewQueue(companyName, kbKey) {
   const graph = requireGraphConfig(companyName);
   return withKnowledgeSession(graph, { write: false }, async (session) => {
-    const [candidates, review] = await Promise.all([
-      claims.listClaims(session, { companyName, kbKey, status: "candidate", limit: 500 }),
-      claims.listClaims(session, { companyName, kbKey, status: "needs_review", limit: 500 }),
-    ]);
+    const candidates = await claims.listClaims(session, { companyName, kbKey, status: "candidate", limit: 500 });
+    const review = await claims.listClaims(session, { companyName, kbKey, status: "needs_review", limit: 500 });
     const seen = new Set();
     return [...review, ...candidates].filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
   });

@@ -2,7 +2,7 @@
 // NEXT STEP PROMPT — post-action guidance banners.
 // Shows contextual "What should I do next?" prompts after completing major actions.
 // --------------------------
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "./ui";
 import { cx } from "../util";
 
@@ -124,7 +124,7 @@ export default function NextStepPrompt({ context, navigate }) {
         <button
           type="button"
           onClick={handleDismiss}
-          className="rounded p-1 text-slate-600 hover:text-slate-400"
+          className="rounded p-1 text-slate-500 hover:text-slate-400"
           title="Dismiss"
         >
           <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

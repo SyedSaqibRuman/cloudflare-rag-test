@@ -29,6 +29,7 @@ export function statusTone(status) {
  *
  * Priority order (highest wins):
  *   Indexing  — an ingest job is currently running for this KB
+ *   PausedRun — an ingest run is suspended (pause/resume, resumable)
  *   Error     — last ingest failed
  *   Paused    — KB exists but is_active = false
  *   Active    — ingested at least once successfully
@@ -36,11 +37,12 @@ export function statusTone(status) {
  *
  * @param {Object|null} kb       KB row (needs is_active).
  * @param {Object|null} status   KB status payload (needs status, inProgress,
- *                               documentCount, lastError).
+ *                               paused, documentCount, lastError).
  * @returns {{ label: string, tone: string }}  Badge label + tone key.
  */
 export function kbLifecycle(kb, status) {
   if (status?.inProgress) return { label: "Indexing", tone: "amber" };
+  if (status?.paused) return { label: "PausedRun", tone: "amber" };
   if (status?.status === "error" || status?.lastError) return { label: "Error", tone: "red" };
   if (kb && kb.is_active === false) return { label: "Paused", tone: "slate" };
   if (status?.status === "active" || (status?.documentCount ?? 0) > 0) {

@@ -16,7 +16,10 @@ export function Button({ variant = "primary", className, children, ...props }) {
   return (
     <button
       className={cx(
-        "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
+        // Press feedback on pointer-down (Apple-style response): the button
+        // dips the instant it's pressed, and transform participates in the
+        // transition so the dip is smooth.
+        "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition duration-150 active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
         buttonVariants[variant],
         className
       )}
@@ -36,7 +39,7 @@ export function IconButton({ title, className, children, ...props }) {
       title={title}
       aria-label={title}
       className={cx(
-        "inline-flex items-center justify-center rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400",
+        "inline-flex items-center justify-center rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition duration-150 active:scale-90 disabled:opacity-40 disabled:pointer-events-none focus-visible:ring-2 focus-visible:ring-indigo-400",
         className
       )}
       {...props}

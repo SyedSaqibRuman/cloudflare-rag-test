@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton, Toast } from "../components/ui";
+import { Card, Button, Input, Badge, Empty, Spinner, Modal, IconButton } from "../components/ui";
 import { useCompanies } from "../context";
 import { usePoll, useToast } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
@@ -72,7 +72,7 @@ export default function Cloudflare() {
   const [buckets, setBuckets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   const [createIndex, setCreateIndex] = useState(false);
   const [createBucket, setCreateBucket] = useState(false);
   const [busyName, setBusyName] = useState(null);
@@ -113,12 +113,12 @@ export default function Cloudflare() {
   };
 
   const handleCreateIndex = async (name) => {
-    await api("/cloudflare/indexes", { method: "POST", body: { name }, company });
+    await api("/cloudflare/indexes", { method: "POST", body: { name }, company, toast: false });
     notify(`Index '${name}' ready.`);
   };
 
   const handleCreateBucket = async (name) => {
-    await api("/cloudflare/buckets", { method: "POST", body: { name }, company });
+    await api("/cloudflare/buckets", { method: "POST", body: { name }, company, toast: false });
     notify(`Bucket '${name}' ready.`);
   };
 
@@ -127,7 +127,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/indexes/${encodeURIComponent(name)}`, { method: "DELETE", company });
+      await api(`/cloudflare/indexes/${encodeURIComponent(name)}`, { method: "DELETE", company, toast: false });
       await load();
       notify(`Index '${name}' deleted.`);
     } catch (e) {
@@ -142,7 +142,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/buckets/${encodeURIComponent(name)}`, { method: "DELETE", company });
+      await api(`/cloudflare/buckets/${encodeURIComponent(name)}`, { method: "DELETE", company, toast: false });
       await load();
       notify(`Bucket '${name}' deleted.`);
     } catch (e) {
@@ -157,7 +157,7 @@ export default function Cloudflare() {
     setBusyName(name);
     setError(null);
     try {
-      await api(`/cloudflare/buckets/${encodeURIComponent(name)}/clear`, { method: "POST", company });
+      await api(`/cloudflare/buckets/${encodeURIComponent(name)}/clear`, { method: "POST", company, toast: false });
       notify(`Bucket '${name}' cleared.`);
     } catch (e) {
       setError(e.message);
@@ -314,7 +314,7 @@ export default function Cloudflare() {
         onSubmit={handleCreateBucket}
       />
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

@@ -413,6 +413,7 @@ import {
   checkFastPath,
   matchesBlockedTopics,
 } from "../intent.js";
+import { resolveBlockedPatterns } from "../../shared/blocked-patterns.js";
 
 describe("intent", () => {
   describe("isIdentityQuery", () => {
@@ -467,6 +468,17 @@ describe("intent", () => {
     it("does not match unrelated queries", () => {
       assert.ok(!isContactQuery("what is certification"));
     });
+
+    it("does not hijack content questions that merely start with 'who is'", () => {
+      // Regression: the old pattern matched a bare `who is`, routing every
+      // "who is …" content question to the canned contact response instead
+      // of RAG (caught live: "Who is the author of this Java book?").
+      assert.ok(!isContactQuery("who is the author of this Java book?"));
+      assert.ok(!isContactQuery("who is a notary public"));
+      // …while the actual person-role intents still match
+      assert.ok(isContactQuery("who is the CEO"));
+      assert.ok(isContactQuery("who founded the company"));
+    });
   });
 
   describe("isBusinessQuery", () => {
@@ -506,6 +518,78 @@ describe("intent", () => {
       assert.ok(isBusinessQuery("how to get certified?"));
       assert.ok(isBusinessQuery("how do I make an appointment with a consultant"));
       assert.ok(isBusinessQuery("what is an API key and how do I use it?"));
+    });
+
+    it("assistant-owned patterns replace the built-in tier (recipes assistant works)", () => {
+      // A recipes assistant ships its own blocked_patterns — the built-in
+      // "recipe"/"movie"/"poem" vetoes must not fire on its own domain.
+      const patterns = resolveBlockedPatterns("crypto\n/write.*haiku/i", null);
+      assert.ok(isBusinessQuery("how do I make chocolate chip cookies?", null, patterns));
+      assert.ok(isBusinessQuery("give me a recipe for baked mac and cheese", null, patterns));
+      assert.ok(isBusinessQuery("what movie was that dish in?", null, patterns));
+      assert.ok(isBusinessQuery("write me a poem about bread", null, patterns));
+      assert.ok(!isBusinessQuery("what is cryptocurrency?", null, patterns));
+      assert.ok(!isBusinessQuery("write me a haiku about the sea", null, patterns));
+    });
+
+    it("company BLOCKED_PATTERNS config tier replaces the built-ins", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prevPatterns = runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = "/\\bmovie\\b/i";
+        assert.ok(!isBusinessQuery("what movie should I watch?", companyName));
+        // "recipe" no longer blocked — the built-in tier was fully replaced.
+        assert.ok(isBusinessQuery("give me a recipe for cookies", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = prevPatterns;
+      }
+    });
+
+    it("built-in tier applies when no assistant or company override exists", () => {
+      assert.ok(!isBusinessQuery("give me a recipe for cookies"));
+      assert.ok(!isBusinessQuery("what movie should I watch?"));
+      // Test-string gate stays anchored full-match and always applies.
+      assert.ok(!isBusinessQuery("asdf"));
+      assert.ok(isBusinessQuery("what is a test kit?"));
+    });
+
+    it("company BLOCKED_TOPICS substring vetoes always apply on top", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "crypto";
+        assert.ok(!isBusinessQuery("what is cryptocurrency?", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
+    });
+
+    it("checkFastPath answers recipe questions when the assistant overrides patterns", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const overrides = { blockedPatterns: "crypto\ninvestment" };
+      const result = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", overrides);
+      assert.equal(result, null); // null → proceeds to retrieval
+    });
+
+    it("checkFastPath still refuses blocked patterns without an assistant override", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const result = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", null);
+      assert.ok(result);
+      assert.ok(result.toLowerCase().includes("not able to find"));
+    });
+
+    it("checkFastPath honors the company BLOCKED_PATTERNS tier", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prevPatterns = runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = "crypto\n/write.*haiku/i";
+        const blocked = checkFastPath("best cryptocurrency exchange?", companyName, "Neo", null);
+        assert.ok(blocked);
+        const allowed = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", null);
+        assert.equal(allowed, null);
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = prevPatterns;
+      }
     });
 
     it("blocks topics listed in the company's BLOCKED_TOPICS config", () => {

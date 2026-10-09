@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Badge, Empty, Spinner, Modal, Toast } from "../components/ui";
+import { Card, Button, Input, Badge, Empty, Spinner, Modal } from "../components/ui";
 import { useCompanies } from "../context";
-import { shorten, companyStatus } from "../util";
+import { companyStatus } from "../util";
 import { useHeaderActions } from "../components/Layout";
 import { useToast } from "../hooks";
 
@@ -10,7 +10,7 @@ export default function Companies({ navigate }) {
   const { companies, refresh, select, company } = useCompanies();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
   const [createError, setCreateError] = useState(null);
   const [form, setForm] = useState({ name: "", baseUrl: "" });
@@ -48,6 +48,7 @@ export default function Companies({ navigate }) {
       await api("/cloudflare/companies", {
         method: "POST",
         body: { name, config },
+        toast: false, // page notify()s its own phrasing
       });
       setCreateOpen(false);
       setForm({ name: "", baseUrl: "" });
@@ -64,7 +65,7 @@ export default function Companies({ navigate }) {
     if (!window.confirm(`Delete company '${name}'? This cannot be undone.`)) return;
     setError(null);
     try {
-      await api(`/cloudflare/companies/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await api(`/cloudflare/companies/${encodeURIComponent(name)}`, { method: "DELETE", toast: false });
       if (company === name) select("");
       await refresh();
       notify(`Company '${name}' deleted.`);
@@ -77,7 +78,7 @@ export default function Companies({ navigate }) {
     if (!window.confirm(`Reset company '${name}' to defaults?`)) return;
     setError(null);
     try {
-      await api(`/cloudflare/companies/${encodeURIComponent(name)}/reset`, { method: "POST" });
+      await api(`/cloudflare/companies/${encodeURIComponent(name)}/reset`, { method: "POST", toast: false });
       notify(`Company '${name}' reset to defaults.`);
     } catch (e) {
       setError(e.message);
@@ -107,13 +108,12 @@ export default function Companies({ navigate }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500">
-                  <th className="pb-3 font-medium">Company</th>
-                  <th className="pb-3 font-medium">Status</th>
-                  <th className="pb-3 font-medium">Assistant</th>
-                  <th className="pb-3 font-medium">Source</th>
-                  <th className="pb-3 font-medium">Vector Index</th>
-                  <th className="pb-3 font-medium">R2 Bucket</th>
-                  <th className="pb-3 font-medium text-right">Actions</th>
+                  <th className="pb-3 font-medium whitespace-nowrap">Company</th>
+                  <th className="pb-3 font-medium whitespace-nowrap">Status</th>
+                  <th className="pb-3 font-medium whitespace-nowrap min-w-[6rem]">Assistant</th>
+                  <th className="pb-3 font-medium whitespace-nowrap max-w-[14rem]">Vector Index</th>
+                  <th className="pb-3 font-medium whitespace-nowrap max-w-[14rem]">R2 Bucket</th>
+                  <th className="pb-3 font-medium text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -150,12 +150,11 @@ export default function Companies({ navigate }) {
                     </td>
                     <td className="py-3"><Badge tone={st.tone}>{st.label}</Badge></td>
                     <td className="py-3">{c.assistantName || c.CONSULTANT_NAME || "—"}</td>
-                    <td className="py-3">{shorten(c.BASE_URL, 32)}</td>
                     <td className="py-3">
-                      {c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-600">—</span>}
+                      {c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-500">—</span>}
                     </td>
                     <td className="py-3">
-                      {c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-600">—</span>}
+                      {c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-500">—</span>}
                     </td>
                     <td className="py-3">
                       <div className="flex items-center justify-end gap-1">
@@ -222,7 +221,7 @@ export default function Companies({ navigate }) {
         </div>
       </Modal>
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

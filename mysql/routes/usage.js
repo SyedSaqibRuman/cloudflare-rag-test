@@ -69,7 +69,7 @@ router.get(
 router.get(
   "/usage/alerts",
   wrap(async (req, res) => {
-    const { checkCostAlerts, getAlertConfig } = await import("../../mysql/services/cost-alerts.js");
+    const { checkCostAlerts } = await import("../../mysql/services/cost-alerts.js");
     const result = await checkCostAlerts(req.company.id);
     return res.json({ success: true, ...result });
   })

@@ -5,10 +5,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { useCompanies } from "../context.jsx";
 import {
-  Card, Button, Badge, Empty, Spinner, StatCard, Modal, Toast, Input, SkeletonCard, IconButton,
+  Card, Button, Empty, Spinner, StatCard, Modal, Input, SkeletonCard, IconButton,
 } from "../components/ui";
 import { useHeaderActions } from "../components/Layout";
 import { api } from "../api";
+import { parseUtcDate } from "../util";
+import { useToast } from "../hooks";
 
 const EVENT_TYPES = [
   "ingestion.completed",
@@ -24,7 +26,7 @@ export default function Webhooks() {
   const [webhooks, setWebhooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [logs, setLogs] = useState([]);
@@ -41,7 +43,7 @@ export default function Webhooks() {
       const data = await api("/gateway/webhooks", { company });
       setWebhooks(data.webhooks || []);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setLoading(false);
     }
@@ -66,10 +68,10 @@ export default function Webhooks() {
     try {
       if (modal === "create") {
         await api("/gateway/webhooks", { method: "POST", body: form, company });
-        setToast({ tone: "green", message: "Webhook created." });
+        notify("Webhook created.", "green");
       } else {
         await api(`/gateway/webhooks/${modal.edit.id}`, { method: "PUT", body: form, company });
-        setToast({ tone: "green", message: "Webhook updated." });
+        notify("Webhook updated.", "green");
       }
       setModal(null);
       // Retry load up to 3 times with delay (server may need a moment after write)
@@ -82,7 +84,7 @@ export default function Webhooks() {
         }
       }
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setSaving(false);
     }
@@ -93,15 +95,15 @@ export default function Webhooks() {
     if (!window.confirm("Delete this webhook?")) return;
     try {
       await api(`/gateway/webhooks/${id}`, { method: "DELETE", company });
-      setToast({ tone: "green", message: "Webhook deleted." });
+      notify("Webhook deleted.", "green");
       load();
     } catch (e) {
       // If webhook not found (stale after server restart), refresh the list
       if (e.message?.includes("not found")) {
-        setToast({ tone: "amber", message: "Webhook no longer exists. Refreshing list." });
+        notify("Webhook no longer exists. Refreshing list.", "amber");
         load();
       } else {
-        setToast({ tone: "red", message: e.message });
+        notify(e.message, "red");
       }
     }
   };
@@ -110,9 +112,9 @@ export default function Webhooks() {
     if (!company) return;
     try {
       await api(`/gateway/webhooks/${id}/test`, { method: "POST", company });
-      setToast({ tone: "green", message: "Test webhook sent." });
+      notify("Test webhook sent.", "green");
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     }
   };
 
@@ -124,7 +126,7 @@ export default function Webhooks() {
       const data = await api(`/gateway/webhooks/${wh.id}/logs`, { company });
       setLogs(data.logs || []);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setLogsLoading(false);
     }
@@ -226,7 +228,7 @@ export default function Webhooks() {
                     {logs.map((log, i) => (
                       <tr key={i} className="text-slate-300">
                         <td className="py-2 text-xs text-slate-500">
-                          {new Date(log.created_at).toLocaleString()}
+                          {parseUtcDate(log.created_at)?.toLocaleString()}
                         </td>
                         <td className="py-2 text-xs font-mono">{log.event}</td>
                         <td className="py-2">
@@ -299,8 +301,6 @@ export default function Webhooks() {
           </div>
         </Modal>
       )}
-
-      {toast && <Toast tone={toast.tone} message={toast.message} onClose={() => setToast(null)} />}
     </div>
   );
 }

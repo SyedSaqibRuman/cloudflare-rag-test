@@ -8,11 +8,13 @@ import {
   CredentialRepository,
   ResourceRepository,
   AuditRepository,
+  KbRepository,
 } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
 import { syncRagResource, clearRagResource } from "../services/rag-sync.js";
+import { autoBindVectorResource } from "../services/kb-auto-bind.js";
 import { wrap } from "./helpers.js";
-import { actorFromReq } from "./shared-helpers.js";
+import { actorFromReq, assertResourceNotKbBound } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -147,10 +149,32 @@ router.post(
         resourceType: body.resourceType,
         config: body.config,
       });
+      // AUTO-BIND: a new vector_index under a vector-capable provider becomes
+      // the Vector Store of this company's KBs whose binding is broken (null,
+      // deleted, inactive, or a non-vector provider). Healthy bindings and
+      // external-id KBs are never touched. Best-effort — never fails the create.
+      let rebound = [];
+      try {
+        const created = await ResourceRepository.findById(id);
+        rebound = await autoBindVectorResource({
+          kbRepo: KbRepository,
+          resourceRepo: ResourceRepository,
+          auditRepo: AuditRepository,
+          company,
+          newResource: created,
+          actor: actorFromReq(req),
+        });
+      } catch (bindErr) {
+        console.warn(`⚠️ KB auto-bind skipped: ${bindErr.message}`);
+      }
+      const rebindNote = rebound.length
+        ? ` Auto-bound as the Vector Store for ${rebound.length} KB${rebound.length === 1 ? "" : "s"}: ${rebound.map((r) => `'${r.kb_key}'`).join(", ")}.`
+        : "";
       return res.status(201).json({
         success: true,
-        message: `Resource '${body.resourceKey.trim()}' provisioned under '${credential.credential_key}'.`,
+        message: `Resource '${body.resourceKey.trim()}' provisioned under '${credential.credential_key}'.${rebindNote}`,
         resourceId: id,
+        reboundKbs: rebound,
       });
     } catch (err) {
       if (err?.code === "ER_DUP_ENTRY") {
@@ -226,6 +250,10 @@ router.delete(
     if (!existing) {
       return res.status(404).json({ success: false, error: "Resource not found." });
     }
+    // KB-binding guard: a resource a knowledge base still points at must not
+    // be deletable — the stale pointer makes ingest fail with "Vector store
+    // is not configured" and retrieval silently lose the KB.
+    await assertResourceNotKbBound(existing, "Resource");
     await ResourceRepository.remove(Number(req.params.id));
     // Clear the RAG keys this resource provided (if none remain).
     await clearRagResource(existing.company_id, existing);

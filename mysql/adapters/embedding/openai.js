@@ -16,11 +16,18 @@ const BASE_URLS = {
 export class OpenAIEmbeddingAdapter {
   constructor(credentials, modelKey, providerKey = "openai") {
     this.modelKey = modelKey;
-    this.apiKey = credentials.apiKey;
+    // Accept camelCase and snake_case (normalizeCredential maps api_key →
+    // apiKey, but hand-built credential objects may pass either form).
+    this.apiKey = credentials.apiKey || credentials.api_key || "";
     this.baseURL = BASE_URLS[providerKey] || BASE_URLS.openai;
   }
 
-  async embed(text) {
+  /**
+   * @param {string} text
+   * @param {{ signal?: AbortSignal }} [opts]  abort support so callers can
+   *        enforce deadlines (the bind-time probe aborts its 15s timeout)
+   */
+  async embed(text, opts = {}) {
     const res = await fetch(`${this.baseURL}/embeddings`, {
       method: "POST",
       headers: {
@@ -28,6 +35,7 @@ export class OpenAIEmbeddingAdapter {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({ model: this.modelKey, input: text }),
+      signal: opts.signal,
     });
 
     if (!res.ok) {

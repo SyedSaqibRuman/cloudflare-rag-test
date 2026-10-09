@@ -2,12 +2,24 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { login as apiLogin } from "./api";
 import { getToken, setToken, clearToken, refreshDocsCookie } from "./auth";
 
+// Auth context for the admin portal. Login is a plain API call:
+// POST /auth/login (Clerk Backend API password verification or legacy env
+// credentials server-side) → HMAC session token → localStorage + docs cookie.
 const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
   const [checking, setChecking] = useState(true);
   const [authed, setAuthed] = useState(false);
   const [username, setUsername] = useState(null);
+
+  // Normalize /auth/me's username — legacy env auth returns a string, the
+  // Clerk session path returns an object ({ sub, role, … }). Consumers of the
+  // context expect a display string, so extract the best label here once.
+  const toDisplayName = (u) => {
+    if (!u) return null;
+    if (typeof u === "string") return u;
+    return u.name || u.username || u.sub || "Admin";
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -33,7 +45,7 @@ export function AuthProvider({ children }) {
         if (res.ok) {
           const data = await res.json();
           authedNow = !!data.authenticated;
-          name = data.username || null;
+          name = toDisplayName(data.username);
           if (authedNow) refreshDocsCookie();
         }
       } catch {
@@ -65,7 +77,7 @@ export function AuthProvider({ children }) {
       });
       if (res.ok) {
         const me = await res.json();
-        setUsername(me.username || null);
+        setUsername(toDisplayName(me.username));
       }
     } catch {
       // non-fatal: profile falls back to "Admin"

@@ -344,6 +344,211 @@ export function getExecutor(providerKey) {
   return EXECUTORS[providerKey] || EXECUTORS.default;
 }
 
+// ------------------------------------------------------------------
+// STREAMING (ask-runtime support)
+// The RAG ask path (query/answer.js) executes an assistant's own provider
+// when its catalog model is not a Workers AI key. The two wire formats the
+// portal's providers actually speak are handled explicitly (OpenAI-compatible
+// SSE and Command Code NDJSON); any other executor falls back to a
+// buffer-and-translate stream so streaming degrades to delivery-at-end
+// instead of failing.
+// ------------------------------------------------------------------
+
+/**
+ * Create an incremental chunk parser for a provider's streaming wire format.
+ * @param {string} providerKey
+ * @param {(token: string) => void} onToken — called with each decoded text delta
+ * @returns {{ push: (text: string) => void, flush: () => void, result: () => { content: string|null, usage: object|null } }}
+ */
+export function createProviderStreamParser(providerKey, onToken) {
+  const emit = typeof onToken === "function" ? onToken : () => {};
+  let content = "";
+  let usage = null;
+  const usageFrom = (u) => {
+    if (!u) return;
+    const input = u.prompt_tokens ?? u.input_tokens ?? u.inputTokens ?? u.input_tokens_including_cached ?? null;
+    const output = u.completion_tokens ?? u.output_tokens ?? u.outputTokens ?? null;
+    if (input != null || output != null) {
+      usage = {
+        prompt_tokens: input ?? 0,
+        completion_tokens: output ?? 0,
+        total_tokens: u.total_tokens ?? u.totalTokens ?? (input ?? 0) + (output ?? 0),
+      };
+    }
+  };
+
+  if (providerKey === "commandcode") {
+    // NDJSON (one JSON event per line, optional `data:` prefix) — same events
+    // the executor's translateChatRaw parses for the non-streaming path.
+    let buffer = "";
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed === "[DONE]") return;
+      const json = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+      if (!json) return;
+      let ev;
+      try {
+        ev = JSON.parse(json);
+      } catch {
+        return;
+      }
+      if (!ev?.type) return;
+      if (ev.type === "text-delta") {
+        const delta = ev.text || ev.delta || "";
+        if (delta) {
+          content += delta;
+          emit(delta);
+        }
+      } else if (ev.type === "error") {
+        const errVal = ev.error ?? ev.message ?? "Command Code returned an error.";
+        throw new ExecutorError(502, typeof errVal === "string" ? errVal : JSON.stringify(errVal));
+      } else if (ev.type === "finish-step" || ev.type === "finish") {
+        usageFrom(ev.usage || ev.totalUsage);
+      }
+    };
+    return {
+      push: (text) => {
+        buffer += text;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) handleLine(line);
+      },
+      flush: () => {
+        if (buffer.trim()) handleLine(buffer);
+        buffer = "";
+      },
+      result: () => ({ content: content || null, usage }),
+    };
+  }
+
+  // Default: OpenAI-compatible SSE (`data: {chunk}` lines, [DONE] sentinel).
+  let buffer = "";
+  const handleEvent = (event) => {
+    const trimmed = event.trim();
+    if (!trimmed || trimmed === "[DONE]") return;
+    const json = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+    if (!json) return;
+    let chunk;
+    try {
+      chunk = JSON.parse(json);
+    } catch {
+      return;
+    }
+    if (chunk?.error) {
+      const msg = chunk.error.message || JSON.stringify(chunk.error);
+      throw new ExecutorError(502, msg);
+    }
+    const choice = chunk?.choices?.[0];
+    // OpenAI sends deltas; some gateways send the full message on the last chunk.
+    const delta = choice?.delta?.content ?? choice?.message?.content ?? chunk?.delta?.text ?? "";
+    if (delta) {
+      content += delta;
+      emit(delta);
+    }
+    if (choice?.finish_reason && chunk?.usage) usageFrom(chunk.usage);
+    else if (chunk?.usage) usageFrom(chunk.usage);
+  };
+  return {
+    push: (text) => {
+      buffer += text;
+      const parts = buffer.split(/\n\n/);
+      buffer = parts.pop() || "";
+      for (const part of parts) handleEvent(part);
+    },
+    flush: () => {
+      if (buffer.trim()) handleEvent(buffer);
+      buffer = "";
+    },
+    result: () => ({ content: content || null, usage }),
+  };
+}
+
+/**
+ * Stream a chat completion through a company credential, delivering text
+ * deltas to onToken as they arrive. Providers whose wire format has no
+ * incremental parser fall back to a single request whose response is parsed
+ * at completion (delivery-at-end — the token callback still fires once).
+ * @returns {{ providerKey, model, content, usage, latencyMs }}
+ */
+export async function streamChat({ companyKey, credentialId, providerKey, model, messages, options = {}, signal, onToken }) {
+  const { company, provider, credential, fields } = await resolveCredentialFields(companyKey, { credentialId, providerKey });
+  const executor = getExecutor(provider.provider_key);
+  const resolvedModel = model || defaultModelFor(provider, "chat");
+  if (!resolvedModel) {
+    throw new ExecutorError(400, `No model specified and provider '${provider.provider_key}' has no default chat model in the catalog.`);
+  }
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new ExecutorError(400, "messages must be a non-empty array of { role, content }.");
+  }
+
+  // Incremental formats: body requests a stream and chunks are decoded live.
+  // Non-incremental (commandcode's SSE parser above handles its own NDJSON, so
+  // it is incremental; everything else with no translate hook is not).
+  const supportsStreaming = supportsProviderStreaming(provider.provider_key);
+  const body = executor.chatBody(resolvedModel, messages, { ...options, ...(supportsStreaming ? { stream: true } : {}) });
+  const url = executor.chatUrl(provider, fields, resolvedModel);
+  const headers = executor.chatHeaders(provider, fields);
+
+  const start = Date.now();
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    throw new ExecutorError(502, `Network error calling ${provider.provider_key}: ${err.message}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ExecutorError(502, parseProviderErrorMessage(text, `Provider returned HTTP ${res.status}.`), { statusCode: res.status });
+  }
+
+  const finish = (content, usage, raw) => ({
+    companyId: company.id,
+    credentialId: credential.id,
+    providerKey: provider.provider_key,
+    model: resolvedModel,
+    content,
+    usage,
+    latencyMs: Date.now() - start,
+    raw,
+  });
+
+  if (!supportsStreaming || !res.body) {
+    const text = await res.text().catch(() => "");
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch { /* non-JSON body */ }
+    const translated =
+      typeof executor.translateChatRaw === "function"
+        ? executor.translateChatRaw(text)
+        : executor.translateChat(json || {});
+    if (translated.content && typeof onToken === "function") onToken(translated.content);
+    return finish(translated.content, translated.usage, translated.raw);
+  }
+
+  const parser = createProviderStreamParser(provider.provider_key, onToken);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.push(decoder.decode(value, { stream: true }));
+    }
+    parser.flush();
+  } finally {
+    reader.releaseLock();
+  }
+  const { content, usage: parsedUsage } = parser.result();
+  return finish(content, parsedUsage, null);
+}
+
+/** Wire formats the ask runtime can stream incrementally today. */
+export function supportsProviderStreaming(providerKey) {
+  return providerKey === "commandcode" || getExecutor(providerKey) === EXECUTORS.default;
+}
+
 /** First catalog model for a category (chat/embedding), else the first model. */
 export function defaultModelFor(provider, category = "chat") {
   const models = provider?.models || [];

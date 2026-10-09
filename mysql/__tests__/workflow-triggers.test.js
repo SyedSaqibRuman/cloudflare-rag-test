@@ -2,10 +2,11 @@
 // WORKFLOW TRIGGER TESTS — webhook token + schedule validation
 // (No live cron timers — those keep the event loop alive.)
 // --------------------------
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import crypto from "crypto";
+import { closePool } from "../pool.js";
 
 process.env.MYSQL_HOST = "127.0.0.1";
 process.env.MYSQL_DATABASE = "gateway_test";
@@ -16,6 +17,14 @@ const { CompanyRepository, WorkflowRepository, AuditRepository } = await import(
 const { generateWebhookToken } = await import("../services/workflow-service.js");
 
 const COMPANY = { id: 2, company_key: "popularcert" };
+
+// runWorkflow best-effort persists runs via the lazy MySQL pool (logRun in
+// workflow-runner.js). When .env has live MySQL creds this opens a real pooled
+// socket that otherwise keeps the process alive after the last test — close it
+// so the suite exits cleanly. No-op when the pool was never opened.
+after(async () => {
+  await closePool();
+});
 
 const WEBHOOK_WORKFLOW = {
   id: 70,

@@ -21,9 +21,11 @@ You help users with certification, compliance, standards, and this company's pro
 
 export function getSystemMessage(companyName, systemPromptOverride = null, assistantName = null, variables = [], guardrailPromptOverride = null) {
   const config = getConfig(companyName);
-  // The selected assistant's system prompt replaces the company default; the
-  // {{VARIABLES}} templating resolves with the assistant name overriding
-  // CONSULTANT_NAME when one is selected.
+  // The selected assistant's system prompt replaces the company default. The
+  // {{VARIABLE}} templating resolves from CUSTOM variables only — the company's
+  // PROMPT_VARIABLES merged with the assistant's own (assistant wins). There are
+  // no built-in variables: `assistantName` is accepted for call-site symmetry
+  // but is not injected, so define an ASSISTANT_NAME variable to use it.
   const template = systemPromptOverride || config.SYSTEM_PROMPT || "";
   const content = resolvePromptVariables(template, config, { assistantName, variables });
   // Customizable guardrail: the assistant's guardrail prompt wins, then the

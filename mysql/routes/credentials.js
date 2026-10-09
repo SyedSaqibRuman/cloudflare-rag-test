@@ -17,11 +17,19 @@ import { wrap } from "./helpers.js";
 import { parsePagination } from "./pagination.js";
 import { diagnoseError } from "../../shared/error-tag.js";
 import { syncRagCredentials, clearRagCredentials } from "../services/rag-sync.js";
-import { actorFromReq } from "./shared-helpers.js";
+import { actorFromReq, assertResourceNotKbBound } from "./shared-helpers.js";
+import { ConflictError } from "../../shared/errors.js";
 
 export { diagnoseError }; // re-export for the gateway test suite (dynamic import)
 
 const router = express.Router();
+
+// mysql2 surfaces unique-key violations as ER_DUP_ENTRY (errno 1062). Since
+// migration 029 dropped the global uk_credential_key, the only uniqueness
+// left on credentials is the per-tenant composite (company + provider +
+// environment + key) — map a collision to a 409 with an actionable message
+// instead of a raw 500.
+const isDupEntry = (err) => err?.code === "ER_DUP_ENTRY" || err?.errno === 1062;
 
 
 // GET /gateway/companies/:key/credentials — SECRET values never leave the DB.
@@ -132,20 +140,31 @@ router.post(
     const encryptMap = CredentialService.buildEncryptMap(provider.authForm);
     const { blob, version } = CredentialService.encryptCredential(fields || {}, encryptMap);
 
-    const id = await CredentialRepository.create(company.id, {
-      providerId: provider.id,
-      environmentId,
-      credentialKey,
-      credentialName,
-      config,
-      encryptedCredentials: blob,
-      encryptionVersion: version,
-      rotationPolicy: req.body.rotationPolicy,
-      autoRotateEnabled: req.body.autoRotateEnabled,
-      priority: req.body.priority,
-      isDefault: req.body.isDefault,
-      createdBy: req.auth?.user || null,
-    });
+    let id;
+    try {
+      id = await CredentialRepository.create(company.id, {
+        providerId: provider.id,
+        environmentId,
+        credentialKey,
+        credentialName,
+        config,
+        encryptedCredentials: blob,
+        encryptionVersion: version,
+        rotationPolicy: req.body.rotationPolicy,
+        autoRotateEnabled: req.body.autoRotateEnabled,
+        priority: req.body.priority,
+        isDefault: req.body.isDefault,
+        createdBy: req.auth?.user || null,
+      });
+    } catch (err) {
+      if (isDupEntry(err)) {
+        throw new ConflictError(
+          `A credential with key '${credentialKey}' already exists for this company, provider and environment — pick a different credential key.`,
+          "CREDENTIAL_KEY_EXISTS"
+        );
+      }
+      throw err;
+    }
 
     await AuditRepository.log({
       companyId: company.id,
@@ -509,18 +528,32 @@ router.put(
       is_default: !!row.is_default,
     };
 
-    const updated = await CredentialRepository.update(row.id, {
-      credentialName,
-      environmentId,
-      config: body.config !== undefined ? body.config : row.config,
-      priority: body.priority ?? row.priority,
-      isDefault,
-      isActive,
-      rotationPolicy: body.rotationPolicy ?? row.rotation_policy,
-      autoRotateEnabled: body.autoRotateEnabled ?? !!row.auto_rotate_enabled,
-      encryptedCredentials,
-      updatedBy: req.auth?.user || null,
-    });
+    let updated;
+    try {
+      updated = await CredentialRepository.update(row.id, {
+        credentialName,
+        environmentId,
+        config: body.config !== undefined ? body.config : row.config,
+        priority: body.priority ?? row.priority,
+        isDefault,
+        isActive,
+        rotationPolicy: body.rotationPolicy ?? row.rotation_policy,
+        autoRotateEnabled: body.autoRotateEnabled ?? !!row.auto_rotate_enabled,
+        encryptedCredentials,
+        updatedBy: req.auth?.user || null,
+      });
+    } catch (err) {
+      if (isDupEntry(err)) {
+        // The credential key itself never changes on update — a collision can
+        // only come from moving the credential into an environment that
+        // already holds a credential with the same key for this provider.
+        throw new ConflictError(
+          `This provider already has a credential with key '${row.credential_key}' in the target environment — pick a different environment.`,
+          "CREDENTIAL_KEY_EXISTS"
+        );
+      }
+      throw err;
+    }
     if (!updated) {
       return res.status(404).json({ success: false, error: "Credential not found." });
     }
@@ -566,6 +599,16 @@ router.delete(
     const row = await CredentialRepository.findWithEncrypted(req.params.id);
     if (!row) {
       return res.status(404).json({ success: false, error: "Credential not found." });
+    }
+    // KB-binding guard: deleting the connection would break every KB bound to
+    // one of this credential's resources (ingest fails with "Vector store is
+    // not configured" once the resource's credential can no longer resolve).
+    // The credential is still live here, so listByCompany sees all its rows.
+    const credResources = (await ResourceRepository.listByCompany(row.company_id)).filter(
+      (r) => r.credential_id === row.id
+    );
+    for (const resource of credResources) {
+      await assertResourceNotKbBound(resource, "Resource");
     }
     await CredentialRepository.remove(row.id);
     await AuditRepository.log({

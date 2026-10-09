@@ -5,14 +5,12 @@
 // Esc: Close modals / overlays
 // --------------------------
 import { useEffect, useCallback, useState } from "react";
-import { useCompanies } from "../context";
 
 // ------------------------------------------------------------------
 // Command Palette (Ctrl+K)
 // ------------------------------------------------------------------
 function CommandPalette({ navigate, onClose }) {
   const [query, setQuery] = useState("");
-  const { companies, company } = useCompanies();
 
   const commands = [
     { id: "dashboard", label: "Go to Dashboard", shortcut: "Home", route: "dashboard" },
@@ -25,7 +23,7 @@ function CommandPalette({ navigate, onClose }) {
     { id: "scheduler", label: "Go to Scheduler", shortcut: "J", route: "scheduler" },
     { id: "usage", label: "Go to Usage", shortcut: "U", route: "usage" },
     { id: "companies", label: "Go to Companies", shortcut: "O", route: "companies" },
-    { id: "webhooks", label: "Go to Notifications", shortcut: "N", route: "webhooks" },
+    { id: "webhooks", label: "Go to Notifications (Experimental)", shortcut: "N", route: "webhooks" },
     { id: "logs", label: "Go to Logs", shortcut: "L", route: "logs" },
   ];
 
@@ -91,7 +89,7 @@ function CommandPalette({ navigate, onClose }) {
         </div>
 
         {/* Footer */}
-        <div className="border-t border-slate-800 px-4 py-2 text-[11px] text-slate-600">
+        <div className="border-t border-slate-800 px-4 py-2 text-[11px] text-slate-500">
           <span className="mr-3">↑↓ Navigate</span>
           <span className="mr-3">↵ Select</span>
           <span>Esc Close</span>

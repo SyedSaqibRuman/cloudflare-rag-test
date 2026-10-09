@@ -18,3 +18,4 @@ export { UsageRepository } from "./usage.js";
 export { WorkflowRepository } from "./workflow.js";
 export { WorkflowRunRepository } from "./workflow-run.js";
 export { CatalogImportRepository } from "./catalog-import.js";
+export { SuspendedJobRepository } from "./suspended-job.js";

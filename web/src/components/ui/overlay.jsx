@@ -65,14 +65,21 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
         aria-modal="true"
         aria-label={title}
         className={cx(
-          "w-full overscroll-contain rounded-xl border border-slate-700 bg-slate-900 shadow-2xl max-w-[calc(100vw-2rem)] @container",
+          // Material dialog (Apple-style): light-catching top edge, layered
+          // depth shadow, subtle enter animation. The scrim + blur reads as a
+          // dimmed, pushed-back parent layer (§12).
+          "w-full overscroll-contain rounded-xl border border-slate-700 border-t-slate-500/40 bg-slate-900 shadow-[0_24px_60px_-12px_rgb(0_0_0/0.55)] max-w-[calc(100vw-2rem)] @container modal-pop-in",
           wide ? "md:max-w-3xl" : "md:max-w-lg",
-          maxScreen && "flex max-h-[calc(100dvh-2rem)] flex-col"
+          // Viewport-clamped by default: a dialog taller than the screen must
+          // scroll INTERNALLY (body area) — never overflow the viewport or push
+          // its footer off-screen. `maxScreen` additionally lets short content
+          // stretch to fill the clamped height.
+          "flex max-h-[calc(100dvh-2rem)] flex-col"
         )}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-5 py-4">
-          <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
+          <h3 className="text-sm font-semibold tracking-tight text-slate-100">{title}</h3>
           <button onClick={onClose} aria-label="Close dialog" className="text-slate-400 hover:text-slate-100 transition-colors rounded-lg p-1 hover:bg-slate-800">
             <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M18 6 6 18" />
@@ -80,7 +87,7 @@ export function Modal({ open, title, onClose, children, footer, wide, maxScreen 
             </svg>
           </button>
         </div>
-        <div ref={scrollRef} className={cx("relative min-h-0 p-5", wide && "max-h-[70vh] overflow-y-auto", maxScreen && "flex-1 overflow-y-auto")}>
+        <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-y-auto p-5">
           {children}
           {maxScreen && (
             <ScrollToTop container={scrollRef} className="sticky bottom-3 ml-auto" />
@@ -165,7 +172,7 @@ export function Popover({ children, className }) {
 
   return (
     <PopoverCtx.Provider value={{ open, setOpen, wrapperRef, menuRef }}>
-      <div ref={wrapperRef} className={cx("relative w-full", className)}>{children}</div>
+      <div ref={wrapperRef} className={cx("relative", className ?? "w-full")}>{children}</div>
     </PopoverCtx.Provider>
   );
 }

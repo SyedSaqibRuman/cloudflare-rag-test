@@ -5,7 +5,8 @@
 // --------------------------
 
 import { useState } from "react";
-import { Button, Toast } from "./index.jsx";
+import { Button } from "./index.jsx";
+import { useToast } from "../../hooks.js";
 
 /**
  * BulkActionsBar — renders a sticky bottom bar when items are selected.
@@ -27,7 +28,7 @@ export default function BulkActionsBar({
   bulkDeleteApi,
   bulkExportApi,
 }) {
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
   const [working, setWorking] = useState(false);
 
   if (!selectedKeys || selectedKeys.length === 0) return null;
@@ -37,11 +38,11 @@ export default function BulkActionsBar({
     setWorking(true);
     try {
       const result = await bulkDeleteApi(entity, selectedKeys, company);
-      setToast({ tone: "green", message: result.message || `Deleted ${selectedKeys.length} ${entity}.` });
+      notify(result.message || `Deleted ${selectedKeys.length} ${entity}.`);
       onDeselectAll();
       onRefresh?.();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setWorking(false);
     }
@@ -61,9 +62,9 @@ export default function BulkActionsBar({
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setToast({ tone: "green", message: `Exported ${selectedKeys.length} ${entity}.` });
+      notify(`Exported ${selectedKeys.length} ${entity}.`);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setWorking(false);
     }
@@ -104,7 +105,6 @@ export default function BulkActionsBar({
           </Button>
         </div>
       </div>
-      {toast && <Toast tone={toast.tone} message={toast.message} onClose={() => setToast(null)} />}
     </>
   );
 }

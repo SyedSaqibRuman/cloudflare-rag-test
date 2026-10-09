@@ -135,6 +135,112 @@ describe("createLlmEntityExtractor", () => {
     });
   });
 
+  describe("extraction cap + phase split", () => {
+    it("caps extraction at the first 10 chunks per document", async () => {
+      const { createGraphExtractor } = await import("../graph-extract.js");
+      let extractCalls = 0;
+      const extractor = createGraphExtractor({
+        companyName: "testco",
+        kbKey: "test-kb",
+        graphConfig: { uri: "neo4j://unreachable:7687", username: "u", password: "p", database: "neo4j" },
+        extractEntities: async () => {
+          extractCalls += 1;
+          return { entities: [], relationships: [] }; // nothing to commit → no Neo4j session ever needed
+        },
+      });
+      const chunks = Array.from({ length: 25 }, (_, i) => ({
+        id: `c${i}`,
+        text: `Chunk ${i} content`,
+        title: `T${i}`,
+      }));
+      await extractor.extractFromChunks(chunks, null);
+      assert.equal(extractCalls, 10); // capped at EXTRACTION_MAX_CHUNKS
+    });
+
+    it("honors per-KB maxChunks/concurrency overrides", async () => {
+      const { createGraphExtractor } = await import("../graph-extract.js");
+      let extractCalls = 0;
+      const extractor = createGraphExtractor({
+        companyName: "testco",
+        kbKey: "test-kb",
+        graphConfig: { uri: "neo4j://unreachable:7687", username: "u", password: "p", database: "neo4j" },
+        extractEntities: async () => {
+          extractCalls += 1;
+          return { entities: [], relationships: [] };
+        },
+        maxChunks: 2,
+        concurrency: 1,
+      });
+      const chunks = Array.from({ length: 20 }, (_, i) => ({ id: `c${i}`, text: `C${i}`, title: `T${i}` }));
+      await extractor.extractFromChunks(chunks, null);
+      assert.equal(extractCalls, 2); // per-KB cap wins over the 10 default
+    });
+
+    it("clamps invalid per-KB overrides to the defaults", async () => {
+      const { createGraphExtractor } = await import("../graph-extract.js");
+      let extractCalls = 0;
+      const extractor = createGraphExtractor({
+        companyName: "testco",
+        kbKey: "test-kb",
+        graphConfig: { uri: "neo4j://unreachable:7687", username: "u", password: "p", database: "neo4j" },
+        extractEntities: async () => {
+          extractCalls += 1;
+          return { entities: [], relationships: [] };
+        },
+        maxChunks: 999, // out of range → clamped to 50 (default region)
+        concurrency: -3, // invalid → default 4
+      });
+      const chunks = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, text: `C${i}`, title: `T${i}` }));
+      await extractor.extractFromChunks(chunks, null);
+      assert.equal(extractCalls, 50); // clamped to the hard ceiling
+    });
+
+    it("reports graph sub-phase progress via onProgress", async () => {
+      const { createGraphExtractor } = await import("../graph-extract.js");
+      const extractor = createGraphExtractor({
+        companyName: "testco",
+        kbKey: "test-kb",
+        graphConfig: { uri: "neo4j://unreachable:7687", username: "u", password: "p", database: "neo4j" },
+        extractEntities: async () => ({ entities: [{ name: "ISO 9001", type: "Standard" }], relationships: [] }),
+        maxChunks: 3,
+      });
+      const events = [];
+      const chunks = [
+        { id: "c1", text: "a", title: "A" },
+        { id: "c2", text: "b", title: "B" },
+        { id: "c3", text: "c", title: "C" },
+      ];
+      await extractor.extractFromChunks(chunks, null, (subPhase, detail) => events.push({ subPhase, detail }));
+      const extracting = events.filter((e) => e.subPhase === "extracting");
+      assert.ok(extracting.length >= 2, "expected start + completion extracting events");
+      assert.match(extracting[0].detail, /0\/3/); // starts at 0 of the capped sample
+      assert.match(extracting[extracting.length - 1].detail, /3\/3/); // last completion counts every chunk
+    });
+
+    it("extracts chunks in parallel, then commits sequentially", async () => {
+      const { createGraphExtractor } = await import("../graph-extract.js");
+      let active = 0;
+      let maxActive = 0;
+      const extractor = createGraphExtractor({
+        companyName: "testco",
+        kbKey: "test-kb",
+        graphConfig: { uri: "neo4j://unreachable:7687", username: "u", password: "p", database: "neo4j" },
+        extractEntities: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((r) => setTimeout(r, 5));
+          active -= 1;
+          return { entities: [{ name: "ISO 9001", type: "Standard" }], relationships: [] };
+        },
+      });
+      const chunks = Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, text: `C${i}`, title: `T${i}` }));
+      const result = await extractor.extractFromChunks(chunks, null);
+      assert.ok(maxActive > 1, `expected parallel LLM extraction, maxActive=${maxActive}`);
+      // Neo4j is unreachable → commits fail gracefully, no nodes reported
+      assert.equal(result.nodesCreated, 0);
+    });
+  });
+
   describe("error resilience", () => {
     it("does not throw when Neo4j connection fails", async () => {
       const { createGraphExtractor } = await import("../graph-extract.js");

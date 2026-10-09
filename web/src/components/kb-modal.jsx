@@ -5,7 +5,10 @@
 // --------------------------
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createKb, updateKb, getKbOptions, api } from "../api";
+import { createKb, updateKb, getKbOptions, discoverWebsite, api } from "../api";
+import { decodeProbeVerdict } from "../probe-verdict.js";
+import { evaluateDefaultBindings } from "#shared/default-bindings.js";
+import { KB_DEFAULT_SOURCE_TYPE, isSourceTypeEnabled } from "#shared/catalog-enums.js";
 import { Modal, Button, Input, Select, TextArea, Spinner, Toggle, ArrowLeftIcon, ArrowRightIcon } from "./ui";
 
 // ---------------------------------------------------------------------------
@@ -19,14 +22,188 @@ const STEPS = [
   { id: "review", label: "Review", icon: "✅" },
 ];
 
+// The FULL source-type vocabulary. Only the types still offered
+// (shared/catalog-enums.js → KB_DISABLED_SOURCE_TYPES) are rendered as cards —
+// "wordpress" and "custom" are withdrawn, so they never appear as a choice.
+// The withdrawn entries are kept here because an EXISTING KB may still carry
+// one, and the review step needs a label for it.
 const SOURCE_TYPES = [
   { value: "wordpress", label: "WordPress", note: "REST API", icon: "🔧" },
   { value: "file", label: "File Upload", note: "Documents", icon: "📄" },
   { value: "url", label: "URL / Sitemap", note: "Web pages", icon: "🌐" },
-  { value: "custom", label: "Custom", note: "API-driven", icon: "⚙️" },
+  { value: "custom", label: "Custom REST API", note: "API-driven · JSON", icon: "⚙️" },
 ];
 
+const OFFERED_SOURCE_TYPES = SOURCE_TYPES.filter((st) => isSourceTypeEnabled(st.value));
+
+/** Human label for a source type (falls back to the raw value for unknown ones). */
+function sourceTypeLabel(value) {
+  return SOURCE_TYPES.find((st) => st.value === value)?.label || value;
+}
+
 const OPTION_DEFAULT = { value: "", label: "Company default (config)" };
+
+const PAGINATION_OPTIONS = [
+  { value: "page", label: "Page number (?page=N)" },
+  { value: "totalPages", label: "Page number + total pages field" },
+  { value: "cursor", label: "Cursor (next-cursor field)" },
+  { value: "link", label: "Link header (rel=next)" },
+  { value: "none", label: "None (single request)" },
+];
+
+const AUTH_TYPE_OPTIONS = [
+  { value: "none", label: "None (public API)" },
+  { value: "bearer", label: "Bearer token" },
+  { value: "header", label: "Custom header" },
+  { value: "basic", label: "Basic (username + password)" },
+  { value: "query", label: "Query parameter" },
+];
+
+const CONTENT_FORMAT_OPTIONS = [
+  { value: "html", label: "HTML" },
+  { value: "text", label: "Plain text" },
+];
+
+/** Parse a source_config into the wizard's REST form fields. */
+function parseRest(config) {
+  const raw = config == null ? {} : (typeof config === "string" ? JSON.parse(config) : config);
+  const r = raw.rest || {};
+  return {
+    endpoint: r.endpoint || "",
+    itemsPath: r.itemsPath ?? "",
+    pagination: r.pagination || "page",
+    perPage: r.perPage ? String(r.perPage) : "",
+    maxItems: r.maxItems ? String(r.maxItems) : "",
+    totalPagesPath: r.totalPagesPath || "",
+    cursorPath: r.cursorPath || "",
+    authType: r.auth?.type || "none",
+    authHeaderName: r.auth?.headerName || "x-api-key",
+    authParamName: r.auth?.paramName || "api_key",
+    authUsername: r.auth?.username || "",
+    authPassword: r.auth?.password || "",
+    authToken: r.auth?.token || "",
+    contentFormat: r.contentFormat || "html",
+    // Advanced keys the wizard has no fields for (mapping, headers, timeout,
+    // items, custom pagination paths). Kept verbatim and re-applied on save
+    // so an API-driven edit round-trip never silently drops them.
+    advanced: r,
+  };
+}
+
+/** Read the website URL out of a stored source_config (website-first). */
+function parseWebsiteUrl(config) {
+  const raw = config == null ? {} : (typeof config === "string" ? JSON.parse(config) : config);
+  return raw.websiteUrl || "";
+}
+
+/**
+ * Client-side pre-check for the website field. Mirrors the server's
+ * `normalizeWebsiteUrl` so the user gets an inline hint instead of a 400 —
+ * the server remains the authority.
+ * @param {string} value
+ * @returns {string} error message, or "" when valid
+ */
+function validateWebsiteUrl(value) {
+  const raw = (value || "").trim();
+  if (!raw) return "Enter the website address to ingest, e.g. https://example.com";
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "That doesn't look like a valid URL — include https://";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return "Only http and https websites are supported.";
+  }
+  if (!parsed.hostname) return "That URL is missing a domain name.";
+  return "";
+}
+
+/** Wizard form keys that map onto real rest config keys — everything else in `advanced` is passed through. */
+const REST_FORM_KEYS = new Set([
+  "endpoint", "itemsPath", "pagination", "perPage", "maxItems", "totalPagesPath", "cursorPath",
+  "auth", "contentFormat",
+]);
+
+/**
+ * Build the source_config.rest block from the wizard's REST form fields.
+ * Mirrors the shape ingest/sources/rest.js expects. Returns undefined when
+ * no endpoint is configured (custom source without REST config is allowed
+ * server-side only if a server-side adapter exists — the wizard warns).
+ */
+function buildRestConfig(rest) {
+  const endpoint = rest.endpoint.trim();
+  if (!endpoint) return undefined;
+  const r = { endpoint };
+  if (rest.itemsPath.trim()) r.itemsPath = rest.itemsPath.trim();
+  const pagination = rest.pagination || "page";
+  if (pagination !== "page") r.pagination = pagination;
+  if (rest.perPage.trim()) r.perPage = Number(rest.perPage);
+  if (rest.maxItems.trim()) r.maxItems = Number(rest.maxItems);
+  if (pagination === "totalPages" && rest.totalPagesPath.trim()) r.totalPagesPath = rest.totalPagesPath.trim();
+  if (pagination === "cursor" && rest.cursorPath.trim()) r.cursorPath = rest.cursorPath.trim();
+  if (rest.contentFormat !== "html") r.contentFormat = rest.contentFormat;
+  const auth = buildRestAuth(rest);
+  if (auth) r.auth = auth;
+  // Preserve advanced keys set outside the wizard (mapping, headers, timeout,
+  // items, …). Form-managed keys always win — but if the user blanked a form
+  // field that previously had a value, that intent is respected (the key is
+  // simply not re-added, and the advanced copy is skipped for it).
+  const advanced = rest.advanced || {};
+  for (const [k, v] of Object.entries(advanced)) {
+    if (!REST_FORM_KEYS.has(k) && v !== undefined && v !== null) r[k] = v;
+  }
+  return r;
+}
+
+/** Build the auth block — undefined when type is none. Password/token kept if already set (edit mode round-trip). */
+function buildRestAuth(rest) {
+  const t = rest.authType;
+  if (!t || t === "none") return undefined;
+  const token = rest.authToken.trim();
+  if (t === "bearer") return token ? { type: "bearer", token } : undefined;
+  if (t === "header") return rest.authHeaderName.trim() && token ? { type: "header", headerName: rest.authHeaderName.trim(), token } : undefined;
+  if (t === "basic") return rest.authUsername.trim() && rest.authPassword.trim() ? { type: "basic", username: rest.authUsername.trim(), password: rest.authPassword.trim() } : undefined;
+  if (t === "query") return rest.authParamName.trim() && token ? { type: "query", paramName: rest.authParamName.trim(), token } : undefined;
+  return undefined;
+}
+
+/**
+ * Wizard-side mirror of ingest/sources/rest.js validateRestSourceConfig —
+ * the same rules, checked live as the user types, so the Continue button
+ * can block on an invalid config before it ever reaches the API.
+ */
+function validateRestFields(rest) {
+  const errors = [];
+  const endpoint = rest.endpoint.trim();
+  if (!endpoint) {
+    errors.push("An API endpoint URL is required.");
+    return errors;
+  }
+  if (!/^https?:\/\//i.test(endpoint)) errors.push("Endpoint must be an http(s) URL.");
+  const pagination = rest.pagination || "page";
+  if (!endpoint.includes("{page}") && !endpoint.includes("{cursor}") && (pagination === "page" || pagination === "totalPages")) {
+    errors.push('Endpoint has no {page} placeholder — switch pagination to "none" or "cursor", or add {page} to the URL.');
+  }
+  if (pagination === "totalPages" && !rest.totalPagesPath.trim()) {
+    errors.push('Total pages path is required when pagination is "totalPages".');
+  }
+  if (pagination === "cursor" && !rest.cursorPath.trim()) {
+    errors.push('Cursor path is required when pagination is "cursor".');
+  }
+  for (const k of ["perPage", "maxItems"]) {
+    if (rest[k].trim() && (!Number.isFinite(Number(rest[k])) || Number(rest[k]) < 1)) {
+      errors.push(`${k === "perPage" ? "Per page" : "Max items"} must be a positive number.`);
+    }
+  }
+  const t = rest.authType;
+  const token = rest.authToken.trim();
+  if (t === "bearer" && !token) errors.push("Bearer token is required for bearer auth.");
+  if (t === "header" && (!rest.authHeaderName.trim() || !token)) errors.push("Header name and token are required for header auth.");
+  if (t === "basic" && (!rest.authUsername.trim() || !rest.authPassword.trim())) errors.push("Username and password are required for basic auth.");
+  if (t === "query" && (!rest.authParamName.trim() || !token)) errors.push("Query param name and token are required for query auth.");
+  return errors;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,7 +290,7 @@ function Section({ title, icon, children, className = "" }) {
 function SourceTypeSelector({ value, onChange }) {
   return (
     <div className="grid grid-cols-2 gap-2">
-      {SOURCE_TYPES.map((st) => (
+      {OFFERED_SOURCE_TYPES.map((st) => (
         <button
           key={st.value}
           type="button"
@@ -149,10 +326,14 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     kbKey: "",
     kbName: "",
     description: "",
+    rest: parseRest(null),
     vectorResourceId: "",
     storageResourceId: "",
+    vectorExternalId: "",
+    storageExternalId: "",
     embeddingModelId: "",
-    sourceType: "wordpress",
+    sourceType: KB_DEFAULT_SOURCE_TYPE,
+    websiteUrl: "",
     urls: "",
     sitemapUrl: "",
     ingestScope: "all",
@@ -168,26 +349,126 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     webhookSecret: "",
     webhookEvents: "completed,failed",
   });
-  const [options, setOptions] = useState({ vectorResources: [], storageResources: [], embeddingModels: [] });
+  const [options, setOptions] = useState({
+    vectorResources: [],
+    storageResources: [],
+    embeddingModels: [],
+    availableEmbeddingModels: [],
+    unavailableEmbeddingModels: [],
+  });
+  const [companyDefaults, setCompanyDefaults] = useState(null); // { VECTOR_INDEX, R2_BUCKET_NAME } | null
+  const [optionsError, setOptionsError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const wasOpen = useRef(open);
+  // Structured verdict from a failed bind-time embedding probe (server sends it
+  // on the 400) — rendered as a decoded banner instead of raw prose.
+  const [probeError, setProbeError] = useState(null);
+
   const [advancedMode, setAdvancedMode] = useState(false);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  // Reset on open
+  // Live mirror of the server's rest config validation (custom sources).
+  const restErrors = useMemo(
+    () => (form.sourceType === "custom" ? validateRestFields(form.rest) : []),
+    [form.sourceType, form.rest]
+  );
+
+  // Website sources need EITHER a website URL (automatic sitemap discovery) or
+  // an explicit sitemap/URL list from the advanced section. Mirrors the server
+  // rule in validateKbInput so the user is told before submitting.
+  const websiteUrlError = useMemo(() => {
+    if (form.sourceType !== "url") return "";
+    const hasExplicitSource = Boolean(form.sitemapUrl?.trim() || form.urls?.trim());
+    if (!form.websiteUrl?.trim() && !hasExplicitSource) return validateWebsiteUrl("");
+    if (form.websiteUrl?.trim()) return validateWebsiteUrl(form.websiteUrl);
+    return "";
+  }, [form.sourceType, form.websiteUrl, form.sitemapUrl, form.urls]);
+
+  // ---- Sitemap discovery preview (spec §30/§31) ----
+  // The moment a valid website URL is entered (and no explicit sitemap/URLs
+  // are given in the advanced section), the backend runs robots.txt →
+  // fallbacks → index-crawl discovery and reports what it found. Purely
+  // informational at this stage — saveKb re-resolves authoritatively.
+  const [discovery, setDiscovery] = useState({ status: "idle" }); // idle|checking|found|notfound|error
+  const hasExplicitSource = Boolean(form.sitemapUrl?.trim() || form.urls?.trim());
   useEffect(() => {
-    if (open && !wasOpen.current) {
-      setStep(0);
+    if (form.sourceType !== "url" || websiteUrlError || hasExplicitSource) {
+      setDiscovery({ status: "idle" });
+      return undefined;
+    }
+    const websiteUrl = form.websiteUrl.trim();
+    if (!websiteUrl) {
+      setDiscovery({ status: "idle" });
+      return undefined;
+    }
+    let cancelled = false;
+    setDiscovery({ status: "checking" });
+    const timer = setTimeout(async () => {
+      try {
+        const d = await discoverWebsite(company, websiteUrl);
+        if (!cancelled) {
+          setDiscovery(
+            d.sitemapFound
+              ? { status: "found", sitemapUrl: d.sitemapUrl, urlCount: d.urlCount, sitemapCount: d.sitemapCount, robotsUrl: d.robotsUrl }
+              : { status: "notfound" }
+          );
+        }
+      } catch (e) {
+        if (!cancelled) setDiscovery({ status: "error", error: e.message });
+      }
+    }, 600); // debounce while the user types
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [form.sourceType, form.websiteUrl, websiteUrlError, hasExplicitSource, company]);
+
+  // Reset on open transition OR row change while open (issue-002 fix).
+  // Separate refs track the previous open state and row identity so we can
+  // detect both dimensions independently. Row IDENTITY is `id`/`kb_key`, not
+  // the object reference: the KB detail page refetches the row on a 30s poll,
+  // and re-seeding the form on every fresh object used to wipe in-progress
+  // edits (e.g. the embedding dropdown) while the admin was mid-wizard.
+  const wasOpenRef = useRef(open);
+  const rowIdentity = row ? `${row.id ?? ""}:${row.kb_key ?? ""}` : null;
+  const prevRowIdentityRef = useRef(rowIdentity);
+  useEffect(() => {
+    const opened = open && !wasOpenRef.current;
+    const rowChangedWhileOpen =
+      open && rowIdentity !== null && rowIdentity !== prevRowIdentityRef.current;
+    wasOpenRef.current = open;
+    prevRowIdentityRef.current = rowIdentity;
+
+    if (opened || rowChangedWhileOpen) {
+      // Determine which fields come from the KB row (loaded from DB) vs.
+      // defaults.  For vector/storage the row carries both a numeric
+      // provider_resources id AND the external resource name (the actual
+      // Cloudflare index/bucket name).  The Select value must match one
+      // of the option values built in the useMemo below: numeric id for
+      // registry rows, the name string for live resources.
+      const vectorVal = row?.vector_resource_id
+        ? String(row.vector_resource_id)
+        : (row?.vector_external_id || "");
+      const storageVal = row?.storage_resource_id
+        ? String(row.storage_resource_id)
+        : (row?.storage_external_id || "");
+
+      setStep((prev) => opened ? 0 : prev);
       setForm({
         kbKey: row ? row.kb_key : `${company || ""}-kb`,
         kbName: row?.kb_name ?? "",
         description: row?.description ?? "",
-        vectorResourceId: row?.vector_resource_id ? String(row.vector_resource_id) : "",
-        storageResourceId: row?.storage_resource_id ? String(row.storage_resource_id) : "",
+        vectorResourceId: vectorVal,
+        storageResourceId: storageVal,
+        vectorExternalId: row?.vector_external_id || "",
+        storageExternalId: row?.storage_external_id || "",
         embeddingModelId: row?.embedding_model_id ? String(row.embedding_model_id) : "",
-        sourceType: row?.source_type ?? "wordpress",
+        // Legacy rows may carry a withdrawn source_type — keep it so re-saving
+        // is a no-op; the step-2 banner explains it and offers a way to migrate.
+        sourceType: row?.source_type || KB_DEFAULT_SOURCE_TYPE,
+        rest: parseRest(row?.source_config),
+        websiteUrl: parseWebsiteUrl(row?.source_config),
         urls: parseUrls(row?.source_config).join("\n"),
         sitemapUrl: parseSitemapUrl(row?.source_config),
         ingestScope: parseScope(row?.source_config).scope,
@@ -200,45 +481,83 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
         enableHybridSearch: row ? !!row.enable_hybrid_search : true,
         graphResourceId: row?.graph_resource_id ? String(row.graph_resource_id) : "",
         enableGraphRag: row ? !!row.enable_graph_rag : false,
+        graphExtractMaxChunks: row?.graph_extract_max_chunks != null ? String(row.graph_extract_max_chunks) : "",
+        graphExtractConcurrency: row?.graph_extract_concurrency != null ? String(row.graph_extract_concurrency) : "",
         webhookUrl: row?.webhook_url ?? "",
         webhookSecret: "",
         webhookEvents: toEventsString(row?.webhook_events) || "completed,failed",
       });
       setError(null);
+      setOptionsError(null);
+      setProbeError(null);
       if (company) {
         getKbOptions(company)
           .then(setOptions)
-          .catch((e) => console.error("Failed to load KB options:", e));
+          .catch((e) => {
+            console.error("Failed to load KB options:", e);
+            setOptionsError("Could not load resource options. Some dropdowns may be incomplete.");
+          });
+        // The server auto-binds "Company default" KBs from these config values
+        // (kb-service applyDefaultResourceBindings). Fetched best-effort so the
+        // review step can warn when a default won't resolve to a resource.
+        // Legacy (unsectioned) responses fall back to the body itself.
+        api("/cloudflare/config", { company })
+          .then((d) => {
+            const cfg = d?.config || d || {};
+            setCompanyDefaults({
+              VECTOR_INDEX: cfg.VECTOR_INDEX ?? cfg.STORAGE?.VECTOR_INDEX ?? "",
+              R2_BUCKET_NAME: cfg.R2_BUCKET_NAME ?? cfg.STORAGE?.R2_BUCKET_NAME ?? "",
+            });
+          })
+          .catch(() => setCompanyDefaults(null)); // hint simply won't render
       }
     }
-    wasOpen.current = open;
-  }, [open, row, company]);
+  }, [open, rowIdentity, company, row]);
 
   // Validation per step
   const canContinue = () => {
     if (step === 0) {
       return form.kbName.trim() && /^[a-z0-9-]+$/.test(form.kbKey) && form.kbKey.length >= 3;
     }
-    // Steps 1-4 always valid (optional fields)
+    // Custom sources: block continuing until the REST config passes the same
+    // rules the server enforces (restErrors is empty only when valid).
+    if (step === 1 && form.sourceType === "custom" && restErrors.length > 0) return false;
+    // Website sources: a website URL (or an explicit sitemap/URL list) is
+    // required — there is nothing to ingest otherwise.
+    if (step === 1 && websiteUrlError) return false;
+    // Steps 2-4 always valid (optional fields)
     return true;
   };
 
   const submit = async () => {
     setBusy(true);
     setError(null);
+    setProbeError(null);
     try {
       const numOrUndef = (v) => (v === "" || v === null ? undefined : Number(v));
+      // Live resources use name strings as option values; detect them by
+      // checking whether the selected value is a valid numeric id.
+      const isLiveResourceId = (v) => v !== "" && v !== null && isNaN(Number(v));
       const body = {
         kbKey: form.kbKey.trim(),
         kbName: form.kbName.trim(),
         description: form.description.trim() || null,
-        vectorResourceId: numOrUndef(form.vectorResourceId),
-        storageResourceId: numOrUndef(form.storageResourceId),
-        embeddingModelId: numOrUndef(form.embeddingModelId),
-        sourceType: form.sourceType || "wordpress",
+        vectorResourceId: isLiveResourceId(form.vectorResourceId) ? undefined : numOrUndef(form.vectorResourceId),
+        vectorExternalId: isLiveResourceId(form.vectorResourceId) ? form.vectorResourceId : (form.vectorExternalId || undefined),
+        storageResourceId: isLiveResourceId(form.storageResourceId) ? undefined : numOrUndef(form.storageResourceId),
+        storageExternalId: isLiveResourceId(form.storageResourceId) ? form.storageResourceId : (form.storageExternalId || undefined),
+        // "" (Company default) → explicit null so an existing KB-bound model
+        // can be CLEARED from the modal — undefined would merge-keep the old
+        // binding and there'd be no way to follow the probe's "remove the
+        // binding" advice from the UI.
+        embeddingModelId: form.embeddingModelId === "" ? null : Number(form.embeddingModelId),
+        sourceType: form.sourceType || KB_DEFAULT_SOURCE_TYPE,
         sourceConfig: ["wordpress", "url"].includes(form.sourceType)
           ? {
+              // Website-first: the backend discovers the sitemap automatically,
+              // so a websiteUrl alone is a complete, valid configuration.
               ...(form.sourceType === "url" ? {
+                websiteUrl: form.websiteUrl.trim() || undefined,
                 urls: form.urls.split("\n").map((u) => u.trim()).filter(Boolean),
                 sitemapUrl: form.sitemapUrl.trim() || undefined,
               } : {}),
@@ -248,7 +567,9 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                 ? form.selectedPages.split("\n").map((u) => u.trim()).filter(Boolean)
                 : undefined,
             }
-          : undefined,
+          : form.sourceType === "custom"
+            ? { rest: buildRestConfig(form.rest) }
+            : undefined,
         chunkSize: Number(form.chunkSize),
         chunkOverlap: Number(form.chunkOverlap),
         retrievalTopK: Number(form.retrievalTopK),
@@ -256,17 +577,28 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
         enableHybridSearch: form.enableHybridSearch,
         graphResourceId: numOrUndef(form.graphResourceId),
         enableGraphRag: form.enableGraphRag,
+        // Blank string = "use server default" → sent as undefined so the
+        // backend stores NULL (defaults), not 0.
+        ...(form.graphExtractMaxChunks.trim() !== "" && { graphExtractMaxChunks: Number(form.graphExtractMaxChunks) }),
+        ...(form.graphExtractConcurrency.trim() !== "" && { graphExtractConcurrency: Number(form.graphExtractConcurrency) }),
         webhookUrl: form.webhookUrl.trim() || null,
         webhookEvents: form.webhookEvents || "completed,failed",
         ...(row
           ? form.webhookSecret.trim() && { webhookSecret: form.webhookSecret.trim() }
           : { webhookSecret: form.webhookSecret.trim() || null }),
       };
-      if (row) await updateKb(row.kb_key, body, company);
-      else await createKb(body, company);
+      // silentError: the modal renders ALL failures inline (decoded probe
+      // banner / rose error) — the auto error toast would be redundant. The
+      // SUCCESS toast still fires from the auto-toaster.
+      if (row) await updateKb(row.kb_key, body, company, { silentError: true });
+      else await createKb(body, company, { silentError: true });
       onSaved();
     } catch (e) {
-      setError(e.message);
+      // Probe failures get the decoded verdict banner INSTEAD of the raw
+      // prose banner (the auto-toast is silenced for this call — the banner
+      // is persistent, actionable feedback the toast can't provide).
+      setProbeError(e.probe || null);
+      setError(e.probe ? null : e.message);
     } finally {
       setBusy(false);
     }
@@ -274,7 +606,23 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
 
   // Build option lists — memoized so <select> elements don't re-mount on every
   // keystroke, which previously caused dropdowns to auto-collapse in ~1–2s.
-  const { vectorOptions, storageOptions, graphOptions, modelOptions, selectedModel } = useMemo(() => {
+  // vectorResources from /kbs/options is already filtered server-side to
+  // vector-capable providers; the server also returns the resources it filtered
+  // OUT (incapableVectorResources — e.g. a vector_index row accidentally created
+  // under Cloudflare R2) so an existing KB bound to one can explain the problem
+  // instead of silently showing the wrong default.
+  const {
+    vectorOptions,
+    storageOptions,
+    graphOptions,
+    modelOptions,
+    selectedModel,
+    unavailableEmbeddingCount,
+    incapableVectorBinding,
+  } = useMemo(() => {
+    // Only the models this company can actually call — provider has an embedding
+    // adapter AND an active credential (server-side partition).
+    const availableEmbeddingModels = options.availableEmbeddingModels || [];
     const seenVector = new Set();
     const vectorResourceOpts = [];
     for (const r of options.vectorResources || []) {
@@ -289,6 +637,14 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
       seenVector.add(key);
       vectorResourceOpts.push({ value: key, label: `${r.name || r.id} (live)` });
     }
+
+    // The KB's saved vector binding is unusable for ingestion when its provider
+    // has no vector adapter (server filtered it out of vectorResources).
+    const boundId = row?.vector_resource_id != null ? String(row.vector_resource_id) : null;
+    const incapableVectorBinding =
+      boundId &&
+      !vectorResourceOpts.some((o) => o.value === boundId) &&
+      (options.incapableVectorResources || []).find((r) => String(r.id) === boundId) || null;
 
     const seenStorage = new Set();
     const storageResourceOpts = [];
@@ -314,10 +670,59 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
       vectorOptions: [OPTION_DEFAULT, ...vectorResourceOpts],
       storageOptions: [OPTION_DEFAULT, ...storageResourceOpts],
       graphOptions: [OPTION_DEFAULT, ...graphResourceOpts],
-      modelOptions: [OPTION_DEFAULT, ...(options.embeddingModels || []).map((m) => ({ value: String(m.id), label: `${m.provider_name} · ${m.model_name}` }))],
+      // Only models the company can actually call: the provider must have an
+      // embedding adapter AND an active credential for this company (partition
+      // is done server-side, shared/embedding-capability.js). `embeddingModels`
+      // stays as a fallback so an existing KB remains editable if the server
+      // predates the partition.
+      modelOptions: [
+        OPTION_DEFAULT,
+        ...(availableEmbeddingModels.length
+          ? availableEmbeddingModels
+          : (options.embeddingModels || [])
+        ).map((m) => ({ value: String(m.id), label: `${m.provider_name} · ${m.model_name}` })),
+      ],
       selectedModel: (options.embeddingModels || []).find((m) => String(m.id) === form.embeddingModelId),
+      unavailableEmbeddingCount: (options.unavailableEmbeddingModels || []).length,
+      incapableVectorBinding,
     };
-  }, [options, form.embeddingModelId]);
+  }, [options, form.embeddingModelId, row]);
+
+  // Review-step mirror of the server's default-binding resolution: when the KB
+  // relies on "Company default (config)", check the company config values will
+  // actually resolve to provisioned resources (shared matcher = the server's).
+  // Best-effort UX sugar only — the server auto-binds or leaves null either way.
+  const defaultBindingWarnings = useMemo(() => {
+    if (!companyDefaults) return [];
+    const hasVectorBinding = Boolean(form.vectorResourceId || form.vectorExternalId);
+    const hasStorageBinding = Boolean(form.storageResourceId || form.storageExternalId);
+    // Registry + live rows: the server's listByCompany sees registry rows only,
+    // but live names are written by the config selectors too — evaluate against
+    // both so the hint never cries wolf for a live-resource default.
+    const resources = [
+      ...(options.vectorResources || []),
+      ...(options.storageResources || []),
+      ...(options.graphResources || []),
+      ...(options.liveVectorResources || []).map((r) => ({ ...r, resource_type: "vector_index" })),
+      ...(options.liveStorageResources || []).map((r) => ({ ...r, resource_type: "object_bucket" })),
+    ];
+    const result = evaluateDefaultBindings({
+      resources,
+      vectorDefault: companyDefaults.VECTOR_INDEX,
+      storageDefault: companyDefaults.R2_BUCKET_NAME,
+      hasVectorBinding,
+      hasStorageBinding,
+    });
+    // `kind` routes each warning to its Advanced-mode select (same hints the
+    // review step renders — one memo feeds both places).
+    return [
+      { ...result.vector, kind: "vector" },
+      { ...result.storage, kind: "storage" },
+    ].filter((s) => s.needed && !s.resolved && s.reason);
+  }, [companyDefaults, form.vectorResourceId, form.vectorExternalId, form.storageResourceId, form.storageExternalId, options]);
+
+  const vectorDefaultWarning = defaultBindingWarnings.find((w) => w.kind === "vector");
+  const storageDefaultWarning = defaultBindingWarnings.find((w) => w.kind === "storage");
 
   if (!open) return null;
 
@@ -388,7 +793,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                         : undefined
                   }
                 />
-                <p className="mt-1 text-[11px] text-slate-600">Auto-generated from name · Editable in create mode</p>
+                <p className="mt-1 text-[11px] text-slate-500">Auto-generated from name · Editable in create mode</p>
               </div>
               <TextArea
                 label="Description"
@@ -407,6 +812,24 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
         <div className="space-y-4">
           <Section title="Data Source" icon="📥">
             <p className="mb-3 text-sm text-slate-400">Where should this knowledge base get its content?</p>
+
+            {/* A KB that still uses a withdrawn source (WordPress / Custom REST
+                API). It is kept selected so re-saving is a no-op, but it is not
+                offered as a choice — pick one below to migrate. */}
+            {!isSourceTypeEnabled(form.sourceType) && (
+              <div className="mb-3 flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+                <span className="shrink-0 text-amber-400">⚠️</span>
+                <div className="text-xs text-amber-300">
+                  <p className="font-medium">{sourceTypeLabel(form.sourceType)} is no longer offered.</p>
+                  <p className="mt-0.5 text-amber-300/80">
+                    This KB keeps working as-is until you change it. For a WordPress site, choose
+                    URL / Sitemap and point it at <code className="font-mono">/wp-sitemap.xml</code> — it
+                    ingests the same pages without the broken REST API.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <SourceTypeSelector value={form.sourceType} onChange={(v) => set("sourceType", v)} />
 
             {/* Scope selector for WordPress/URL */}
@@ -491,7 +914,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                       value={form.docLimit}
                       onChange={(e) => set("docLimit", e.target.value)}
                     />
-                    <p className="mt-1 text-[11px] text-slate-600">Stop after processing this many documents</p>
+                    <p className="mt-1 text-[11px] text-slate-500">Stop after processing this many documents</p>
                   </div>
                 )}
 
@@ -505,31 +928,78 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                       value={form.selectedPages}
                       onChange={(e) => set("selectedPages", e.target.value)}
                     />
-                    <p className="mt-1 text-[11px] text-slate-600">Only these specific pages will be fetched and indexed</p>
+                    <p className="mt-1 text-[11px] text-slate-500">Only these specific pages will be fetched and indexed</p>
                   </div>
                 )}
               </div>
             )}
 
-            {/* URL-specific fields */}
+            {/* URL / website fields. The user supplies ONLY a website URL —
+                the sitemap is discovered automatically by the backend
+                (robots.txt → standard fallbacks → sitemap indexes). */}
             {form.sourceType === "url" && (
               <div className="mt-3 space-y-3">
                 <Input
-                  label="Sitemap URL (optional)"
-                  placeholder="https://example.com/sitemap.xml"
-                  value={form.sitemapUrl}
-                  onChange={(e) => set("sitemapUrl", e.target.value)}
+                  label="Website URL"
+                  placeholder="https://example.com"
+                  value={form.websiteUrl}
+                  onChange={(e) => set("websiteUrl", e.target.value)}
+                  error={websiteUrlError || undefined}
                 />
-                <p className="-mt-2 text-[11px] text-slate-600">Auto-discover pages from sitemap.xml — max 1000 URLs</p>
-                {!form.sitemapUrl && (
-                  <TextArea
-                    label="Or enter URLs manually"
-                    rows={4}
-                    placeholder={"https://example.com/page-1\nhttps://example.com/page-2"}
-                    value={form.urls}
-                    onChange={(e) => set("urls", e.target.value)}
-                  />
+                {/* Live discovery status (spec §31) — informative only; saveKb
+                    re-resolves authoritatively and stamps sitemapUrl. */}
+                {discovery.status === "checking" && (
+                  <p className="-mt-2 flex items-center gap-2 text-[11px] text-slate-400">
+                    <Spinner className="h-3 w-3" /> Finding sitemap…
+                  </p>
                 )}
+                {discovery.status === "found" && (
+                  <p className="-mt-2 text-[11px] text-green-400">
+                    ✓ Sitemap found{discovery.sitemapUrl ? `: ${discovery.sitemapUrl}` : ""}
+                    {discovery.sitemapCount > 1 ? ` (via ${discovery.sitemapCount} sitemap file(s))` : ""}
+                    {discovery.urlCount != null ? ` · ${discovery.urlCount.toLocaleString()} pages discovered` : ""}
+                  </p>
+                )}
+                {discovery.status === "notfound" && (
+                  <p className="-mt-2 text-[11px] text-amber-400">
+                    ⚠️ We couldn't find a sitemap for this website (checked robots.txt and the standard
+                    locations). Saving will fail unless the site exposes one — or you specify a sitemap
+                    or URL list under Advanced.
+                  </p>
+                )}
+                {discovery.status === "error" && (
+                  <p className="-mt-2 text-[11px] text-amber-400">
+                    ⚠️ Couldn't check this website right now — the sitemap will be resolved at ingest time.
+                  </p>
+                )}
+                {discovery.status === "idle" && (
+                  <p className="-mt-2 text-[11px] text-slate-500">
+                    We'll automatically find the site's sitemap (via robots.txt) and discover the pages
+                    available for ingestion.
+                  </p>
+                )}
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-slate-400 hover:text-slate-300">
+                    Advanced: specify a sitemap or list URLs manually
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <Input
+                      label="Sitemap URL (optional)"
+                      placeholder="https://example.com/sitemap.xml"
+                      value={form.sitemapUrl}
+                      onChange={(e) => set("sitemapUrl", e.target.value)}
+                    />
+                    {!form.sitemapUrl && (
+                      <TextArea
+                        label="Or enter URLs manually"
+                        rows={4}
+                        placeholder={"https://example.com/page-1\nhttps://example.com/page-2"}
+                        value={form.urls}
+                        onChange={(e) => set("urls", e.target.value)}
+                      />
+                    )}
+                  </div>
+                </details>
               </div>
             )}
 
@@ -537,6 +1007,155 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
               <p className="mt-3 text-sm text-slate-500">
                 Files can be uploaded after creation from the Knowledge Base detail page.
               </p>
+            )}
+
+            {/* Custom source: adapter warning + REST config */}
+            {form.sourceType === "custom" && (
+              <div className="mt-4 space-y-3">
+                <div className="flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+                  <span className="shrink-0 text-amber-400">⚠️</span>
+                  <div className="text-xs text-amber-300">
+                    <p className="font-medium">Custom sources need a data feed before they can ingest.</p>
+                    <p className="mt-0.5 text-amber-300/80">
+                      Configure the REST API below — or, for full control, register a server-side adapter
+                      for this KB on the backend (ingest/sources). Without one of these, ingestion will fail
+                      with a "no rest block" error.
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-xs font-medium uppercase tracking-wider text-slate-400">REST API Configuration</p>
+
+                <Input
+                  label="API endpoint"
+                  placeholder="https://api.example.com/articles?page={page}&per_page=50"
+                  value={form.rest.endpoint}
+                  onChange={(e) => set("rest", { ...form.rest, endpoint: e.target.value })}
+                  error={restErrors.length ? undefined : undefined}
+                />
+                <p className="-mt-2 text-[11px] text-slate-500">
+                  Use {'{page}'} or {'{cursor}'} in the URL as the pagination placeholder. Response must be JSON.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Select
+                      label="Pagination"
+                      options={PAGINATION_OPTIONS}
+                      value={form.rest.pagination}
+                      onChange={(e) => set("rest", { ...form.rest, pagination: e.target.value })}
+                    />
+                  </div>
+                  <Input
+                    label="Items path (optional)"
+                    placeholder="data — dot path to the items array"
+                    value={form.rest.itemsPath}
+                    onChange={(e) => set("rest", { ...form.rest, itemsPath: e.target.value })}
+                  />
+                </div>
+                {(form.rest.pagination === "totalPages" || form.rest.pagination === "cursor") && (
+                  <Input
+                    label={form.rest.pagination === "totalPages" ? "Total pages path" : "Next cursor path"}
+                    placeholder={form.rest.pagination === "totalPages" ? "meta.total_pages" : "meta.next_cursor"}
+                    value={form.rest.pagination === "totalPages" ? form.rest.totalPagesPath : form.rest.cursorPath}
+                    onChange={(e) => set("rest", { ...form.rest, [form.rest.pagination === "totalPages" ? "totalPagesPath" : "cursorPath"]: e.target.value })}
+                  />
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    label="Per page (optional)"
+                    type="number"
+                    min={1}
+                    placeholder="50"
+                    value={form.rest.perPage}
+                    onChange={(e) => set("rest", { ...form.rest, perPage: e.target.value })}
+                  />
+                  <Input
+                    label="Max items (safety cap)"
+                    type="number"
+                    min={1}
+                    placeholder="1000"
+                    value={form.rest.maxItems}
+                    onChange={(e) => set("rest", { ...form.rest, maxItems: e.target.value })}
+                  />
+                </div>
+
+                {/* Auth */}
+                <Select
+                  label="Authentication"
+                  options={AUTH_TYPE_OPTIONS}
+                  value={form.rest.authType}
+                  onChange={(e) => set("rest", { ...form.rest, authType: e.target.value })}
+                />
+                {form.rest.authType === "bearer" && (
+                  <Input label="Bearer token" type="password" value={form.rest.authToken} onChange={(e) => set("rest", { ...form.rest, authToken: e.target.value })} />
+                )}
+                {form.rest.authType === "header" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="Header name" placeholder="x-api-key" value={form.rest.authHeaderName} onChange={(e) => set("rest", { ...form.rest, authHeaderName: e.target.value })} />
+                    <Input label="Token" type="password" value={form.rest.authToken} onChange={(e) => set("rest", { ...form.rest, authToken: e.target.value })} />
+                  </div>
+                )}
+                {form.rest.authType === "basic" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="Username" value={form.rest.authUsername} onChange={(e) => set("rest", { ...form.rest, authUsername: e.target.value })} />
+                    <Input label="Password" type="password" value={form.rest.authPassword} onChange={(e) => set("rest", { ...form.rest, authPassword: e.target.value })} />
+                  </div>
+                )}
+                {form.rest.authType === "query" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="Query param" placeholder="api_key" value={form.rest.authParamName} onChange={(e) => set("rest", { ...form.rest, authParamName: e.target.value })} />
+                    <Input label="Token" type="password" value={form.rest.authToken} onChange={(e) => set("rest", { ...form.rest, authToken: e.target.value })} />
+                  </div>
+                )}
+
+                <Select
+                  label="Content format"
+                  options={CONTENT_FORMAT_OPTIONS}
+                  value={form.rest.contentFormat}
+                  onChange={(e) => set("rest", { ...form.rest, contentFormat: e.target.value })}
+                />
+                <p className="-mt-2 text-[11px] text-slate-500">
+                  {form.rest.contentFormat === "text"
+                    ? "Plain text is wrapped into HTML paragraphs before chunking — best for JSON fields that hold prose."
+                    : "Pick \"Plain text\" if your API returns prose in JSON fields — raw JSON structure otherwise flows into chunks as-is."}
+                </p>
+
+                {/* JSON-only API tips — the adapter's field auto-detection + advanced passthrough */}
+                <div className="rounded-lg border border-slate-700/60 bg-slate-800/30 px-3 py-2.5">
+                  <p className="text-[11px] font-medium text-slate-400">💡 Tips for JSON-only APIs</p>
+                  <ul className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-slate-500">
+                    <li>
+                      <span className="text-slate-400">Auto-detected fields:</span> title, content, slug, link and
+                      modified are found automatically from common shapes (<span className="font-mono">title.rendered</span>,
+                      <span className="font-mono"> body</span>, <span className="font-mono">html</span>,
+                      <span className="font-mono"> updated_at</span>…). Nested or unusual fields need a
+                      <span className="font-mono"> mapping</span> block.
+                    </li>
+                    <li>
+                      <span className="text-slate-400">mapping / headers / timeout / items</span> are advanced keys this
+                      form doesn't edit. Set them once via the API
+                      (<span className="font-mono">PUT /gateway/kbs/{row ? row.kb_key : form.kbKey || "<key>"}/sources</span>) and this
+                      wizard preserves them on every edit — e.g.
+                      <span className="font-mono"> "mapping": {"{"}"content": "description", "modified": "published_at"{"}"}</span>.
+                    </li>
+                    <li>
+                      <span className="text-slate-400">Retrieval quality:</span> if a field holds JSON-in-JSON or dense
+                      data, point <span className="font-mono">mapping.content</span> at the prose field — the chunker
+                      indexes whatever content resolves to, verbatim.
+                    </li>
+                  </ul>
+                </div>
+
+                {restErrors.length > 0 && (
+                  <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                    {restErrors.map((e) => (
+                      <p key={e}>• {e}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </Section>
         </div>
@@ -571,16 +1190,38 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
           {/* Advanced mode — full technical control */}
           {advancedMode && (
             <>
+              {incapableVectorBinding && (
+                <div className="rounded-lg border border-amber-600/50 bg-amber-500/10 p-3 text-[13px] text-amber-300">
+                  ⚠️ This KB's current Vector Store ({incapableVectorBinding.resource_name || incapableVectorBinding.resource_key}
+                  {incapableVectorBinding.provider_name ? ` · ${incapableVectorBinding.provider_name}` : ""}) is on a
+                  storage-only provider and cannot be used for ingestion. Ingest would fail with
+                  <span className="text-amber-200"> “Unsupported vector provider.”</span> Pick a Cloudflare (Vectorize),
+                  Pinecone, Qdrant, Weaviate, or OpenAI index below.
+                </div>
+              )}
               <Section title="Vector Database" icon="🗄️">
                 <Select
                   label="Vector Store"
                   options={vectorOptions}
                   value={form.vectorResourceId}
-                  onChange={(e) => set("vectorResourceId", e.target.value)}
+                  onChange={(e) => {
+                    set("vectorResourceId", e.target.value);
+                    // Any explicit choice (registry row, live resource, or
+                    // Company default) supersedes a pre-filled live external id
+                    // from the saved KB — clear it so state matches the select
+                    // and submit stops re-sending the stale external id that
+                    // would win over "Company default".
+                    set("vectorExternalId", "");
+                  }}
                 />
-                <p className="mt-1 text-[11px] text-slate-600">
+                <p className="mt-1 text-[11px] text-slate-500">
                   Where AI search indexes are stored (Cloudflare Vectorize, Pinecone, etc.)
                 </p>
+                {vectorDefaultWarning && (
+                  <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    ⚠️ {vectorDefaultWarning.reason}
+                  </div>
+                )}
               </Section>
 
               <Section title="Object Storage" icon="📦">
@@ -588,11 +1229,20 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                   label="Document Storage"
                   options={storageOptions}
                   value={form.storageResourceId}
-                  onChange={(e) => set("storageResourceId", e.target.value)}
+                  onChange={(e) => {
+                    set("storageResourceId", e.target.value);
+                    // Same supersede rule as Vector Store.
+                    set("storageExternalId", "");
+                  }}
                 />
-                <p className="mt-1 text-[11px] text-slate-600">
+                <p className="mt-1 text-[11px] text-slate-500">
                   Where your content documents are stored
                 </p>
+                {storageDefaultWarning && (
+                  <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    ⚠️ {storageDefaultWarning.reason}
+                  </div>
+                )}
               </Section>
 
               <Section title="AI Processing" icon="🧠">
@@ -602,9 +1252,18 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                   value={form.embeddingModelId}
                   onChange={(e) => set("embeddingModelId", e.target.value)}
                 />
-                <p className="mt-1 text-[11px] text-slate-600">
-                  The AI model that converts your text into searchable format
+                <p className="mt-1 text-[11px] text-slate-500">
+                  The AI model that converts your text into searchable format. Only models you
+                  can actually call are listed — the provider must be connected on the AI Providers
+                  page.
                 </p>
+                {unavailableEmbeddingCount > 0 && (
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {unavailableEmbeddingCount} other model
+                    {unavailableEmbeddingCount === 1 ? " is" : "s are"} hidden — connect the
+                    provider on the AI Providers page to use {unavailableEmbeddingCount === 1 ? "it" : "them"}.
+                  </p>
+                )}
                 {selectedModel && (
                   <div className="mt-2 flex gap-4 text-[11px] text-slate-500">
                     <span>Provider: <span className="text-slate-300">{selectedModel.provider_name}</span></span>
@@ -623,7 +1282,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                     if (e.target.value) set("enableGraphRag", true);
                   }}
                 />
-                <p className="mt-1 text-[11px] text-slate-600">
+                <p className="mt-1 text-[11px] text-slate-500">
                   Optional — connects to Neo4j to map relationships between concepts
                 </p>
                 {form.graphResourceId && (
@@ -637,6 +1296,33 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                       onChange={(v) => set("enableGraphRag", v)}
                     />
                   </div>
+                )}
+                {form.graphResourceId && form.enableGraphRag && (
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <Input
+                      label="Max chunks / doc"
+                      type="number"
+                      min="1"
+                      max="50"
+                      placeholder="10"
+                      value={form.graphExtractMaxChunks}
+                      onChange={(e) => set("graphExtractMaxChunks", e.target.value)}
+                    />
+                    <Input
+                      label="Parallel LLM calls"
+                      type="number"
+                      min="1"
+                      max="10"
+                      placeholder="4"
+                      value={form.graphExtractConcurrency}
+                      onChange={(e) => set("graphExtractConcurrency", e.target.value)}
+                    />
+                  </div>
+                )}
+                {form.graphResourceId && form.enableGraphRag && (
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Higher values = richer graph but slower ingestion. Defaults: 10 chunks, 4 parallel.
+                  </p>
                 )}
               </Section>
             </>
@@ -728,7 +1414,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                 value={form.webhookUrl}
                 onChange={(e) => set("webhookUrl", e.target.value)}
               />
-              <p className="-mt-1 text-[11px] text-slate-600">
+              <p className="-mt-1 text-[11px] text-slate-500">
                 Auto-detects Slack, Discord, or sends generic JSON payloads
               </p>
 
@@ -826,11 +1512,26 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
               {form.description && <p className="mt-2 text-sm text-slate-400">{form.description}</p>}
 
               <dl className="mt-4 space-y-3 text-sm">
-                <ReviewRow label="Source" value={
-                  form.sourceType === "wordpress" ? "WordPress" :
-                  form.sourceType === "url" ? "URL / Sitemap" :
-                  form.sourceType === "file" ? "File Upload" : "Custom"
-                } />
+                <ReviewRow label="Source" value={sourceTypeLabel(form.sourceType)} />
+                {form.sourceType === "custom" && form.rest.endpoint.trim() && (
+                  <ReviewRow label="API endpoint" value={
+                    form.rest.endpoint.length > 44 ? form.rest.endpoint.slice(0, 44) + "…" : form.rest.endpoint
+                  } />
+                )}
+                {form.sourceType === "custom" && form.rest.authType !== "none" && (
+                  <ReviewRow label="API auth" value={AUTH_TYPE_OPTIONS.find((a) => a.value === form.rest.authType)?.label || form.rest.authType} />
+                )}
+                {form.sourceType === "url" && form.websiteUrl && (
+                  <ReviewRow label="Website" value={form.websiteUrl.trim()} />
+                )}
+                {form.sourceType === "url" && form.websiteUrl && !form.sitemapUrl && !form.urls && (
+                  <p className="text-[11px] text-slate-500">
+                    Sitemap will be discovered automatically from the site's robots.txt at ingest time.
+                  </p>
+                )}
+                {form.sourceType === "url" && form.sitemapUrl && (
+                  <ReviewRow label="Sitemap" value={form.sitemapUrl.trim()} />
+                )}
                 {form.sourceType === "url" && form.urls && (
                   <ReviewRow label="URLs" value={`${form.urls.split("\n").filter(Boolean).length} configured`} />
                 )}
@@ -862,12 +1563,32 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                 <ReviewRow label="Webhook" value={form.webhookUrl ? `🔔 ${form.webhookEvents || "all events"}` : "— Not configured"} />
                 {form.webhookUrl && <ReviewRow label="Webhook URL" value={form.webhookUrl.length > 40 ? form.webhookUrl.slice(0, 40) + '…' : form.webhookUrl} />}
               </dl>
+
+              {defaultBindingWarnings.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  {defaultBindingWarnings.map((w) => (
+                    <div
+                      key={w.kind}
+                      className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+                      role="status"
+                    >
+                      ⚠️ {w.reason}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </Section>
         </div>
       )}
 
-      {error && (
+      {optionsError && (
+        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          {optionsError}
+        </div>
+      )}
+      {probeError && <ProbeErrorBanner probe={probeError} />}
+      {!probeError && error && (
         <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
           {error}
         </div>
@@ -882,6 +1603,29 @@ function ReviewRow({ label, value }) {
     <div className="flex items-center justify-between gap-4">
       <dt className="text-slate-500 uppercase text-[10px] tracking-wider">{label}</dt>
       <dd className="text-right font-medium text-slate-200">{value}</dd>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bind-time embedding probe failure banner
+// ---------------------------------------------------------------------------
+
+/** Persistent banner for a failed bind-time embedding probe — decodes the
+ * structured verdict (err.probe via web/src/probe-verdict.js) into what
+ * failed, why, and how to fix it. */
+function ProbeErrorBanner({ probe }) {
+  const { model, reason, detail } = decodeProbeVerdict(probe);
+  return (
+    <div role="alert" className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-300">
+      <p className="font-semibold">⚠️ Embedding model check failed — the binding was not saved</p>
+      <p className="mt-1 text-xs leading-relaxed text-rose-200/90">
+        A live test embedding with <span className="font-medium text-rose-200">{model}</span> failed: {reason}
+        {detail ? <span className="block break-words text-rose-300/70">{detail}</span> : null}
+      </p>
+      <p className="mt-1.5 text-xs text-rose-300/80">
+        Set the embedding model dropdown back to “Company default (config)” to save without a KB-bound model, or pick a working model.
+      </p>
     </div>
   );
 }

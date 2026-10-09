@@ -595,10 +595,12 @@ test("connections/test runs the schema-driven generic probe for providers withou
 });
 
 test("connections/test skips the probe for providers without one (format-only)", async () => {
-  // Seed a provider WITHOUT a probe: weaviate has no PROBES entry and no
-  // default_api_base_url, so neither the hand-written nor the generic probe
-  // applies — format validation passes, no network, status is success.
-  const noProbeProvider = { id: 3, provider_key: "weaviate", provider_name: "Weaviate" };
+  // Seed a provider WITHOUT a probe: "vectorlocal" has no PROBES entry and the
+  // stubbed provider carries no default_api_base_url, so neither the
+  // hand-written nor the generic probe applies — format validation passes,
+  // no network, status is success. (Weaviate used to be the example here, but
+  // migration 026 + the new hand-written weaviate probe gave it one.)
+  const noProbeProvider = { id: 3, provider_key: "vectorlocal", provider_name: "Vector Local" };
   const registryRestore = await seedRegistry({ provider: noProbeProvider });
   const companyRestore = stub(CompanyRepository, "findByKey", async (key) =>
     key === COMPANY.company_key ? COMPANY : null
@@ -606,7 +608,7 @@ test("connections/test skips the probe for providers without one (format-only)",
   const server = await listen(makeApp());
   try {
     const { res, json } = await req(server, "POST", "/gateway/companies/acme/connections/test", {
-      providerKey: "weaviate",
+      providerKey: "vectorlocal",
       fields: { api_token: "sk-valid-1234" },
     });
     assert.equal(res.status, 200);
@@ -959,4 +961,89 @@ test("diagnoseError falls back to generic message patterns, then ERR", () => {
   assert.equal(diagnoseError("Model not runnable on this provider"), "RUNTIME");
   assert.equal(diagnoseError("Network error: fetch failed"), "NET");
   assert.equal(diagnoseError("Something unexpected happened"), "ERR");
+});
+// ------------------------------------------------------------------
+// POST /gateway/companies/:key/credentials + PUT /gateway/credentials/:id
+// — duplicate key → 409 (migration 029 dropped the global
+// uk_credential_key; the only uniqueness left is the per-tenant composite,
+// surfaced as 409 CREDENTIAL_KEY_EXISTS instead of a raw 500)
+// ------------------------------------------------------------------
+
+const DUP_ENTRY_ERR = Object.assign(
+  new Error("Duplicate entry 'cf-main' for key 'uk_company_provider_env_cred'"),
+  { code: "ER_DUP_ENTRY", errno: 1062 }
+);
+
+test("POST credential maps a duplicate key to 409 with an actionable message", async () => {
+  const registryRestore = await seedRegistry();
+  const restores = [
+    registryRestore,
+    stub(CompanyRepository, "findByKey", async (key) => (key === "acme" ? { id: 2, company_key: "acme" } : null)),
+    stub(CredentialRepository, "create", async () => {
+      throw DUP_ENTRY_ERR;
+    }),
+  ];
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await req(server, "POST", "/gateway/companies/acme/credentials", {
+      providerKey: "cloudflare",
+      credentialKey: "cf-main",
+      credentialName: "CF Main",
+      fields: { api_token: "sk-valid-12345678901234567890" },
+    });
+    assert.equal(res.status, 409);
+    assert.equal(json.success, false);
+    assert.match(json.error, /already exists/);
+    assert.match(json.error, /cf-main/);
+    assert.equal(json.code, "CREDENTIAL_KEY_EXISTS");
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
+});
+
+test("POST credential still returns 500 for non-duplicate insert failures", async () => {
+  const registryRestore = await seedRegistry();
+  const restores = [
+    registryRestore,
+    stub(CompanyRepository, "findByKey", async (key) => (key === "acme" ? { id: 2, company_key: "acme" } : null)),
+    stub(CredentialRepository, "create", async () => {
+      throw new Error("connection refused");
+    }),
+  ];
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await req(server, "POST", "/gateway/companies/acme/credentials", {
+      providerKey: "cloudflare",
+      credentialKey: "cf-main",
+      credentialName: "CF Main",
+      fields: { api_token: "sk-valid-12345678901234567890" },
+    });
+    assert.equal(res.status, 500);
+    assert.doesNotMatch(json.error || "", /already exists/);
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
+});
+
+test("PUT credential maps a duplicate key to 409 when the environment move collides", async () => {
+  const { restores } = await stubHappy();
+  restores.push(
+    stub(CredentialRepository, "update", async () => {
+      throw DUP_ENTRY_ERR;
+    })
+  );
+  const server = await listen(makeApp());
+  try {
+    const { res, json } = await req(server, "PUT", "/gateway/credentials/7", {
+      environmentKey: "prod",
+    });
+    assert.equal(res.status, 409);
+    assert.match(json.error, /already has a credential with key 'cf-main'/);
+    assert.equal(json.code, "CREDENTIAL_KEY_EXISTS");
+  } finally {
+    restores.forEach((r) => r());
+    server.close();
+  }
 });

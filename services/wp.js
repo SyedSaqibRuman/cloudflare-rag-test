@@ -1,6 +1,8 @@
 import fetch from "node-fetch";
-import { retry, sleep } from "../utils/helpers.js";
+import { retry, sleep, AbortError } from "../utils/helpers.js";
+import { logToFile } from "../utils/logger.js";
 import { getConfig } from "../config/index.js";
+import { ExternalServiceError, ValidationError } from "../shared/errors.js";
 
 const PER_PAGE = 100;
 const DELAY_MS = 300;
@@ -15,17 +17,24 @@ const DELAY_MS = 300;
 
 /**
  * Fetch a single page of WP items (posts or pages) by pagination.
+ *
+ * Failure contract: source failures THROW (ExternalServiceError). A run that
+ * cannot see the source must never be laundered into a "successful"
+ * 0-document ingest — before this, an HTML-instead-of-JSON REST response
+ * (origin/WAF hijack, e.g. maxicert.com 2026-09-28) made every fetch fail,
+ * the error got swallowed here, and the run completed "successfully" with
+ * 0 docs, a fresh lastSyncAt, and status "active".
  * @param {string} type - "posts" or "pages"
  * @param {number} page - 1-indexed API page number
  * @param {string} companyName
- * @returns {Promise<Array|null>}
+ * @returns {Promise<Array|null>} items, or null when the listing is exhausted
  */
 async function fetchWP(type, page, companyName) {
-  try {
-    const baseUrl = getConfig(companyName).BASE_URL;
-    return await retry(async () => {
-      const url = `${baseUrl}/wp-json/wp/v2/${type}?per_page=${PER_PAGE}&page=${page}`;
+  const baseUrl = getConfig(companyName).BASE_URL;
+  const url = `${baseUrl}/wp-json/wp/v2/${type}?per_page=${PER_PAGE}&page=${page}`;
 
+  try {
+    return await retry(async () => {
       console.log(`Fetching ${type} page ${page}...`);
 
       const res = await fetch(url, {
@@ -39,15 +48,44 @@ async function fetchWP(type, page, companyName) {
         throw new Error(`HTTP ${res.status}`);
       }
 
-      const data = await res.json();
+      const text = await res.text();
+      const first = text.trimStart()[0];
+      if (first !== "{" && first !== "[") {
+        // HTML masquerading as JSON (origin/WAF hijack, login wall, cache
+        // layer): res.ok is true and the Content-Type header may even say
+        // application/json, so the body shape is the only trustworthy signal.
+        throw new ExternalServiceError(
+          `WordPress REST API at ${baseUrl} returned HTML instead of JSON (HTTP ${res.status}) — the site's origin/WAF is intercepting /wp-json requests. Fix the site's server config (security plugin, WAF or cache rule) so the REST API responds.`,
+          "wordpress"
+        );
+      }
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (err) {
+        throw new ExternalServiceError(
+          `WordPress REST API at ${baseUrl} returned invalid JSON for ${type} page ${page}: ${err.message}`,
+          "wordpress"
+        );
+      }
+
       await sleep(DELAY_MS);
 
       if (page >= totalPages) return data.length > 0 ? data : null;
       return data;
     });
   } catch (err) {
-    console.error("❌ Final failure:", err.message);
-    return null;
+    if (err instanceof AbortError) throw err;
+    if (err instanceof ExternalServiceError) throw err;
+    const wrapped = new ExternalServiceError(
+      `WordPress REST API fetch failed for ${type} page ${page} at ${baseUrl}: ${err.message}`,
+      "wordpress"
+    );
+    wrapped.cause = err;
+    console.error("❌", wrapped.message);
+    logToFile("error.log", `❌ ${wrapped.message}`);
+    throw wrapped;
   }
 }
 
@@ -81,6 +119,7 @@ async function fetchWPByIds(type, ids, companyName) {
 
       if (!res.ok) {
         console.error(`❌ Failed to fetch ${type} by IDs: HTTP ${res.status}`);
+        logToFile("error.log", `❌ WordPress REST API fetch failed for ${type} include[] batch (HTTP ${res.status}) at ${baseUrl}`);
         continue;
       }
 
@@ -123,8 +162,23 @@ export async function fetchPost(page, companyName) {
  * @param {string} type - "pages" or "posts"
  * @param {number[]} ids - WP item IDs
  * @param {string} companyName
+ * @throws {ValidationError} when companyName is unknown (no BASE_URL)
  */
 export async function fetchWpByIds(type, ids, companyName) {
+  // getConfig THROWS Company-not-found for unknown tenants — treat that the
+  // same as a configured company with no BASE_URL (both are "cannot fetch").
+  let baseUrl = null;
+  try {
+    baseUrl = getConfig(companyName)?.BASE_URL || null;
+  } catch {
+    baseUrl = null;
+  }
+  if (!baseUrl) {
+    throw new ValidationError(
+      `Cannot fetch source items: company '${companyName || "(none)"}' has no BASE_URL configured.`,
+      "WP_BASE_URL_NOT_CONFIGURED"
+    );
+  }
   return fetchWPByIds(type, ids, companyName);
 }
 

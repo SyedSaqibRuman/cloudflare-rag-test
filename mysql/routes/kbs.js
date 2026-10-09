@@ -10,18 +10,31 @@ import {
   KbRepository,
   ResourceRepository,
   ModelRepository,
+  CredentialRepository,
   AuditRepository,
 } from "../repositories.js";
 import * as KbService from "../services/kb-service.js";
 import { requireGatewayCompany } from "../services/company-scope.js";
 import { startJob } from "../../cron/index.js";
 import { countVectors, getVectorIndex } from "../../services/vectorize.js";
+import { resolveKbAdapters } from "../../ingest/resolve.js";
+import { getChunk, listObjectKeys } from "../../services/r2.js";
 import { createRegistry } from "../../ingest/registry.js";
+import { documentChunkPrefix, assembleDocumentPreview } from "../../ingest/preview.js";
+import { validateRestSourceConfig } from "../../ingest/sources/rest.js";
+import { discoverSitemaps, SitemapError } from "../../ingest/sources/sitemap/index.js";
 import { wrap } from "./helpers.js";
 import { parsePagination, paginate } from "./pagination.js";
 import { listLiveCloudflareResources } from "./cloudflare-resources.js";
 import { listAllSourcePages } from "../../services/wp.js";
-import { actorFromReq, requireKb, findRunningIngestJob, redactKb } from "./shared-helpers.js";
+import { actorFromReq, requireKb, findRunningIngestJob, findPausedIngestJob, redactKb } from "./shared-helpers.js";
+import { splitVectorCapable } from "../../shared/vector-capability.js";
+import { partitionEmbeddingModels } from "../../shared/embedding-capability.js";
+import { KB_ENABLED_SOURCE_TYPES, isSourceTypeEnabled } from "../../shared/catalog-enums.js";
+import { normalizeWebsiteUrl } from "../../ingest/sources/sitemap/index.js";
+import { assessKbIndexHealth, evaluateKbIndexHealth } from "../services/kb-health.js";
+import { isNonCfVectorProvider } from "../../query/kb-retrieval.js";
+
 
 // Multer config: store uploads in a staging dir, max 10 MB per file
 const UPLOAD_DIR = path.join(process.cwd(), "content", "_uploads");
@@ -68,7 +81,7 @@ router.use("/kbs", requireGatewayCompany);
 router.get(
   "/kbs/options",
   wrap(async (req, res) => {
-    const [vectorResources, storageResources, graphResources, embeddingModels, liveVector, liveStorage] =
+    const [vectorResources, storageResources, graphResources, embeddingModels, liveVector, liveStorage, credentials] =
       await Promise.all([
         ResourceRepository.listByCompany(req.company.id, { resourceType: "vector_index" }),
         ResourceRepository.listByCompany(req.company.id, { resourceType: "object_bucket" }),
@@ -77,14 +90,38 @@ router.get(
         // Best-effort: no Cloudflare connection (or an API error) degrades to [].
         listLiveCloudflareResources(req.company, "vector_index").catch(() => []),
         listLiveCloudflareResources(req.company, "object_bucket").catch(() => []),
+        // Which providers this company can actually call. The embedding
+        // dropdown offers only models whose provider has an adapter AND a
+        // credential here (shared/embedding-capability.js) — the catalog is
+        // global, so without this an admin can bind a Jina/Voyage model to a
+        // company with no such connection and only discover it at ingest time.
+        // Best-effort: a failure leaves the list empty (nothing offered), which
+        // is the safe direction — "Company default (config)" always remains.
+        CredentialRepository.listByCompany(req.company.id, { includeInactive: false }).catch(() => []),
       ]);
+    // Annotate which registry resources can actually serve vector ingestion.
+    // Storage-only providers (cloudflare_r2, aws_s3, …) have no vector adapter,
+    // so the wizard filters them out of the Vector Store dropdown and the KB
+    // service rejects binding them (shared/vector-capability.js).
+    const { capable: capableVector, incapable: incapableVector } = splitVectorCapable(vectorResources);
+    // Same idea for the Embedding Model dropdown (Storage & Search step).
+    const { available: availableEmbedding, unavailable: unavailableEmbedding } =
+      partitionEmbeddingModels(embeddingModels, {
+        credentialProviderKeys: (credentials || []).map((c) => c.provider_key),
+      });
     return res.json({
       success: true,
       options: {
-        vectorResources,
+        vectorResources: capableVector,
+        incapableVectorResources: incapableVector,
         storageResources,
         graphResources,
         embeddingModels,
+        // The filtered list the wizard renders; `unavailableEmbeddingModels` is
+        // returned so the UI can explain a short/empty list instead of leaving
+        // the admin wondering (it names the provider to connect).
+        availableEmbeddingModels: availableEmbedding,
+        unavailableEmbeddingModels: unavailableEmbedding,
         liveVectorResources: liveVector,
         liveStorageResources: liveStorage,
       },
@@ -102,6 +139,51 @@ router.get(
   })
 );
 
+// POST /gateway/kbs/discover-website — sitemap discovery PREVIEW (spec §30):
+// given only a website URL, run the robots.txt → fallbacks → index-crawl
+// discovery and report what would be ingested, without creating anything.
+// Placed before the /kbs POST so it can never be captured by a future /:key
+// route pattern; still registered before /kbs/:key GET for the same reason.
+router.post(
+  "/kbs/discover-website",
+  wrap(async (req, res) => {
+    const websiteUrl = String(req.body?.websiteUrl || "").trim();
+    if (!websiteUrl) {
+      return res.status(400).json({ success: false, error: "websiteUrl is required." });
+    }
+    try {
+      const result = await discoverSitemaps(websiteUrl, {
+        limits: { maxUrls: 50 }, // preview cap — the real ingest uses the KB's own limits
+      });
+      const sitemapUrl = result.discoveredSitemaps?.[0] || null;
+      return res.json({
+        success: true,
+        website: result.websiteUrl,
+        robotsUrl: result.robotsUrl,
+        robotsFound: result.robotsFound ?? Boolean(result.robotsUrl),
+        sitemapFound: Boolean(sitemapUrl),
+        sitemapUrl,
+        sitemapCount: result.stats?.sitemapCount ?? result.discoveredSitemaps?.length ?? 0,
+        urlCount: result.stats?.urlCount ?? result.urls?.length ?? 0,
+        sampleUrls: (result.urls || []).slice(0, 10).map((u) => u.url),
+        truncated: result.truncated ?? null,
+      });
+    } catch (err) {
+      // Bad website URL (400) vs network/unusable site (502) — the wizard maps
+      // both to friendly copy; raw errors stay in the server log.
+      const status = err instanceof SitemapError ? 400 : 502;
+      console.error(`❌ Website discovery preview failed for '${websiteUrl}': ${err.message}`);
+      return res.status(status).json({
+        success: false,
+        error:
+          status === 400
+            ? `Invalid website URL: ${err.message}`
+            : `Could not check this website for a sitemap: ${err.message}`,
+      });
+    }
+  })
+);
+
 // POST /gateway/kbs
 router.post(
   "/kbs",
@@ -112,6 +194,105 @@ router.post(
       message: `Knowledge base '${kbKey}' created.`,
       kbId,
       kbKey,
+    });
+  })
+);
+
+// GET /gateway/kbs/health — stale-index detection across the company's KBs.
+// Flags KBs whose last successful ingest predates their bound Vectorize
+// index's created_on — proof the index was deleted and recreated after the
+// data was written, i.e. every vector from that ingest is gone while the
+// registry still lists the documents as processed (the 2026-09-29
+// max-test-index failure mode). Only KBs bound to a cloudflare_vectorize
+// resource row are checked: the created_on map comes from the live CF index
+// list, and a KB bound to Qdrant/Pinecone/etc. must stay uncheckable rather
+// than be misreported as "index missing". Registered BEFORE /kbs/:key so it
+// is never captured by the :key pattern.
+router.get(
+  "/kbs/health",
+  wrap(async (req, res) => {
+    const kbs = await KbRepository.listByCompany(req.company.id);
+    const vectorResources = await ResourceRepository.listByCompany(req.company.id, {
+      resourceType: "vector_index",
+    });
+    // CF-family predicate: the ask path routes every non-(pinecone/qdrant/
+    // weaviate/openai) provider through the CF fast-path (query/kb-retrieval.js
+    // isNonCfVectorProvider), so umbrella `cloudflare` rows count as checkable
+    // here too — a strict provider_key === "cloudflare_vectorize" match would
+    // misroute KBs bound via the umbrella connection to the uncheckable bucket.
+    const providerKeyByResourceId = new Map(
+      vectorResources.map((r) => [r.id, r.provider_key])
+    );
+    const cfResourceIds = new Set(
+      [...providerKeyByResourceId.entries()]
+        .filter(([, providerKey]) => !isNonCfVectorProvider(providerKey))
+        .map(([id]) => id)
+    );
+
+    // Partition: CF-Vectorize-bound KBs go through the module evaluation;
+    // KBs bound to another provider are appended as uncheckable with an
+    // honest reason (a Qdrant/Pinecone index name would never appear in the
+    // CF list, so evaluating it against that list would produce a false
+    // "index missing"). KBs with no resource row fall back to the company's
+    // config VECTOR_INDEX — the same legacy binding the status route uses.
+    const cfBound = [];
+    const notCheckable = [];
+    for (const kb of kbs) {
+      let vectorIndexName;
+      if (cfResourceIds.has(kb.vector_resource_id)) {
+        vectorIndexName = kb.vector_external_id || getVectorIndex(req.company.company_key);
+      } else if (kb.vector_resource_id != null) {
+        vectorIndexName = kb.vector_external_id || null; // bound, but not ours to check
+      } else {
+        vectorIndexName = kb.vector_external_id || getVectorIndex(req.company.company_key) || null;
+      }
+      const input = {
+        kbKey: kb.kb_key,
+        vectorIndexName,
+        lastIngestionAt: kb.last_ingestion_at,
+        documentsProcessed: kb.last_ingestion_documents_processed,
+      };
+      if (kb.vector_resource_id != null && !cfResourceIds.has(kb.vector_resource_id)) {
+        const base = evaluateKbIndexHealth(input, null);
+        const providerKey = providerKeyByResourceId.get(kb.vector_resource_id);
+        base.reason = `Bound to ${providerKey || "a non-Cloudflare"} vector store — only Cloudflare Vectorize indexes can be checked for stale recreations.`;
+        notCheckable.push(base);
+      } else {
+        cfBound.push(input);
+      }
+    }
+
+    // Live CF index list → { name: created_on }. A failed call degrades to
+    // null (every CF-bound KB becomes uncheckable — the check never guesses);
+    // an empty success is real (the account has no indexes → indexMissing).
+    let byName = null;
+    let indexCount = 0;
+    if (cfBound.length > 0) {
+      try {
+        const live = await listLiveCloudflareResources(req.company, "vector_index");
+        byName = {};
+        for (const idx of live || []) {
+          if (idx?.name) {
+            byName[idx.name] = idx.createdAt ?? null;
+            indexCount++;
+          }
+        }
+      } catch {
+        byName = null; // live list unavailable — uncheckable, never flagged
+      }
+    }
+
+    const assessed = assessKbIndexHealth(cfBound, byName);
+    const kbNameByKey = new Map(kbs.map((k) => [k.kb_key, k.kb_name]));
+    const enrich = (r) => ({ ...r, kbName: kbNameByKey.get(r.kbKey) || r.kbKey });
+
+    return res.json({
+      success: true,
+      checked: cfBound.length > 0 && byName != null,
+      indexCount,
+      healthy: assessed.healthy.map(enrich),
+      flagged: assessed.flagged.map(enrich),
+      uncheckable: [...assessed.uncheckable, ...notCheckable].map(enrich),
     });
   })
 );
@@ -198,18 +379,55 @@ router.put(
   wrap(async (req, res) => {
     const kb = await requireKb(req.company.id, req.params.key);
 
-    const { sourceType, urls, files } = req.body || {};
+    const { sourceType, urls, files, rest, websiteUrl } = req.body || {};
 
-    // Validate source_type if provided
-    if (sourceType && !["wordpress", "file", "url", "custom"].includes(sourceType)) {
+    // Validate source_type if provided. Withdrawn types (shared/catalog-enums.js)
+    // are rejected UNLESS this KB already uses that exact value — re-saving a
+    // legacy WordPress/custom KB's sources is a no-op, not a new selection.
+    if (sourceType && !KbService.SOURCE_TYPES.includes(sourceType)) {
       return res.status(400).json({
         success: false,
-        error: `Invalid source_type '${sourceType}'. Must be one of: wordpress, file, url, custom.`,
+        error: `Invalid source_type '${sourceType}'. Must be one of: ${KB_ENABLED_SOURCE_TYPES.join(", ")}.`,
       });
+    }
+    if (sourceType && !isSourceTypeEnabled(sourceType) && sourceType !== kb.source_type) {
+      return res.status(400).json({
+        success: false,
+        error:
+          `source_type '${sourceType}' is no longer available. ` +
+          `Use one of: ${KB_ENABLED_SOURCE_TYPES.join(", ")}.`,
+      });
+    }
+
+    // Validate the rest (custom source) block if provided
+    let restError = null;
+    if (rest != null) {
+      const check = validateRestSourceConfig(rest);
+      if (!check.ok) restError = check.errors.join(" ");
+    } else if (sourceType === "custom") {
+      restError =
+        'source_type "custom" requires a "rest" block in the request body ' +
+        '(e.g. { "sourceType": "custom", "rest": { "endpoint": "…" } }).';
+    }
+    if (restError) {
+      return res.status(400).json({ success: false, error: restError });
     }
 
     // Build source_config from the request
     const sourceConfig = {};
+    // A website URL needs no sitemap: discovery is automatic at ingest time.
+    // Validated here so a typo fails the request, not a background job.
+    if (websiteUrl != null) {
+      if (typeof websiteUrl !== "string" || !websiteUrl.trim()) {
+        return res.status(400).json({ success: false, error: "websiteUrl must be a non-empty string." });
+      }
+      try {
+        normalizeWebsiteUrl(websiteUrl);
+      } catch (err) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      sourceConfig.websiteUrl = websiteUrl.trim();
+    }
     if (urls) {
       if (!Array.isArray(urls)) {
         return res.status(400).json({ success: false, error: "urls must be an array of strings." });
@@ -232,6 +450,9 @@ router.put(
     }
     if (req.body.concurrency != null) sourceConfig.concurrency = Number(req.body.concurrency);
     if (req.body.timeout != null) sourceConfig.timeout = Number(req.body.timeout);
+    if (req.body.maxUrls != null) sourceConfig.maxUrls = Number(req.body.maxUrls);
+    if (req.body.maxDepth != null) sourceConfig.maxDepth = Number(req.body.maxDepth);
+    if (rest != null) sourceConfig.rest = rest;
 
     // Update source_type on the KB row
     if (sourceType) {
@@ -279,6 +500,165 @@ router.get(
       total: entries.length,
       sourceType: kb.source_type,
     });
+  })
+);
+
+// GET /gateway/kbs/:key/documents/preview/:docKey — preview one INGESTED document.
+//
+// :docKey is the registry key written by the pipeline ("<type>-<slug>", e.g.
+// "post-my-page"). The document's chunks live in object storage under
+// <r2Prefix>/<slugified key>/chunk-N.json (r2Prefix "kb/<kbKey>" for KB runs,
+// "site" for legacy runs — try KB prefix first, then legacy). Chunks are
+// fetched, ordered by chunkIndex, and joined into one readable document.
+router.get(
+  "/kbs/:key/documents/preview/:docKey",
+  wrap(async (req, res) => {
+    const kb = await requireKb(req.company.id, req.params.key);
+    const docKey = String(req.params.docKey || "");
+    if (!/^[/\w.-]+$/.test(docKey)) {
+      return res.status(400).json({ success: false, error: "Invalid document key." });
+    }
+
+    // Confirm the document was actually ingested (defends against probing).
+    const registry = createRegistry(req.company.company_key, req.params.key);
+    if (!registry.toJSON()[docKey]) {
+      return res.status(404).json({ success: false, error: "Document not found in this KB's ingestion registry." });
+    }
+
+    // Resolve the bucket the same way ingest does: KB storage binding →
+    // external id, then the company-config fallback (legacy "site" runs).
+    let bucket = kb.storage_external_id || null;
+    if (!bucket) {
+      try {
+        const config = parseSourceConfig(kb);
+        bucket = config.bucket || null;
+      } catch { /* fall through */ }
+    }
+
+    const prefixes = [`kb/${kb.kb_key}`, "site"].map((p) => documentChunkPrefix(p, docKey));
+    let keys = [];
+    let usedPrefix = null;
+    for (const prefix of prefixes) {
+      keys = await listObjectKeys(prefix, req.company.company_key, bucket || undefined);
+      if (keys.length) {
+        usedPrefix = prefix;
+        break;
+      }
+    }
+    if (!keys.length) {
+      return res.status(404).json({ success: false, error: "No stored chunks found for this document." });
+    }
+
+    // Fetch chunks in registry order (chunk-N), parse each payload.
+    keys.sort((a, b) => {
+      const na = Number(a.match(/chunk-(\d+)\.json$/)?.[1] ?? 0);
+      const nb = Number(b.match(/chunk-(\d+)\.json$/)?.[1] ?? 0);
+      return na - nb;
+    });
+    const payloads = [];
+    for (const key of keys) {
+      const chunk = await getChunk(key, req.company.company_key);
+      if (chunk) payloads.push(chunk);
+    }
+    if (!payloads.length) {
+      return res.status(404).json({ success: false, error: "Stored chunks could not be read." });
+    }
+
+    const preview = assembleDocumentPreview(payloads);
+    return res.json({
+      success: true,
+      kind: "ingested",
+      name: docKey,
+      storagePrefix: usedPrefix,
+      ...preview,
+    });
+  })
+);
+
+// GET /gateway/kbs/:key/documents/:fileId — preview a single uploaded file.
+//
+// :fileId is the basename stored in source_config.files (URL-safe filename).
+// The file lives on disk under content/<company>/uploads/<fileId>. For DOCX
+// we extract the plain text via mammoth (so the modal can render it without
+// shipping a docx renderer); for everything else we stream the raw bytes
+// with the correct Content-Type so the browser can preview / download.
+router.get(
+  "/kbs/:key/documents/:fileId",
+  wrap(async (req, res) => {
+    const kb = await requireKb(req.company.id, req.params.key);
+
+    // Locate the file in source_config (defends against path traversal).
+    const config = parseSourceConfig(kb);
+    const files = Array.isArray(config.files) ? config.files : [];
+    const safeId = path.basename(req.params.fileId);
+    const match = files.find((f) => path.basename(f) === safeId);
+    if (!match) {
+      return res.status(404).json({ success: false, error: "File not found in KB." });
+    }
+    if (!fs.existsSync(match)) {
+      return res.status(410).json({ success: false, error: "File no longer exists on disk." });
+    }
+
+    const ext = path.extname(safeId).toLowerCase();
+
+    // DOCX → return extracted text (lightweight server-side conversion).
+    if (ext === ".docx") {
+      try {
+        const mammoth = (await import("mammoth")).default;
+        const { value } = await mammoth.extractRawText({ path: match });
+        return res.json({
+          success: true,
+          kind: "docx-text",
+          name: safeId,
+          text: value || "",
+        });
+      } catch (err) {
+        return res.status(500).json({ success: false, error: `Failed to read DOCX: ${err.message}` });
+      }
+    }
+
+    // Everything else → stream the raw bytes with a sensible Content-Type.
+    const MIME = {
+      ".pdf": "application/pdf",
+      ".md": "text/markdown; charset=utf-8",
+      ".txt": "text/plain; charset=utf-8",
+      ".html": "text/html; charset=utf-8",
+      ".htm": "text/html; charset=utf-8",
+    };
+    res.setHeader("Content-Type", MIME[ext] || "application/octet-stream");
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(safeId)}"`);
+    fs.createReadStream(match).pipe(res);
+  })
+);
+
+// DELETE /gateway/kbs/:key/documents/:fileId — remove a single uploaded file
+router.delete(
+  "/kbs/:key/documents/:fileId",
+  wrap(async (req, res) => {
+    const kb = await requireKb(req.company.id, req.params.key);
+    const config = parseSourceConfig(kb);
+    const files = Array.isArray(config.files) ? config.files : [];
+    const safeId = path.basename(req.params.fileId);
+    const next = files.filter((f) => path.basename(f) !== safeId);
+    if (next.length === files.length) {
+      return res.status(404).json({ success: false, error: "File not found." });
+    }
+    const target = files.find((f) => path.basename(f) === safeId);
+    try { if (target && fs.existsSync(target)) fs.unlinkSync(target); } catch { /* best-effort */ }
+    await KbRepository.update(kb.id, {
+      sourceType: "file",
+      sourceConfig: { ...config, files: next },
+    });
+    await AuditRepository.log({
+      ...actorFromReq(req),
+      companyId: req.company.id,
+      action: "kb.document.deleted",
+      entityType: "kb",
+      entityId: kb.id,
+      afterState: { file: safeId, remaining: next.length },
+      reason: "admin action",
+    });
+    return res.json({ success: true, message: `File '${safeId}' removed.`, totalFiles: next.length });
   })
 );
 
@@ -402,14 +782,27 @@ router.get(
     } catch {
       documentCount = 0;
     }
-    // vector count is best-effort (F12): null on API failure; resolve the index
-    // the same way ingest does (KB resource override → config fallback).
+    // vector count is best-effort (F12): null on API failure. KBs bound to a
+    // vector resource (Qdrant/Pinecone/OpenAI/Weaviate) count through their
+    // adapter stack — the CF fast-path below only knows Vectorize indexes and
+    // would fail (null) for any non-CF store. Falls back to the legacy CF
+    // count for KBs without a vector resource.
     let vectorCount = null;
-    try {
-      const indexName = kb.vector_external_id || getVectorIndex(req.company.company_key);
-      if (indexName) vectorCount = await countVectors(indexName, req.company.company_key);
-    } catch {
-      vectorCount = null;
+    if (kb.vector_resource_id) {
+      try {
+        const adapters = await resolveKbAdapters(kb, req.company, req.company.company_key);
+        vectorCount = adapters.vector ? await adapters.vector.countVectors() : null;
+      } catch {
+        vectorCount = null; // best-effort
+      }
+    }
+    if (vectorCount == null) {
+      try {
+        const indexName = kb.vector_external_id || getVectorIndex(req.company.company_key);
+        if (indexName) vectorCount = await countVectors(indexName, req.company.company_key);
+      } catch {
+        vectorCount = null;
+      }
     }
     // Auto-recover stuck "indexing" status: if no running job exists but the
     // KB row is still marked "indexing", flip it to "active" (the job
@@ -422,12 +815,15 @@ router.get(
         /* best-effort recovery — proceed with original status */ }
     }
 
+    const pausedJob = findPausedIngestJob(req.company.company_key, req.params.key);
     return res.json({
       success: true,
       status: {
         kbKey: kb.kb_key,
         status: kb.status,
         inProgress: Boolean(runningJob),
+        paused: Boolean(pausedJob),
+        pausedAt: pausedJob?.pausedAt ?? null,
         // The DDL has no last_sync column — updated_at is the last status flip (F12).
         lastSyncAt: kb.updated_at,
         documentCount,
@@ -442,6 +838,11 @@ router.get(
               documentsSkipped: kb.last_ingestion_documents_skipped,
               chunksCreated: kb.last_ingestion_chunks_created,
               mode: kb.last_ingestion_mode,
+              // KB-bound embedding fallback visibility (migration 030):
+              // fallbacks > 0 means the bound embedding model failed and CF
+              // embeddings were used instead — surfaced as a warning card.
+              embeddingFallbacks: kb.last_ingestion_embedding_fallbacks ?? null,
+              embeddingAdapterError: kb.last_ingestion_embedding_error ?? null,
             }
           : null,
       },
@@ -475,12 +876,26 @@ router.get(
     // 404 gate — throws NotFoundError when the KB does not exist.
     await requireKb(req.company.id, req.params.key);
     const runningJob = findRunningIngestJob(req.company.company_key, req.params.key);
+    const pausedJob = findPausedIngestJob(req.company.company_key, req.params.key);
     if (!runningJob) {
-      return res.json({ success: true, running: false, progress: null });
+      if (pausedJob) {
+        // Paused: report the last-known progress with running:false + paused:true
+        // so the UI can render a resumable paused state instead of nothing.
+        return res.json({
+          success: true,
+          running: false,
+          paused: true,
+          progress: pausedJob.progress || null,
+          startedAt: pausedJob.startedAt,
+          pausedAt: pausedJob.pausedAt,
+        });
+      }
+      return res.json({ success: true, running: false, paused: false, progress: null });
     }
     return res.json({
       success: true,
       running: true,
+      paused: false,
       progress: runningJob.progress || { processed: 0, skipped: 0, chunks: 0, discovered: 0, phase: "starting" },
       startedAt: runningJob.startedAt,
     });

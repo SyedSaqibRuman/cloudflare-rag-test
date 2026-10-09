@@ -93,7 +93,16 @@ export function transformItem(item, type, { r2Prefix = "site", chunkSize = MAX_C
       url: item.link,
       title,
       r2_key,
-      metadata: { type, slug, chunkIndex: i },
+      metadata: {
+        type,
+        slug,
+        chunkIndex: i,
+        // Web-source provenance (§25). Only set by the url/website adapter; the
+        // citation URL above is always present, these make the origin explicit.
+        ...(item._sourceType ? { sourceType: item._sourceType } : {}),
+        ...(item._websiteUrl ? { websiteUrl: item._websiteUrl } : {}),
+        ...(item._lastModified ? { lastModified: item._lastModified } : {}),
+      },
     };
   });
 
@@ -119,6 +128,12 @@ export function transformItem(item, type, { r2Prefix = "site", chunkSize = MAX_C
  */
 async function processItemBatch({ items, type, store, index, registry, signal, r2Prefix, chunkOptions, stats, reportProgress, graphAdapter = null }) {
   const uploadLimit = pLimit(UPLOAD_CONCURRENCY);
+  // Graph sub-phase reporter — handed to the adapter so the ingest-progress
+  // endpoint can show live extraction detail ("graph: extracting 3/10")
+  // instead of a silent 20-minute "processing" stall.
+  const graphProgress = graphAdapter
+    ? (subPhase, detail) => reportProgress?.("processing", { subPhase, detail })
+    : null;
 
   for (const item of items) {
     checkAbort(signal);
@@ -181,7 +196,7 @@ async function processItemBatch({ items, type, store, index, registry, signal, r
       if (graphAdapter) {
         try {
           checkAbort(signal);
-          await retry(() => graphAdapter.extractFromChunks(vectorChunks, signal), 2, 1000, signal);
+          await retry(() => graphAdapter.extractFromChunks(vectorChunks, signal, graphProgress), 2, 1000, signal);
         } catch (err) {
           if (err.name === "AbortError") throw err;
           logToFile("error.log", `🕸️ Graph extraction failed for ${registryKey}: ${err.message}`);
@@ -302,7 +317,9 @@ export async function runIngestion({
   // Ingestion statistics — tracked across all content types and returned
   // to the caller for audit logging and the KB status endpoint.
   const stats = { processed: 0, skipped: 0, chunks: 0, discovered: 0 };
-  const reportProgress = (phase) => setProgress?.({ ...stats, phase });
+  // reportProgress(phase, sub) — `sub` ({subPhase, detail}) is optional live
+  // detail for the current phase; omitted by all existing callers.
+  const reportProgress = (phase, sub) => setProgress?.({ ...stats, phase, ...(sub ? { sub } : {}) });
   reportProgress("fetching");
 
   console.log(`🚀 Starting ingestion for company: ${companyName || "(default)"} [mode=${mode}]`);

@@ -17,13 +17,24 @@ const DIMENSION_KEYS = ["EMBEDDING_DIMENSIONS"];
 const URL_KEYS = ["BASE_URL", "CONTACT_US_URL", "LOCATIONS_URL", "SERVICES_URL"];
 
 const STRING_KEYS = ["CONSULTANT_NAME", "COMPANY_NAME"];
-const PROMPT_KEYS = ["SYSTEM_PROMPT"];
+
+/** Custom {{VARIABLE}} pairs available to a company's SYSTEM_PROMPT. This
+ * *replaces* the old implicit built-ins (COMPANY_NAME, CONSULTANT_NAME, the
+ * four URLs, CURRENT_DATE, …): nothing is injected behind the operator's back
+ * any more, so every placeholder in a template must be defined here or on the
+ * selected assistant (assistant_variables win — see shared/prompt-variables.js).
+ * Stored as a JSON array of { key, value }. */
+const PROMPT_VARIABLE_KEYS = ["PROMPT_VARIABLES"];
+
+const PROMPT_KEYS = ["SYSTEM_PROMPT", ...PROMPT_VARIABLE_KEYS];
 
 /** Customizable topic guardrails. GUARDRAIL_PROMPT is appended to the system
  * message (empty string = built-in default guardrail); BLOCKED_TOPICS is a
  * newline-separated list of keywords/phrases that are refused up-front by the
- * intent fast-path before any AI call is made. */
-const GUARDRAIL_KEYS = ["GUARDRAIL_PROMPT", "BLOCKED_TOPICS"];
+ * intent fast-path before any AI call is made; BLOCKED_PATTERNS is the
+ * newline-separated pattern set that REPLACES the built-in blocked patterns
+ * (each line a literal substring or a /regex/ — see query/intent.js). */
+const GUARDRAIL_KEYS = ["GUARDRAIL_PROMPT", "BLOCKED_TOPICS", "BLOCKED_PATTERNS"];
 
 const RESOURCE_KEYS = ["VECTOR_INDEX", "R2_BUCKET_NAME"];
 
@@ -66,7 +77,7 @@ export const COMPANY_KEYS = [
   ...PROVIDER_KEY,
 ];
 
-export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, GUARDRAIL_KEYS, RESOURCE_KEYS, ASSISTANT_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
+export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, PROMPT_VARIABLE_KEYS, GUARDRAIL_KEYS, RESOURCE_KEYS, ASSISTANT_KEYS, CREDENTIAL_KEYS, SECRET_KEYS, PROVIDER_KEY };
 
 /**
  * Sectioned grouping of company config keys, used by the API (GET /config) and
@@ -75,6 +86,7 @@ export { MODEL_KEYS, DIMENSION_KEYS, URL_KEYS, STRING_KEYS, PROMPT_KEYS, GUARDRA
  */
 export const CONFIG_SECTIONS = [
   { section: "GENERAL", keys: [...URL_KEYS, ...STRING_KEYS] },
+  { section: "PROMPT", keys: PROMPT_KEYS },
   { section: "MODELS", keys: [...PROVIDER_KEY, ...MODEL_KEYS, ...DIMENSION_KEYS] },
   { section: "STORAGE", keys: RESOURCE_KEYS },
   { section: "ASSISTANT", keys: ASSISTANT_KEYS },
@@ -140,6 +152,19 @@ export const DEFAULT_COMPANY = {
   R2_BUCKET_NAME: "",
   GUARDRAIL_PROMPT: "",
   BLOCKED_TOPICS: "",
+  BLOCKED_PATTERNS: "",
+  // Custom {{VARIABLE}} pairs available to SYSTEM_PROMPT. The default template
+  // below interpolates these, but they are ordinary editable data — an operator
+  // can rename them, add more, or drop them entirely. A placeholder with no
+  // matching pair is left literal in the resolved prompt (visible in the Config
+  // page preview) rather than silently expanding to nothing.
+  PROMPT_VARIABLES: [
+    { key: "CONSULTANT_NAME", value: "Sarah" },
+    { key: "COMPANY_NAME", value: "Popularcert" },
+    { key: "CONTACT_US_URL", value: "https://popularcert.com/contact-us/" },
+    { key: "LOCATIONS_URL", value: "https://popularcert.com/locations/" },
+    { key: "SERVICES_URL", value: "https://popularcert.com/services/" },
+  ],
   SYSTEM_PROMPT: `You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}. Do not deny being an AI if asked.
 
 ## Rules

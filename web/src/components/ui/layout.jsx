@@ -25,10 +25,16 @@ export function Card({ title, subtitle, children, className, actions, footer }) 
 // Skeleton loading placeholders
 // ------------------------------------------------------------------
 
-/** Single animated bar. Pass width/height classes to customise. */
+/**
+ * Single animated bar. A soft shimmer sweep (compositor-only, respects the
+ * global reduced-motion guard which collapses it to the pulse) over the
+ * pulse — reads as "content on its way" rather than dead gray blocks.
+ */
 export function Skeleton({ className }) {
   return (
-    <div className={cx("animate-pulse rounded-md bg-slate-800", className)} />
+    <div className={cx("relative overflow-hidden rounded-md bg-slate-800", className)}>
+      <span aria-hidden="true" className="skeleton-shimmer absolute inset-0" />
+    </div>
   );
 }
 

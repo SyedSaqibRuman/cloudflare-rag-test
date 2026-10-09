@@ -216,7 +216,7 @@ test("POST activate sets status to active", async () => {
   const restoreAudit = stub(AuditRepository, "log", async () => {});
   const server = await listen(makeApp());
   try {
-    const { res, json } = await req(server, "POST", "/gateway/workflows/nightly-ingest/activate", undefined, HEADERS);
+    const { res } = await req(server, "POST", "/gateway/workflows/nightly-ingest/activate", undefined, HEADERS);
     assert.equal(res.status, 200);
     assert.equal(updateInput.status, "active");
     assert.equal(updateInput.isActive, true);
@@ -237,7 +237,7 @@ test("POST pause sets status to paused", async () => {
   const restoreAudit = stub(AuditRepository, "log", async () => {});
   const server = await listen(makeApp());
   try {
-    const { res, json } = await req(server, "POST", "/gateway/workflows/nightly-ingest/pause", undefined, HEADERS);
+    const { res } = await req(server, "POST", "/gateway/workflows/nightly-ingest/pause", undefined, HEADERS);
     assert.equal(res.status, 200);
     assert.equal(updateInput.status, "paused");
     assert.equal(updateInput.isActive, false);

@@ -45,7 +45,7 @@ import {
 
 const router = express.Router();
 
-router.use("/knowledge", requireGatewayCompany);
+router.use(requireGatewayCompany);
 
 async function audit(req, kbId, action, afterState = {}) {
   try {

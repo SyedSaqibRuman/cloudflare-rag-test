@@ -7,6 +7,7 @@ import { createStreamTransport } from "../query/stream-contract.js";
 import { clearCompanyCache } from "../query/cache.js";
 import { getCompanyConfig } from "../config/index.js";
 import { companyFromRequest, companyOriginCheck } from "../utils/request-context.js";
+import { markCompanyChat } from "../utils/setup-progress.js";
 
 // --------------------------
 // ASK ROUTES (POST /ask, POST /ask-stream)
@@ -95,29 +96,19 @@ export async function askJsonHandler(pipeline, req, res) {
       return res.status(400).json({ success: false, error: "History must be an array" });
     }
 
-    // Temporarily override ASSISTANT_KEY if provided
-    let prevKey = null;
-    if (assistantKey) {
-      const { updateConfig, getCompanyConfig } = await import("../config/index.js");
-      prevKey = getCompanyConfig(req.companyName)?.ASSISTANT_KEY;
-      await updateConfig(req.companyName, { ASSISTANT_KEY: assistantKey });
-    }
+    // `assistantKey` is REQUEST-SCOPED: it is threaded into the pipeline as an
+    // override and never written to the company's stored config. Writing it to
+    // runtimeConfig was a persist-first DB write on an unauthenticated path —
+    // an injected key survived the request (the old restore was a no-op when the
+    // company had no prior key) and concurrent requests raced each other.
+    const result = await pipeline.askQuestion(question, history, req.companyName, {
+      signal: abortController.signal,
+      assistantKey: assistantKey || null,
+    });
 
-    let result;
-    try {
-      result = await pipeline.askQuestion(question, history, req.companyName, {
-        signal: abortController.signal,
-      });
-    } finally {
-      // Restore previous ASSISTANT_KEY
-      if (assistantKey) {
-        const { updateConfig } = await import("../config/index.js");
-        const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
-        await updateConfig(req.companyName, restore);
-      }
-    }
     // Client gone before the answer landed — nothing to write to.
     if (abortController.signal.aborted || res.destroyed) return;
+    markCompanyChat(req.companyName); // completed a chat turn — setup checkpoint
     return res.json({ success: true, ...result });
   } catch (err) {
     if (abortController.signal.aborted) return;
@@ -170,28 +161,11 @@ export async function askStreamHandler(pipeline, req, res) {
       console.log("ℹ️ SSE connection closed");
     });
 
-    // --------------------------
-    // 🔹 ASSISTANT OVERRIDE
-    // --------------------------
-    let prevKey = null;
-    if (assistantKey) {
-      const { updateConfig, getCompanyConfig } = await import("../config/index.js");
-      prevKey = getCompanyConfig(req.companyName)?.ASSISTANT_KEY;
-      await updateConfig(req.companyName, { ASSISTANT_KEY: assistantKey });
-    }
-
-    // --------------------------
-    // 🔹 EXECUTE STREAM
-    // --------------------------
-    try {
-      await pipeline.askQuestionStream(question, history, transport, req.companyName);
-    } finally {
-      if (assistantKey) {
-        const { updateConfig } = await import("../config/index.js");
-        const restore = prevKey ? { ASSISTANT_KEY: prevKey } : {};
-        await updateConfig(req.companyName, restore);
-      }
-    }
+    // `assistantKey` is REQUEST-SCOPED — see askJsonHandler. It is passed into the
+    // pipeline rather than persisted to the company's config store.
+    await pipeline.askQuestionStream(question, history, transport, req.companyName, {
+      assistantKey: assistantKey || null,
+    });
 
     // --------------------------
     // 🔹 FINISH STREAM
@@ -203,6 +177,7 @@ export async function askStreamHandler(pipeline, req, res) {
     if (!transport.isClosed()) {
       transport.finish();
     }
+    markCompanyChat(req.companyName); // completed a chat turn — setup checkpoint
     res.end();
   } catch (err) {
     console.error("❌ Stream API Error:", err.message);

@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { safeLinkUrl } from "../markdown-sanitize.js";
 
 function escapeHtml(str) {
   return str
@@ -31,17 +32,33 @@ function inline(text, keyPrefix) {
     } else {
       const m = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (m) {
-        parts.push(
-          <a
-            key={`${keyPrefix}-a${i++}`}
-            href={m[2]}
-            target="_blank"
-            rel="noreferrer"
-            className="text-indigo-400 hover:text-indigo-300 underline"
-          >
-            {m[1]}
-          </a>
-        );
+        // Ask answers are untrusted LLM/RAG output — link targets must pass the
+        // shared scheme sanitizer or render as inert text (React 18 warns on
+        // javascript: hrefs but still renders them; it does not strip them).
+        const href = safeLinkUrl(m[2]);
+        if (!href) {
+          parts.push(
+            <span
+              key={`${keyPrefix}-x${i++}`}
+              title="Link removed (unsafe URL)"
+              className="text-indigo-400/70 underline decoration-dotted"
+            >
+              {m[1]}
+            </span>
+          );
+        } else {
+          parts.push(
+            <a
+              key={`${keyPrefix}-a${i++}`}
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-indigo-400 hover:text-indigo-300 underline"
+            >
+              {m[1]}
+            </a>
+          );
+        }
       } else {
         parts.push(<Fragment key={`${keyPrefix}-x${i++}`}>{token}</Fragment>);
       }

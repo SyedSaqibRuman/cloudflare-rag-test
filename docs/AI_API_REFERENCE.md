@@ -10,11 +10,13 @@ A machine-readable API reference for the PopularCert RAG API. This document is d
 - [Multi-Company Architecture](#multi-company-architecture)
 - [Authentication](#authentication)
 - [Rate Limiting](#rate-limiting)
+  - [Limiter keying and `TRUST_PROXY`](#limiter-keying-and-trust_proxy)
 - [Error Handling](#error-handling)
 - [Endpoints](#endpoints)
   - [Health Check](#health-check)
   - [Ask Question (JSON)](#ask-question-json)
   - [Ask Question (Streaming)](#ask-question-streaming)
+  - [Public Assistant Routes](#public-assistant-routes)
   - [Test Streaming](#test-streaming)
   - [Scheduler - Job Control](#scheduler---job-control)
   - [Scheduler - Cron Control](#scheduler---cron-control)
@@ -27,6 +29,7 @@ A machine-readable API reference for the PopularCert RAG API. This document is d
   - [Cloudflare - System Prompt](#cloudflare---system-prompt)
   - [Gateway - Provider Catalog](#gateway---provider-catalog)
   - [Gateway - Knowledge Bases](#gateway---knowledge-bases)
+  - [Gateway - Assistants](#gateway---assistants)
 
 ---
 
@@ -53,20 +56,36 @@ x-company-name: popularcert
 
 ## Authentication
 
-Cloudflare endpoints (`/cloudflare/*`) require an API key in the header if `ADMIN_API_KEY` environment variable is set:
+Admin endpoints (`/cloudflare/*`, `/gateway/*`, `/logs`, `/api-docs`) require an admin session token. Obtain one from `POST /auth/login`, then send it as either header:
 
 ```
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
-If `ADMIN_API_KEY` is not set, Cloudflare routes are unprotected (development mode).
+```
+Authorization: Bearer YOUR_ADMIN_SESSION_TOKEN
+```
+
+A third path-scoped cookie (`pc_admin_token`, path `/api-docs`) exists solely so the Swagger UI can authenticate in a new tab; it is not a general-purpose credential.
+
+The login backend is chosen at boot from `.env`:
+
+| Configured in `.env` | Backend | Behaviour |
+|---|---|---|
+| `CLERK_SECRET_KEY` | Clerk | Credentials verified against Clerk's Backend API. Wrong credentials → 401; Clerk unreachable → 503 (no silent fallback to the env account). |
+| `ADMIN_USERNAME` + `ADMIN_PASSWORD` (and no Clerk key) | Env credentials | Compared with `crypto.timingSafeEqual`. |
+| Neither | Auth **disabled** | Every admin route is open (development default). A boot warning is printed. |
+
+`POST /auth/login` returns an HMAC-signed token valid for `ADMIN_TOKEN_TTL_HOURS` (default 12). `ADMIN_SECRET` signs it; when unset an ephemeral random secret is generated per boot, so sessions do not survive a restart.
+
+> The legacy `x-api-key` / `ADMIN_API_KEY` mechanism was **removed** and is not enforced anywhere. Do not rely on it.
 
 ## Rate Limiting
 
 | Tier | Routes | Default Limit |
 |------|--------|---------------|
-| Global | All routes except `GET /` | 100 req/min |
-| AI | `POST /ask`, `POST /ask-stream` | 20 req/min |
+| Global | All routes except `GET /` and static assets | 100 req/min |
+| AI | `POST /ask`, `POST /ask-stream`, `GET /ask/suggestions`, `POST /test` | 20 req/min |
 | Login | `POST /auth/login` (brute-force guard) | 10 req/min |
 
 Limits are hardcoded constants in `app.js` / `routes/ask.js` / `routes/auth.js` — there are **no** `RATE_LIMIT_*` env vars.
@@ -74,6 +93,19 @@ Limits are hardcoded constants in `app.js` / `routes/ask.js` / `routes/auth.js` 
 Admin routes (`/cloudflare/*`, `/gateway/*`, `/logs`, `/api-docs`) are **not** rate-limited — authenticated admin sessions also bypass the global baseline, so heavy portal/catalog work never trips a 429.
 
 Rate-limited responses include standard `RateLimit-*` headers and return HTTP 429 with error message.
+
+### Limiter keying and `TRUST_PROXY`
+
+Every limiter keys on `req.ip`, which Express resolves through the `trust proxy` setting. That setting is configured once in `app.js` and **defaults to `false`**, so `X-Forwarded-For` is ignored and a client cannot forge a fresh limiter key by rotating the header.
+
+| `TRUST_PROXY` | Effect |
+|---|---|
+| unset / empty / `false` | **Default.** `X-Forwarded-For` ignored; the limiter key is the socket peer address. |
+| a positive integer (e.g. `1`) | Trust that many proxy hops — the normal setting behind one reverse proxy. |
+| comma-separated IPs | Trust only those proxy addresses. |
+| `true` | Trust the whole chain. **Unsafe** — any client can forge `X-Forwarded-For` and rotate its rate-limit key. The server logs a warning when set. |
+
+Deploying behind a reverse proxy without setting `TRUST_PROXY` means every client shares the proxy's IP as its limiter key, so limits apply globally rather than per client.
 
 ## Error Handling
 
@@ -143,7 +175,8 @@ x-company-name: popularcert
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `question` | string | Yes | The user's question |
-| `history` | array | No | Conversation history, array of `{role, content}` objects |
+| `history` | array | No | Conversation history, array of `{role, content}` objects (max 6 used) |
+| `assistantKey` | string | No | Assistant to use **for this request only** — overrides the company's stored `ASSISTANT_KEY` without writing to it. Must be an assistant of the requesting company; unknown/inactive keys silently fall back to the company default |
 
 **Response (200):**
 ```json
@@ -213,7 +246,10 @@ x-company-name: popularcert
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `question` | string | Yes | The user's question |
-| `history` | array | No | Conversation history |**Response:** `text/event-stream`
+| `history` | array | No | Conversation history (max 6 used) |
+| `assistantKey` | string | No | Assistant to use **for this request only** — same semantics as `/ask` |
+
+**Response:** `text/event-stream`
 
 ```
 data: {"__start":true,"sources":[{"title":"ISO 9001 in Angola","score":0.86}],"matches":[{"id":"chunk-1","score":0.86}],"graph":null}
@@ -232,11 +268,13 @@ data: [DONE]
 **Event Types:**
 | Event | Format | Description |
 |-------|--------|-------------|
-| Start | `data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}\|null}` | Structured start frame carrying retrieval metadata before the first token |
+| Start | `data: {"__start":true,"sources":[...], "matches":[...], "graph":{...}\|null}` | Structured start frame carrying retrieval metadata. **Arrives AFTER the tokens** (sent once the pipeline finishes) — do not use it to clear a "Thinking…" placeholder |
 | Token | `data: {"token":"..."}` | Each streamed token |
 | Possible questions | `data: {"possibleQuestions":[...]}` | 3–5 suggested follow-up questions generated from the answer; rendered as clickable chips by the Test AI page. Best-effort — empty/omitted on errors, canned fast-path answers, aborted requests |
 | Error | `data: {"error":"..."}` | Error occurred |
 | Done | `data: [DONE]` | Stream completed successfully |
+
+> **Frame order:** on a RAG answer the tokens stream first and the `__start` metadata frame follows them; on the fast path (greetings, identity, contact) there is no `__start` frame and the legacy sentinel is emitted instead. Full integration guide: `docs/api/chat-integration.md`.
 
 > **Legacy frames:** the standalone `data: {"sources":[...]}` frame and the `data: {"token":"__START_RESPONSE__"}` sentinel are still parsed by clients but only emitted as the preamble of `__start:false` start frames (empty-question / fast-path / error responses). The structured `__start` frame replaced both on RAG answers.
 
@@ -301,6 +339,57 @@ x-company-name: popularcert
   ]
 }
 ```
+
+---
+
+### Public Assistant Routes
+
+**Endpoints:** `GET /gateway/public/assistants` · `GET /gateway/public/assistants/{key}` · `POST /gateway/public/assistants/{key}/ask` · `POST /gateway/public/assistants/{key}/stream`
+
+**Description:** Ask a **public** assistant without an admin session token. These are the routes to use for an embedded chat widget or third-party integration — no `x-auth-token`, and the assistant is fixed by the URL instead of a request field. They take the `x-company-name` header (required, 400 when missing/unknown) and nothing else. Assistants that are not `is_public` **and** `is_active` return 404.
+
+Rate limits: these sit under the global 100/min tier only (they are not on the AI tier and take no per-company API key), so budget accordingly.
+
+**Request:**
+```http
+GET /gateway/public/assistants HTTP/1.1
+x-company-name: maxicert
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "assistants": [
+    { "key": "sarah", "name": "Sarah", "description": null, "model": "nvidia/nemotron-3-super-120b-a12b", "primaryKb": "Max Test KB" }
+  ]
+}
+```
+
+Credentials are never included in these responses.
+
+**Ask:**
+```http
+POST /gateway/public/assistants/sarah/ask HTTP/1.1
+Content-Type: application/json
+x-company-name: maxicert
+
+{ "question": "What is ISO 9001 certification?" }
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "answer": "ISO 9001 certification is an independent assessment…",
+  "sources": [ { "title": "ISO 9001 & 14001 Certification Iraq | Cost & Process Guide", "score": 0.8886987 } ],
+  "cached": false
+}
+```
+
+Note the reduced field set versus `/ask`: no `matches`, `graph`, or `possibleQuestions`. `/stream` takes the same body and emits the same SSE frames as `/ask-stream`.
+
+For a complete integration guide — endpoint choice, a runnable streaming client, rendering-safety rules, and the error table — see **`docs/api/chat-integration.md`**.
 
 ---
 
@@ -413,7 +502,8 @@ Content-Type: application/json
 {
   "jobId": "ingest",
   "schedule": "0 2 * * *",
-  "companyName": "popularcert"
+  "companyName": "popularcert",
+  "kbKey": "popularcert-wp"
 }
 ```
 
@@ -424,6 +514,7 @@ Content-Type: application/json
 | `jobId` | string | Yes | Job to schedule (`ingest` or `testing`) |
 | `schedule` | string | Yes | Cron expression (e.g., `0 2 * * *` for daily at 2 AM) |
 | `companyName` | string | No | Company to run the job for |
+| `kbKey` | string | No | Scope the schedule to one knowledge base (requires `companyName`). Each tick runs the KB-driven ingest with the KB's saved source config; the binding is verified at schedule time (unknown company/KB pair → 400). |
 
 **Response (200):**
 ```json
@@ -564,7 +655,7 @@ GET /cloudflare/status HTTP/1.1
 **Request:**
 ```http
 GET /cloudflare/companies HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -598,7 +689,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 ```http
 POST /cloudflare/companies HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 
 {
   "name": "another-co",
@@ -650,7 +741,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 GET /cloudflare/companies/popularcert HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -681,7 +772,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 ```http
 PUT /cloudflare/companies/popularcert HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 
 {
   "LLM_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8",
@@ -714,7 +805,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 DELETE /cloudflare/companies/another-co HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -736,7 +827,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 POST /cloudflare/companies/popularcert/reset HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -767,7 +858,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 GET /cloudflare/indexes HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -797,7 +888,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 ```http
 POST /cloudflare/indexes HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 
 {
   "name": "my-new-index",
@@ -840,7 +931,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 DELETE /cloudflare/indexes/my-new-index HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -874,7 +965,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 GET /cloudflare/buckets HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -899,7 +990,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 ```http
 POST /cloudflare/buckets HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 
 {
   "name": "my-new-bucket"
@@ -931,7 +1022,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 DELETE /cloudflare/buckets/my-new-bucket HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -961,7 +1052,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 POST /cloudflare/buckets/my-new-bucket/clear HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -989,7 +1080,7 @@ x-api-key: YOUR_ADMIN_API_KEY
 **Request:**
 ```http
 GET /cloudflare/config HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 ```
 
@@ -1035,7 +1126,7 @@ x-company-name: popularcert
 ```http
 PUT /cloudflare/config HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 
 {
@@ -1047,7 +1138,7 @@ x-company-name: popularcert
 ```http
 PUT /cloudflare/config HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 
 {
@@ -1062,7 +1153,7 @@ x-company-name: popularcert
 ```http
 PUT /cloudflare/config HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 
 {
@@ -1114,7 +1205,7 @@ Resource keys (`VECTOR_INDEX`, `R2_BUCKET_NAME`) and brand keys (`CONSULTANT_NAM
 **Request:**
 ```http
 POST /cloudflare/config/reset HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 ```
 
 **Response (200):**
@@ -1226,7 +1317,9 @@ curl -H "x-api-key: YOUR_API_KEY" http://localhost:3000/cloudflare/buckets
 
 **Endpoint:** `GET /cloudflare/prompt`
 
-**Description:** Returns the system prompt template, resolved preview, and available variables.
+**Description:** Returns the system prompt template, resolved preview, the merged custom-variable map, each tier separately, and any placeholders left unresolved.
+
+> **There are no built-in variables.** `{{PLACEHOLDER}}` used to be auto-filled from company config and the wall clock (`{{COMPANY_NAME}}`, `{{CONSULTANT_NAME}}`, the four URLs, `{{CURRENT_DATE}}`, `{{CURRENT_YEAR}}`, …). Those are gone — every placeholder must be defined as data, either in the company's `PROMPT_VARIABLES` config key or in the selected assistant's `assistant_variables` (assistant wins on conflict). An unmatched placeholder is sent to the model **literally** and reported in `missing`, never silently blanked. Tenants that predate the change can migrate with `node scripts/backfill-prompt-variables.mjs --apply`.
 
 **Auth Required:** Yes
 
@@ -1235,7 +1328,7 @@ curl -H "x-api-key: YOUR_API_KEY" http://localhost:3000/cloudflare/buckets
 **Request:**
 ```http
 GET /cloudflare/prompt HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 ```
 
@@ -1248,15 +1341,24 @@ x-company-name: popularcert
     "resolved": "You are Sarah, an AI assistant for Popularcert...",
     "variables": {
       "CONSULTANT_NAME": "Sarah",
-      "COMPANY_NAME": "Popularcert",
-      "CONTACT_US_URL": "https://popularcert.com/contact-us/",
-      "LOCATIONS_URL": "https://popularcert.com/locations/",
-      "SERVICES_URL": "https://popularcert.com/services/",
-      "BASE_URL": "https://popularcert.com"
-    }
+      "COMPANY_NAME": "Popularcert"
+    },
+    "companyVariables": [
+      { "key": "CONSULTANT_NAME", "value": "Sarah" },
+      { "key": "COMPANY_NAME", "value": "Popularcert" }
+    ],
+    "assistantVariables": [],
+    "missing": []
   }
 }
 ```
+
+| Field | Description |
+|---|---|
+| `variables` | Merged map (company ⊕ assistant, assistant wins) — what the LLM receives |
+| `companyVariables` | The company's `PROMPT_VARIABLES` tier |
+| `assistantVariables` | The selected assistant's own variables |
+| `missing` | Placeholders no tier defines; left literal in `resolved` |
 
 #### Update Prompt
 
@@ -1272,7 +1374,7 @@ x-company-name: popularcert
 ```http
 PUT /cloudflare/prompt HTTP/1.1
 Content-Type: application/json
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 
 {
@@ -1285,17 +1387,7 @@ x-company-name: popularcert
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `template` | string | Yes | System prompt template with `{{VARIABLE}}` placeholders |
-
-**Supported Variables:**
-
-| Variable | Resolves To |
-|----------|-------------|
-| `{{CONSULTANT_NAME}}` | Assistant name from config |
-| `{{COMPANY_NAME}}` | Company name from config |
-| `{{CONTACT_US_URL}}` | Contact page URL |
-| `{{LOCATIONS_URL}}` | Locations page URL |
-| `{{SERVICES_URL}}` | Services page URL |
-| `{{BASE_URL}}` | Base URL |
+| `variables` | array | No | `[{key, value}]` custom variable pairs replacing `PROMPT_VARIABLES`. Omit to keep the current set. |
 
 **Response (200):**
 ```json
@@ -1304,15 +1396,27 @@ x-company-name: popularcert
   "message": "System prompt updated.",
   "prompt": {
     "template": "You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}...",
-    "resolved": "You are Sarah, an AI assistant for Popularcert..."
+    "resolved": "You are Sarah, an AI assistant for Popularcert...",
+    "variables": { "CONSULTANT_NAME": "Sarah", "COMPANY_NAME": "Popularcert" },
+    "companyVariables": [{ "key": "CONSULTANT_NAME", "value": "Sarah" }],
+    "assistantVariables": [],
+    "missing": []
   }
 }
 ```
 
+**Response (400 — invalid variable):**
+```json
+{
+  "success": false,
+  "error": "PROMPT_VARIABLES key 'bad key!' is invalid — use letters, digits and underscores, starting with a letter (e.g. BRAND_NAME)."
+}
+```
+
 **Behavior:**
-- Variables are resolved at request time, so changing a config value (e.g., consultant name) automatically updates the prompt
-- Stored in `runtime-config.json` as `SYSTEM_PROMPT`
-- Reset to default with `POST /cloudflare/prompt/reset`
+- Placeholders resolve at request time from the merged custom-variable tiers (assistant overrides company), so editing a variable updates the prompt with no restart
+- Stored in the config store as `SYSTEM_PROMPT` + `PROMPT_VARIABLES` (MySQL `company_config` or `db/<company>.db`)
+- Reset to default with `POST /cloudflare/prompt/reset` (restores the default template **and** the default variable set)
 
 #### Reset Prompt
 
@@ -1327,7 +1431,7 @@ x-company-name: popularcert
 **Request:**
 ```http
 POST /cloudflare/prompt/reset HTTP/1.1
-x-api-key: YOUR_ADMIN_API_KEY
+x-auth-token: YOUR_ADMIN_SESSION_TOKEN
 x-company-name: popularcert
 ```
 
@@ -1644,6 +1748,62 @@ curl -X DELETE http://localhost:3000/gateway/providers/openai/models/42 \
 
 ---
 
+## Gateway - Assistants
+
+**Endpoints:** `GET /gateway/assistants` · `POST /gateway/assistants` · `GET /gateway/assistants/{key}` · `PUT /gateway/assistants/{key}` · `DELETE /gateway/assistants/{key}`
+
+**Description:** Tenant-scoped runtime personas (rows in the `assistants` table). All routes require `requireAdmin` plus the `x-company-name` header (or `?company=` / `body.company`). An assistant binds a company credential + a model (from that credential's provider) + knowledge bases, and overrides the company's RAG defaults at ask time when the company config's `ASSISTANT_KEY` selects it. `POST` enforces the company assistant limit and ownership; `PUT` is a partial merge over the stored row (assistantKey is the route identity and never editable; an explicit `null` clears an optional field); `DELETE` is a soft delete. Audit actions: `assistant.created`, `assistant.updated`, `assistant.deleted`. Errors: `400` validation / ownership, `404` unknown assistant, `409` duplicate key / assistant limit reached, `503` MySQL not configured — body `{ "success": false, "error": "..." }`.
+
+**Persona + guardrail fields (AssistantInput):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `systemPrompt` | string | Persona system prompt; `{{VARIABLE}}` placeholders resolve from assistant variables (company `PROMPT_VARIABLES` are the fallback tier). |
+| `guardrailPrompt` | string \| null | Custom guardrail instructions appended to the system message. **When set it REPLACES the built-in topic guardrail** (including its prompt-injection defense) — include your own defenses in the text. |
+| `blockedTopics` | string \| null | Newline-separated topic keywords. Any case-insensitive **substring** match in the question vetoes the ask before any AI call. Always applied **on top** of the resolved blocked-pattern tier. |
+| `blockedPatterns` | string \| null | Newline-separated blocked patterns, one per line (see format below). |
+| `variables` | array | `{ key, value }` pairs injected into the system prompt at runtime. |
+
+**Blocked-pattern line format:** a literal phrase (`crypto`, `medical advice`) matches case-insensitively; a `/delimited/` line is a regex (`/\bmovie\b/i`). Only `i` and `u` flags are accepted (`i` is assumed); anything else fails validation with `blockedPatterns contains an invalid pattern: ...`. Limits: max 100 lines, 8000 chars.
+
+**Three-tier resolution (assistant > company > built-ins):** the built-in pattern set ships hardcoded (`shared/blocked-patterns.js`). A company can replace it via the `BLOCKED_PATTERNS` config key (`PUT /cloudflare/config`), and an assistant can replace the company tier via `blockedPatterns`. A configured tier **fully replaces** the one below it — there is no merging. Resolution: assistant `blockedPatterns` if set → company `BLOCKED_PATTERNS` if set → built-ins. Company `BLOCKED_TOPICS` substring vetoes always apply on top of whichever tier resolved, and the anchored test-string gate (`test`, `testing`, `ping`, `hello world`, `dummy`, `sample`, `asdf`, `qwerty`, `foo`, `bar`) stays always-on as hygiene and is not overridable. The cache key includes the assistant key, so editing patterns takes effect immediately with no stale answers.
+
+**Example — set persona guardrails on an existing assistant:**
+
+```http
+PUT /gateway/assistants/neo HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer <token>
+x-company-name: neoco
+
+{
+  "blockedTopics": "crypto\ncryptocurrency\nmedical advice",
+  "blockedPatterns": "/\\b(crypto|cryptocurrency|bitcoin)\\b/i\ngambling\n/\\bstocks?\\b/i"
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "message": "Assistant updated.",
+  "assistantId": 11,
+  "assistantKey": "neo"
+}
+```
+
+**Response (400 — invalid pattern):**
+```json
+{
+  "success": false,
+  "error": "Validation failed: {\"blockedPatterns\":\"blockedPatterns contains an invalid pattern: /foo/g\"}"
+}
+```
+
+**Response shape (GET):** rows are snake_case with denormalized joins (`credential_key`, `provider_key`, `model_key`, `primary_kb_name`, …). Persona/guardrail columns: `system_prompt`, `guardrail_prompt`, `blocked_topics`, `blocked_patterns` (all nullable strings), `assistant_variables` (parsed JSON array).
+
+---
+
 ## RAG Pipeline Overview
 
 For AI agents understanding the data flow:
@@ -1674,32 +1834,29 @@ User Question (with x-company-name header)
 
 ## Environment Variables
 
+The environment carries **only** the MySQL connection, the admin login, and operational knobs. All company + AI/RAG configuration (companies, models, URLs, prompts, Cloudflare credentials, ask API keys) lives in the **config store** — MySQL `company_config` by default, or one SQLite file per company — and is managed through the admin API or portal, never through `.env`.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID | Required |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token | Required |
-| `VECTOR_INDEX` | Vectorize index name | Required |
-| `R2_BUCKET_NAME` | R2 bucket name | Required |
-| `R2_ACCESS_KEY_ID` | R2 access key | Required |
-| `R2_SECRET_ACCESS_KEY` | R2 secret key | Required |
-| `R2_TOKEN_VALUE` | R2 token value | Optional |
-| `R2_JURISDICTION_END_POINT` | R2 endpoint URL | Optional |
-| `BASE_URL` | WordPress domain URL | — |
 | `PORT` | Server port | `3000` |
 | `NODE_ENV` | Environment | `development` |
-| `ADMIN_API_KEY` | Admin API key | Optional |
-| `EMBEDDING_MODEL` | Embedding model | `@cf/baai/bge-base-en-v1.5` |
-| `EMBEDDING_DIMENSIONS` | Vector dimensions | `768` |
-| `LLM_MODEL` | Primary LLM | `@cf/meta/llama-3.1-8b-instruct-fp8` |
-| `SMALL_LLM` | Query rewriting LLM | `@cf/meta/llama-3.2-3b-instruct` |
-| `RERANKING_MODEL` | Reranking model | `@cf/baai/bge-reranker-base` |
-| `DELAY_MS` | Ingestion delay | Optional |
-| `BATCH_SIZE` | Ingestion batch size | Optional |
-| `CONTACT_US_URL` | Contact page URL | `https://popularcert.com/contact-us/` |
-| `LOCATIONS_URL` | Locations page URL | `https://popularcert.com/locations/` |
-| `SERVICES_URL` | Services page URL | `https://popularcert.com/services/` |
-| `COMPANY_NAME` | Company name | `Popularcert` |
-| `CONSULTANT_NAME` | Consultant/assistant name | `Sarah` |
+| `CONFIG_STORE` | Config backend: `mysql` or `sqlite` | `sqlite` |
+| `TRUST_PROXY` | Proxy hops (integer) or comma-separated proxy IPs. Unset = do not trust `X-Forwarded-For` | unset |
+| `APP_ENCRYPTION_KEY` | AES-256-GCM master key for at-rest credential encryption (`openssl rand -hex 32`). Unset = credentials stored plaintext | unset |
+| `CLERK_SECRET_KEY` | Enables Clerk-backed admin login | unset |
+| `CLERK_ALLOWED_EMAILS` | Comma/space separated allowlist of admin emails | unset (all Clerk users) |
+| `ADMIN_USERNAME` | Env-credential admin login | unset |
+| `ADMIN_PASSWORD` | Env-credential admin password | unset |
+| `ADMIN_SECRET` | HMAC key signing admin session tokens (`openssl rand -hex 32`) | ephemeral per boot |
+| `ADMIN_TOKEN_TTL_HOURS` | Admin session lifetime | `12` |
+| `MYSQL_HOST` | MySQL host | — |
+| `MYSQL_PORT` | MySQL port | `3306` |
+| `MYSQL_USER` | MySQL user | — |
+| `MYSQL_PASSWORD` | MySQL password | — |
+| `MYSQL_DATABASE` | MySQL database | — |
+| `MYSQL_SSL` | `true` enables TLS (remote hosts that require it) | unset |
+
+> `TRUST_PROXY` affects rate-limit keying — see [Limiter keying](#limiter-keying-and-trust_proxy). Setting it to `true` lets any client forge `X-Forwarded-For`.
 
 ---
 
@@ -1715,7 +1872,11 @@ Allowed origins:
 - `http://localhost:5173`
 - `http://localhost:8080`
 
-Allowed headers: `Content-Type`, `X-WP-Nonce`, `X-Company-Name`
+Allowed headers: `Content-Type`, `X-WP-Nonce`, `X-Company-Name`, `X-Api-Key`, `Authorization`, `X-Auth-Token`
+
+Allowed methods: `GET`, `POST`, `DELETE`, `OPTIONS`
+
+Additionally, any `<company>.com` origin (and its subdomains) is allowed for every company in the runtime company list — the allowlist is dynamic, not just the static hosts above.
 
 ---
 

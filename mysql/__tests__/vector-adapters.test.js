@@ -16,6 +16,7 @@ import { createVectorAdapter } from "../adapters/vector/factory.js";
 // MOCK: global.fetch — intercept all HTTP calls per adapter
 // ------------------------------------------------------------------
 let fetchCalls = [];
+// eslint-disable-next-line no-unused-vars
 let fetchHandler = null;
 
 const originalFetch = globalThis.fetch;
@@ -133,6 +134,63 @@ describe("PineconeAdapter", () => {
   it("has correct providerKey", () => {
     adapter = createPineconeAdapter();
     assert.equal(adapter.providerKey, "pinecone");
+  });
+
+  it("normalizes a scheme-less host from the control plane to https://", () => {
+    // Caught live: Pinecone's control plane returns hosts WITHOUT a scheme
+    // ("<index>-<id>.svc.aped-….pinecone.io") and fetch() rejects those
+    // ("Failed to parse URL"). The adapter must add the scheme itself.
+    adapter = createPineconeAdapter({ host: "my-index-abc123.svc.aped-4627-b74a.pinecone.io" });
+    assert.equal(adapter.host, "https://my-index-abc123.svc.aped-4627-b74a.pinecone.io");
+  });
+
+  it("preserves an explicit https host and strips trailing slashes", () => {
+    adapter = createPineconeAdapter({ host: "https://explicit.svc.pinecone.io/" });
+    assert.equal(adapter.host, "https://explicit.svc.pinecone.io");
+  });
+
+  it("accepts snake_case credentials (api_key from auth schema) as well as camelCase", () => {
+    // Mirrors what ingest/resolve.js normalizeCredential now produces — the
+    // wizard stores api_key/host; the adapter must never see an undefined key.
+    adapter = new PineconeAdapter(
+      {
+        api_key: "snake-key.proj.env",
+        host: "https://snake-host.svc.pinecone.io",
+        vectorIndexName: "my-index",
+        companyName: "test-co",
+      },
+      { embeddingAdapter: mockEmbeddingAdapter() }
+    );
+    assert.equal(adapter.apiKey, "snake-key.proj.env");
+    assert.equal(adapter.host, "https://snake-host.svc.pinecone.io");
+  });
+
+  it("sends the X-Pinecone-API-Version header on data-plane calls", async () => {
+    mockFetch(() => ({ ok: true, json: async () => ({ matches: [] }) }));
+    adapter = createPineconeAdapter();
+    await adapter.query([0.1], 5);
+    assert.equal(fetchCalls[0].opts.headers["X-Pinecone-API-Version"], "2025-01");
+  });
+
+  it("serverless key without host → empty derived host and clear upsert error", async () => {
+    adapter = new PineconeAdapter(
+      { api_key: "pcsk_modernServerlessKey", vectorIndexName: "my-index", companyName: "test-co" },
+      { embeddingAdapter: mockEmbeddingAdapter() }
+    );
+    assert.equal(adapter.host, "");
+    await assert.rejects(
+      () => adapter.upsert(sampleChunks(1)),
+      /Pinecone host is not configured/
+    );
+  });
+
+  it("missing api key → clear upsert error before any fetch", async () => {
+    adapter = new PineconeAdapter(
+      { host: "https://h.svc.pinecone.io", vectorIndexName: "idx", companyName: "test-co" },
+      { embeddingAdapter: mockEmbeddingAdapter() }
+    );
+    await assert.rejects(() => adapter.upsert(sampleChunks(1)), /Pinecone API key is missing/);
+    assert.equal(fetchCalls.length, 0);
   });
 
   it("builds host from apiKey components", () => {
@@ -267,6 +325,25 @@ describe("QdrantAdapter", () => {
     assert.equal(adapter._headers()["api-key"], "test-api-key");
   });
 
+  it("accepts snake_case credentials (api_key from auth schema) as well as camelCase", () => {
+    // Mirrors what ingest/resolve.js normalizeCredential now produces.
+    adapter = new QdrantAdapter(
+      { api_key: "snake-key", host: "https://cluster.cloud.qdrant.io:6333", vectorIndexName: "col", companyName: "co" },
+      { embeddingAdapter: mockEmbeddingAdapter() }
+    );
+    assert.equal(adapter.apiKey, "snake-key");
+    assert.equal(adapter.host, "https://cluster.cloud.qdrant.io:6333");
+  });
+
+  it("missing collection → clear upsert error before any fetch", async () => {
+    adapter = createQdrantAdapter({ vectorIndexName: "" });
+    await assert.rejects(
+      () => adapter.upsert(sampleChunks(1)),
+      /Qdrant collection is not configured/
+    );
+    assert.equal(fetchCalls.length, 0);
+  });
+
   it("omits api-key header when apiKey is empty", () => {
     adapter = createQdrantAdapter({ apiKey: "" });
     assert.equal(adapter._headers()["api-key"], undefined);
@@ -325,10 +402,13 @@ describe("QdrantAdapter", () => {
     adapter = createQdrantAdapter();
     const result = await adapter.query([0.1, 0.2], 10);
 
-    assert.equal(fetchCalls.length, 1);
-    assert.match(fetchCalls[0].url, /\/points\/search$/);
-    assert.equal(fetchCalls[0].opts.method, "POST");
-    const body = JSON.parse(fetchCalls[0].opts.body);
+    // Call 1 is the collection-schema probe (named-vector support), call 2 the search.
+    assert.equal(fetchCalls.length, 2);
+    assert.match(fetchCalls[0].url, /\/collections\/[^/]+$/);
+    assert.equal(fetchCalls[0].opts.method, "GET");
+    assert.match(fetchCalls[1].url, /\/points\/search$/);
+    assert.equal(fetchCalls[1].opts.method, "POST");
+    const body = JSON.parse(fetchCalls[1].opts.body);
     assert.deepEqual(body.vector, [0.1, 0.2]);
     assert.equal(body.limit, 10);
     assert.equal(body.with_payload, true);
@@ -350,17 +430,30 @@ describe("QdrantAdapter", () => {
   });
 
   it("upsert sends points to /points", async () => {
-    mockFetch(() => ({ ok: true, json: async () => ({}) }));
+    // ?wait=true makes the upsert synchronous; Qdrant answers {status:"ok"} —
+    // the adapter rejects anything else so schema violations never pass silently.
+    mockFetch(() => ({ ok: true, json: async () => ({ status: "ok" }) }));
     adapter = createQdrantAdapter();
     await adapter.upsert(sampleChunks(2));
 
     assert.equal(fetchCalls.length, 1);
-    assert.match(fetchCalls[0].url, /\/points$/);
+    assert.match(fetchCalls[0].url, /\/points\?wait=true$/);
     assert.equal(fetchCalls[0].opts.method, "PUT");
     const body = JSON.parse(fetchCalls[0].opts.body);
     assert.equal(body.points.length, 2);
-    assert.equal(body.points[0].id, "chunk-0");
+    // Qdrant ids must be unsigned ints — the adapter derives one deterministically
+    // from the pipeline id (same chunk → same point on re-ingestion).
+    assert.equal(typeof body.points[0].id, "number");
+    assert.ok(Number.isInteger(body.points[0].id) && body.points[0].id > 0);
     assert.equal(body.points[0].vector.length, 768);
+  });
+
+  it("upsert rejects an accepted-but-not-applied operation (named-vector mismatch)", async () => {
+    // The silent-drop bug this locks: Qdrant 200s the request but reports a
+    // failed operation — previously logged "success" and lost every point.
+    mockFetch(() => ({ ok: true, json: async () => ({ status: "failed", result: { error: "bad vector" } }) }));
+    adapter = createQdrantAdapter();
+    await assert.rejects(() => adapter.upsert(sampleChunks(1)), /not applied/);
   });
 
   it("upsert throws on missing chunk.id", async () => {
@@ -431,6 +524,25 @@ describe("WeaviateAdapter", () => {
   it("sends Bearer auth header", () => {
     adapter = createWeaviateAdapter();
     assert.equal(adapter._headers()["Authorization"], "Bearer test-weaviate-key");
+  });
+
+  it("accepts snake_case credentials (api_key from auth schema) as well as camelCase", () => {
+    // Mirrors what ingest/resolve.js normalizeCredential now produces.
+    adapter = new WeaviateAdapter(
+      { api_key: "snake-key", host: "https://snake.weaviate.cloud", vectorIndexName: "Cls", companyName: "co" },
+      { embeddingAdapter: mockEmbeddingAdapter() }
+    );
+    assert.equal(adapter.apiKey, "snake-key");
+    assert.equal(adapter.host, "https://snake.weaviate.cloud");
+  });
+
+  it("missing class → clear upsert error before any fetch", async () => {
+    adapter = createWeaviateAdapter({ vectorIndexName: "" });
+    await assert.rejects(
+      () => adapter.upsert(sampleChunks(1)),
+      /Weaviate class is not configured/
+    );
+    assert.equal(fetchCalls.length, 0);
   });
 
   it("omits Authorization when apiKey is empty", () => {
@@ -537,7 +649,12 @@ describe("WeaviateAdapter", () => {
     const body = JSON.parse(fetchCalls[0].opts.body);
     assert.equal(body.objects.length, 2);
     assert.equal(body.objects[0].class, "MyClass");
-    assert.equal(body.objects[0].id, "chunk-0");
+    // Weaviate ids must be UUIDs — the adapter derives one deterministically
+    // from the pipeline id (same chunk → same object on re-ingestion).
+    assert.match(
+      body.objects[0].id,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
     assert.equal(body.objects[0].vector.length, 768);
   });
 
@@ -668,7 +785,7 @@ describe("Adapter interface contract", () => {
     }));
 
     const adapter = new PineconeAdapter(
-      { apiKey: "k.p.e", vectorIndexName: "idx", companyName: "co" },
+      { apiKey: "k.p.e", environment: "us-east1-gcp", vectorIndexName: "idx", companyName: "co" },
       { embeddingAdapter: mockEmbeddingAdapter() }
     );
 

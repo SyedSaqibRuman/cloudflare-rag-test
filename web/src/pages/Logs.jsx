@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listLogs, readLog, clearLog, downloadLog, downloadAllLogs } from "../api";
-import { Card, Button, Spinner, Empty, Badge, Select, Skeleton, Toast } from "../components/ui";
+import { Card, Button, Spinner, Empty, Badge, Select, Skeleton } from "../components/ui";
 import { useHeaderActions } from "../components/Layout";
 import { usePoll, useToast } from "../hooks";
 import { cx, timeAgo } from "../util";
@@ -76,7 +76,7 @@ export default function Logs() {
   const [loadingContent, setLoadingContent] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast(2500);
+  const { notify } = useToast(2500);
 
   const load = async () => {
     setError(null);
@@ -219,13 +219,24 @@ export default function Logs() {
                 const isActive = active === f.name;
 
                 return (
-                  <button
+                  // Selectable card: a div with role=button (NOT a real
+                  // <button>) because it contains Download/Clear buttons —
+                  // nested interactive elements are invalid HTML and confuse
+                  // assistive tech. Keyboard parity via Enter/Space below.
+                  <div
                     key={f.name}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     aria-pressed={isActive}
                     onClick={() => setActive(f.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setActive(f.name);
+                      }
+                    }}
                     className={cx(
-                      "group flex cursor-pointer flex-col rounded-xl border bg-slate-950/60 p-4 text-left transition-all focus-visible:ring-2 focus-visible:ring-indigo-400",
+                      "group flex cursor-pointer flex-col rounded-xl border bg-slate-950/60 p-4 text-left transition-all focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:outline-none",
                       isActive
                         ? "border-indigo-500/60 ring-1 ring-indigo-500/40"
                         : "border-slate-800 hover:border-indigo-500/40 hover:bg-slate-900"
@@ -260,11 +271,11 @@ export default function Logs() {
 
                     <div className="mt-3 flex items-center gap-3 text-[11px] text-slate-400">
                       <span className="tabular-nums">{formatSize(f.size)}</span>
-                      <span className="text-slate-600">·</span>
+                      <span className="text-slate-500">·</span>
                       <span className="tabular-nums">{formatCount(preview.lineCount)} lines</span>
-                      <span className="text-slate-600">·</span>
+                      <span className="text-slate-500">·</span>
                       <span className="tabular-nums">{timeAgo(f.mtime)}</span>
-                      <span className="text-slate-600">·</span>
+                      <span className="text-slate-500">·</span>
                       <button
                         type="button"
                         title={`Download ${f.name}`}
@@ -292,7 +303,7 @@ export default function Logs() {
                         </svg>
                       </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -352,7 +363,7 @@ export default function Logs() {
         </div>
       )}
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

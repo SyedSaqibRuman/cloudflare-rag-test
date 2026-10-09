@@ -5,7 +5,7 @@ import { cx } from "../util";
 
 export default function ThemeToggle({ onChange }) {
   return (
-    <Popover>
+    <Popover className="w-auto shrink-0">
       <PopoverTrigger asChild>
         <button
           type="button"

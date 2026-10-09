@@ -32,13 +32,14 @@ export const NAV = [
     items: [
       { id: "workflows", label: "Workflows", icon: "workflow", tip: "Automate tasks with AI-powered workflows" },
       { id: "scheduler", label: "Scheduler", icon: "clock", tip: "Schedule automatic content updates" },
-      { id: "webhooks", label: "Notifications", icon: "cloud", tip: "Manage webhook notifications for events" },
+      { id: "webhooks", label: "Notifications (Experimental)", icon: "cloud", tip: "Manage webhook notifications for events" },
     ],
   },
   {
     section: "Insights",
     items: [
       { id: "usage", label: "Usage", icon: "chart", tip: "Track your AI usage and costs" },
+      { id: "logs", label: "Logs", icon: "file", tip: "View system activity and errors" },
     ],
   },
   {
@@ -64,5 +65,5 @@ export const PAGE_META = {
 
   workflows: { title: "Workflows", subtitle: "Automate tasks with AI-powered workflows" },
   usage: { title: "Usage", subtitle: "Track your AI usage, tokens, and costs" },
-  webhooks: { title: "Notifications", subtitle: "Manage webhook notifications for events" },
+  webhooks: { title: "Notifications (Experimental)", subtitle: "Manage webhook notifications for events" },
 };

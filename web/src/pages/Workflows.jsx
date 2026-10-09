@@ -5,12 +5,14 @@
 import { useState, useEffect } from "react";
 import { useCompanies } from "../context.jsx";
 import {
-  Card, Button, Badge, Empty, Spinner, StatCard, Modal, Toast, Input, TextArea, Select, SkeletonCard, IconButton,
+  Card, Button, Empty, Spinner, StatCard, Modal, Input, TextArea, Select, SkeletonCard, IconButton,
 } from "../components/ui";
 import WorkflowStepEditor from "../components/WorkflowStepEditor.jsx";
 import { triggerNextStep } from "../components/NextStepPrompt";
 import { useHeaderActions } from "../components/Layout";
+import { parseUtcDate } from "../util";
 import { api } from "../api";
+import { useToast } from "../hooks";
 
 const STATUS_COLORS = {
   draft: "bg-slate-700 text-slate-300",
@@ -26,14 +28,13 @@ const TRIGGER_COLORS = {
   event: "bg-orange-500/15 text-orange-400",
 };
 
-const STEP_TYPES = ["assistant", "http", "ingest", "notify", "delay", "condition", "loop"];
 
 export default function Workflows() {
   const { company } = useCompanies();
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(null);
@@ -49,7 +50,7 @@ export default function Workflows() {
       const data = await api("/gateway/workflows", { company });
       setWorkflows(data.workflows || []);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setLoading(false);
     }
@@ -86,16 +87,16 @@ export default function Workflows() {
       if (!body.workflowKey && modal === "create") body.workflowKey = autoSlug(body.workflowName);
       if (modal === "create") {
         await api("/gateway/workflows", { method: "POST", body, company });
-        setToast({ tone: "green", message: `Workflow '${body.workflowKey}' created.` });
+        notify(`Workflow '${body.workflowKey}' created.`, "green");
         triggerNextStep("workflow-created");
       } else {
         await api(`/gateway/workflows/${modal.edit.workflow_key}`, { method: "PUT", body, company });
-        setToast({ tone: "green", message: "Workflow updated." });
+        notify("Workflow updated.", "green");
       }
       setModal(null);
       load();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setSaving(false);
     }
@@ -108,10 +109,10 @@ export default function Workflows() {
     try {
       const result = await api(`/gateway/workflows/${key}/run`, { method: "POST", company });
       setRunResult({ key, ...result });
-      setToast({ tone: result.status === "completed" ? "green" : "amber", message: `Run ${result.status}: ${result.durationMs}ms` });
+      notify(`Run ${result.status}: ${result.durationMs}ms`, result.status === "completed" ? "green" : "amber");
       load();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setRunning(null);
     }
@@ -121,10 +122,10 @@ export default function Workflows() {
     if (!company) return;
     try {
       await api(`/gateway/workflows/${key}/activate`, { method: "POST", company });
-      setToast({ tone: "green", message: "Workflow activated." });
+      notify("Workflow activated.", "green");
       load();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     }
   };
 
@@ -132,10 +133,10 @@ export default function Workflows() {
     if (!company) return;
     try {
       await api(`/gateway/workflows/${key}/pause`, { method: "POST", company });
-      setToast({ tone: "green", message: "Workflow paused." });
+      notify("Workflow paused.", "green");
       load();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     }
   };
 
@@ -144,10 +145,10 @@ export default function Workflows() {
     if (!window.confirm(`Delete workflow '${key}'?`)) return;
     try {
       await api(`/gateway/workflows/${key}`, { method: "DELETE", company });
-      setToast({ tone: "green", message: "Workflow deleted." });
+      notify("Workflow deleted.", "green");
       load();
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     }
   };
 
@@ -160,7 +161,7 @@ export default function Workflows() {
       const data = await api(`/gateway/workflows/${wf.workflow_key}/runs`, { company });
       setHistoryRuns(data.runs || []);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setHistoryLoading(false);
     }
@@ -352,7 +353,7 @@ export default function Workflows() {
                           {run.durationMs != null ? `${run.durationMs}ms` : "—"}
                         </td>
                         <td className="py-2 text-xs text-slate-500">
-                          {run.startedAt ? new Date(run.startedAt).toLocaleString() : "—"}
+                          {run.startedAt ? parseUtcDate(run.startedAt)?.toLocaleString() : "—"}
                         </td>
                         <td className="py-2 text-[10px] font-mono text-slate-500 max-w-[120px] truncate">
                           {run.runId || "—"}
@@ -367,8 +368,6 @@ export default function Workflows() {
           )}
         </Modal>
       )}
-
-      {toast && <Toast tone={toast.tone} message={toast.message} onClose={() => setToast(null)} />}
     </div>
   );
 }

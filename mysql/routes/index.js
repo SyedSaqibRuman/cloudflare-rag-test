@@ -19,6 +19,7 @@ import assistantsRouter from "./assistants.js";
 
 import executeRouter from "./execute.js";
 import cloudflareResourcesRouter from "./cloudflare-resources.js";
+import vectorResourcesRouter from "./vector-resources.js";
 import ingestionRouter from "./ingestion.js";
 import usageRouter from "./usage.js";
 import workflowsRouter from "./workflows.js";
@@ -56,11 +57,12 @@ router.use(assistantsRouter);
 
 router.use(executeRouter);
 router.use(cloudflareResourcesRouter);
+router.use(vectorResourcesRouter);
 router.use("/ingest", ingestionRouter);
 router.use(usageRouter);
 router.use(workflowsRouter);
 router.use(bulkRouter);
 router.use(webhooksRouter);
-router.use(knowledgeRouter);
+router.use("/knowledge", knowledgeRouter);
 
 export default router;

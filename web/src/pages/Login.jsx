@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useAuth } from "../auth.jsx";
 import { Button, Spinner, Input } from "../components/ui";
+import AuthShell, { AuthBrandBlock } from "../components/AuthShell.jsx";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -31,32 +32,14 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-10">
-      <a
-        href="#main"
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-indigo-500 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
-      >
-        Skip to main content
-      </a>
-      <main id="main" className="w-full max-w-sm">
+    <AuthShell>
         <form
           onSubmit={submit}
           noValidate
-          className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 shadow-xl"
+          className="auth-enter auth-card rounded-2xl border border-slate-800 bg-slate-900/70 p-8 shadow-xl backdrop-blur-xl"
+          style={{ animationDelay: "160ms" }}
         >
-          <div className="mb-6 flex flex-col items-center gap-3 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-500 text-lg font-bold text-white">
-              PC
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-50" translate="no">
-                PopularCert AI
-              </h1>
-              <p className="mt-1 text-sm text-slate-400">
-                Build AI assistants that answer questions using your content
-              </p>
-            </div>
-          </div>
+          <AuthBrandBlock />
 
           {error && (
             <div
@@ -78,7 +61,7 @@ export default function LoginPage() {
               ref={usernameRef}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="e.g. admin"
+              placeholder="Email or username"
             />
           </div>
 
@@ -118,14 +101,13 @@ export default function LoginPage() {
             </label>
           </div>
 
-          <Button type="submit" disabled={busy} className="mt-6 w-full min-h-11">
+          <Button type="submit" disabled={busy} className="auth-press mt-6 w-full min-h-11">
             {busy ? <Spinner className="h-4 w-4" /> : null}
             {busy ? "Signing in…" : "Sign In"}
           </Button>
 
 
         </form>
-      </main>
-    </div>
+    </AuthShell>
   );
 }

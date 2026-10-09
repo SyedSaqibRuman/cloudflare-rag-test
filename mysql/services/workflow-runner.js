@@ -261,7 +261,7 @@ export async function runWorkflow({ workflowKey, companyName, definition, signal
     }
 
     if (run.status === "running") run.status = "completed";
-  } catch (err) {
+  } catch {
     run.status = "failed";
   } finally {
     run.completedAt = new Date();

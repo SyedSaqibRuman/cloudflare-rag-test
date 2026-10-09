@@ -25,7 +25,20 @@ Import config ONLY from `config/index.js`: schema/constants, store sync reads (`
 
 ## Prompt variable resolution
 
-`resolvePromptVariables(template, config, {assistantName, variables})`: replaces {{KEYS}} from company config, assistant-provided variable array last-write-wins, assistant name overrides CONSULTANT_NAME slot; used identically for system message + static responses.
+`resolvePromptVariables(template, config, {assistantName, variables})` replaces `{{KEYS}}` from **custom variables only** — there are **no built-in variables**. Two tiers, later wins:
+
+| Tier | Source | Managed at |
+|---|---|---|
+| 1. company | `config.PROMPT_VARIABLES` (array of `{key,value}`) | Config → Prompt → Default System Prompt |
+| 2. assistant | `assistant.assistant_variables` | Assistants → Prompt tab |
+
+`assistantName` is still accepted for call-site symmetry but is NOT injected — define an `ASSISTANT_NAME` variable to use it. A placeholder with no matching pair is returned **literal** (never blanked) and reported in the route's `missing[]`; the Config page flags unresolved placeholders red.
+
+Rules live in `shared/prompt-variables.js` (`PROMPT_VARIABLE_KEY_RE` `[A-Z][A-Z0-9_]*` ≤64, ≤50 variables, values ≤2000 chars, case-insensitive match, last-write-wins dedupe) and are imported by BOTH the server and the portal, so the preview cannot drift from the ask path. `getPromptVariableMap(config, assistantVars)` is the `{KEY:value}` shape returned by `GET /cloudflare/prompt`.
+
+> **Migration:** the removed built-ins were `CONSULTANT_NAME`, `COMPANY_NAME`, `CONTACT_US_URL`, `LOCATIONS_URL`, `SERVICES_URL`, `BASE_URL`, `COMPANY_WEBSITE`, `ASSISTANT_NAME`, `CURRENT_DATE`, `CURRENT_YEAR`. `scripts/backfill-prompt-variables.mjs` (dry run by default, `--apply`) materializes each tenant's former built-ins from their own config so prompts resolve byte-identically. `CURRENT_DATE`/`CURRENT_YEAR` are deliberately NOT seeded (a stored date goes stale).
+
+`SYSTEM_PROMPT` + `PROMPT_VARIABLES` are returned by `GET /cloudflare/config` under the `PROMPT` section. `applyConfigPatch` has an **array branch** for `PROMPT_VARIABLES` — without it the array would fall through the string/number branches and be silently dropped.
 
 ## Reset matrix
 

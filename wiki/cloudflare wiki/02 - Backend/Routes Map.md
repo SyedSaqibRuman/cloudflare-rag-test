@@ -50,6 +50,7 @@ All paths verified against router files. Gateway list abbreviated here; deep tab
 | `assistants.js` | assistant CRUD bound to credential/model/KB/graph resource |
 | `execute.js` | `POST companies/:key/execute/chat`, `/execute/embeddings` (audited live calls) |
 | `cloudflare-resources.js` | type-aware live listing/provisioning of account resources feeding selector cards |
+| `vector-resources.js` | live listing/provisioning of the non-Cloudflare vector stores (Qdrant collections / Pinecone indexes / Weaviate classes) at `companies/:key/vector/resources/:provider[/:name]` — talks to the store through the company's active gateway connection via the `mysql/adapters/vector/` adapters; a create also registers a `vector_index` provider_resources row (external id = live name, config carries `collection_name`/`index_name`/`class_name` so the resolvers can bind it) |
 | `ingestion.js` | `/ingest/jobs`, `/ingest/start`, `/ingest/status/:companyName`, `/ingest/cancel/:companyName`, stub history |
 
 ## /logs  (requireAdmin)

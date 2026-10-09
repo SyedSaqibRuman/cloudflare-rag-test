@@ -5,10 +5,20 @@
 // the parent IngestionRouter.
 // --------------------------
 
-import { useState, useCallback } from "react";
-import { listKbs, kbStatus, deleteKb, ingestKb, getKbProgress } from "../api";
+import { useState, useCallback, useMemo } from "react";
+import {
+  listKbs,
+  kbStatus,
+  kbHealth,
+  deleteKb,
+  ingestKb,
+  getKbProgress,
+  stopIngestJob,
+  pauseIngestJob,
+  resumeIngestJob,
+} from "../api";
 import SourcePagePicker from "./SourcePagePicker.jsx";
-import { Card, Button, Badge, Empty, StatCard, SkeletonCard, Spinner, Toast, InfoTip } from "../components/ui";
+import { Card, Button, Badge, Empty, StatCard, SkeletonCard, Spinner, InfoTip } from "../components/ui";
 import { getTermTooltip } from "../components/glossary";
 import { Popover, PopoverTrigger, PopoverContent, PopoverItem, PopoverSeparator } from "../components/ui/overlay";
 import { Pagination } from "../components/ui/pagination";
@@ -17,8 +27,9 @@ import { usePoll, useToast, usePagination } from "../hooks";
 import { useHeaderActions } from "../components/Layout";
 import { useCompanies } from "../context";
 import KbModal from "../components/kb-modal";
+import { defaultIngestScope } from "../ingest-scope.js";
 import { triggerNextStep } from "../components/NextStepPrompt";
-import { timeAgo, cx } from "../util";
+import { timeAgo, formatDate, parseUtcDate, cx } from "../util";
 import { kbLifecycle } from "#shared/status.js";
 
 export default function IngestionList({ navigate }) {
@@ -28,7 +39,7 @@ export default function IngestionList({ navigate }) {
   const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
   const [editRow, setEditRow] = useState(null);
   const [ingesting, setIngesting] = useState({});
@@ -37,11 +48,18 @@ export default function IngestionList({ navigate }) {
 
   const [selectedPages, setSelectedPages] = useState({});
   const [progress, setProgress] = useState({});
+  // Stale-index health report (GET /gateway/kbs/health): KBs whose last
+  // ingest predates their bound index's created_on have lost their vectors
+  // to an index recreation — flagged with an actionable reason.
+  const [health, setHealth] = useState(null);
   // KBs where ingest was recently triggered via the UI but the /status
   // endpoint hasn't yet reported inProgress=true (fast-completing jobs).
   const [recentlyStarted, setRecentlyStarted] = useState({});
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // Banner dismissal is per-mount — new health data (e.g. after a re-ingest)
+  // resets it so a fresh flag is never silently hidden.
+  const [healthDismissed, setHealthDismissed] = useState(false);
   // Track which KBs were inProgress on the previous poll tick so we can
   // detect completion and immediately refresh stats.
   const wasInProgressRef = useCallback(() => {
@@ -52,7 +70,10 @@ export default function IngestionList({ navigate }) {
     return map;
   }, [statuses]);
 
-  const getScope = (key) => scopes[key] || { type: "all", limit: 100 };
+  // Scope for a KB's Ingest button: an explicit user pick wins; otherwise
+  // derive the default from the KB's SAVED source_config (wizard scope), so a
+  // KB saved with "limit N" is never blanket-ingested as "all".
+  const getScope = (key) => scopes[key] || defaultIngestScope(kbs.find((kb) => kb.kb_key === key));
   const setScope = (key, patch) => setScopes((prev) => ({ ...prev, [key]: { ...getScope(key), ...patch } }));
 
   // Memoize modal callbacks to prevent re-rendering the Modal effect on every
@@ -84,6 +105,12 @@ export default function IngestionList({ navigate }) {
         }
       }
       setStatuses(statusMap);
+
+      // Stale-index health is a secondary signal — a failure here must not
+      // blank the page, so it settles outside the main try/catch.
+      kbHealth(company)
+        .then(setHealth)
+        .catch(() => setHealth(null));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -173,6 +200,7 @@ export default function IngestionList({ navigate }) {
         notify(`✅ Ingestion complete for '${name}': ${docs} doc${docs === 1 ? "" : "s"}, ${chunks} chunk${chunks === 1 ? "" : "s"}.`);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company, kbs, statuses, recentlyStarted, wasInProgressRef]);
 
   usePoll(pollProgress, 2000, [company, kbs, statuses, recentlyStarted]);
@@ -224,6 +252,45 @@ export default function IngestionList({ navigate }) {
     }
   };
 
+  const stopIngestion = async (kb) => {
+    setError(null);
+    try {
+      const res = await stopIngestJob(company, kb.kb_key);
+      notify(res.message || `Stopped ingestion for '${kb.kb_key}'.`);
+      setProgress((prev) => {
+        const next = { ...prev };
+        delete next[kb.kb_key];
+        return next;
+      });
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const pauseIngestion = async (kb) => {
+    setError(null);
+    try {
+      const res = await pauseIngestJob(company, kb.kb_key);
+      notify(res.message || `Paused ingestion for '${kb.kb_key}'.`);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const resumeIngestion = async (kb) => {
+    setError(null);
+    try {
+      const res = await resumeIngestJob(company, kb.kb_key);
+      notify(res.message || `Resumed ingestion for '${kb.kb_key}'.`);
+      setRecentlyStarted((prev) => ({ ...prev, [kb.kb_key]: true }));
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const remove = async (kb) => {
     if (!window.confirm(`Delete knowledge base '${kb.kb_key}'? This cannot be undone.`)) return;
     setError(null);
@@ -244,6 +311,9 @@ export default function IngestionList({ navigate }) {
   const activeCount = kbs.filter((kb) => kb.status === "active").length;
   const indexingCount = kbs.filter((kb) => kb.status === "indexing").length;
   const errorCount = kbs.filter((kb) => kb.status === "error").length;
+  const flagged = useMemo(() => health?.flagged || [], [health]);
+  const flaggedKeys = useMemo(() => new Set(flagged.map((f) => f.kbKey)), [flagged]);
+  const flaggedCount = healthDismissed ? 0 : flagged.length;
 
   // ── Client-side search + lifecycle filter over the current page ───────
   const filteredKbs = kbs.filter((kb) => {
@@ -304,9 +374,46 @@ export default function IngestionList({ navigate }) {
           label="Active Indexes"
           value={loading ? "…" : activeCount}
           tone="amber"
-          meta={errorCount > 0 ? `${kbs.length - activeCount} not active` : "healthy"}
+          meta={
+            errorCount > 0 ? (
+              `${kbs.length - activeCount} not active`
+            ) : flaggedCount > 0 ? (
+              `${flaggedCount} need${flaggedCount === 1 ? "s" : ""} re-ingest`
+            ) : (
+              "healthy"
+            )
+          }
         />
       </div>
+
+      {/* ── Stale-index alert: proof an index recreation wiped KB vectors ── */}
+      {flaggedCount > 0 && (
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium text-rose-300">
+              ⚠️ {flaggedCount} KB{flaggedCount === 1 ? "" : "s"} lost their vectors to an index recreation — re-ingestion required
+            </p>
+            <button
+              type="button"
+              onClick={() => setHealthDismissed(true)}
+              className="shrink-0 text-xs text-rose-300/70 hover:text-rose-200"
+              aria-label="Dismiss stale-index warning"
+            >
+              Dismiss
+            </button>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {flagged.map((f) => (
+              <li key={f.kbKey} className="text-xs text-rose-200/90">
+                <span className="font-semibold">{f.kbName}</span> ({f.vectorIndexName || "no index"}): {f.reason}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] text-rose-300/70">
+            Re-ingesting writes fresh vectors to the current index; the document registry still lists the old documents as processed, so only a full re-ingest recovers them.
+          </p>
+        </div>
+      )}
 
       {/* ── KB table with CRUD + ingest stats ────────────────────────── */}
       <Card
@@ -342,7 +449,7 @@ export default function IngestionList({ navigate }) {
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search by name or key…"
                   aria-label="Search knowledge bases"
-                  className="h-8 w-full rounded-lg border border-slate-700 bg-slate-800/60 pl-8 pr-3 text-xs text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
+                  className="h-8 w-full rounded-lg border border-slate-700 bg-slate-800/60 pl-8 pr-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
                 />
               </div>
               <div className="flex shrink-0 gap-1">
@@ -390,6 +497,11 @@ export default function IngestionList({ navigate }) {
                           {kb.kb_name}
                         </button>
                         <Badge tone={kbLifecycle(kb, s).tone}>{kbLifecycle(kb, s).label}</Badge>
+                        {!healthDismissed && flaggedKeys.has(kb.kb_key) && (
+                          <span title="Last ingest predates the vector index creation — vectors were lost to an index recreation">
+                            <Badge tone="red">⚠ stale index</Badge>
+                          </span>
+                        )}
                       </div>
                       <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500" title={`key: ${kb.kb_key}`}>
                         {kb.kb_key}
@@ -406,7 +518,11 @@ export default function IngestionList({ navigate }) {
                       <div className="flex items-center justify-between text-[10px] text-indigo-200/80">
                         <span className="flex items-center gap-1.5">
                           <Spinner className="h-3 w-3" />
-                          {prog.progress?.phase === "fetching" ? "Fetching…" : "Processing…"}
+                          {prog.progress?.phase === "fetching"
+                            ? "Fetching…"
+                            : prog.progress?.sub
+                              ? `Processing · graph ${prog.progress.sub.subPhase} — ${prog.progress.sub.detail}`
+                              : "Processing…"}
                         </span>
                         <span className="tabular-nums">
                           {(prog.progress?.processed ?? 0) + (prog.progress?.skipped ?? 0)}/{prog.progress?.discovered ?? 0}
@@ -426,6 +542,52 @@ export default function IngestionList({ navigate }) {
                         />
                       </div>
                       <p className="mt-1 text-[10px] text-slate-500">{prog.progress?.chunks ?? 0} chunks created so far</p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <button
+                          type="button"
+                          title="Pause at the next document boundary (resumable)"
+                          onClick={() => pauseIngestion(kb)}
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-600 bg-slate-800/60 px-2 text-[10px] font-medium text-slate-300 transition-colors hover:border-amber-500/60 hover:text-amber-300"
+                        >
+                          <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="0.8" /><rect x="7" y="1.5" width="3" height="9" rx="0.8" /></svg>
+                          Pause
+                        </button>
+                        <button
+                          type="button"
+                          title="Stop the run (completed documents stay ingested)"
+                          onClick={() => stopIngestion(kb)}
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-600 bg-slate-800/60 px-2 text-[10px] font-medium text-slate-300 transition-colors hover:border-rose-500/60 hover:text-rose-300"
+                        >
+                          <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1" /></svg>
+                          Stop
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Paused state (resumable) ────────────────── */}
+                  {statuses[kb.kb_key]?.paused && !prog?.running && (
+                    <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="flex items-center gap-1.5 text-[10px] font-medium text-amber-200/90">
+                          <svg className="h-3 w-3" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="0.8" /><rect x="7" y="1.5" width="3" height="9" rx="0.8" /></svg>
+                          Ingestion paused
+                        </span>
+                        <button
+                          type="button"
+                          title="Resume ingestion (completed documents are skipped)"
+                          onClick={() => resumeIngestion(kb)}
+                          className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-500/90 px-2.5 text-[10px] font-semibold text-slate-900 transition-colors hover:bg-amber-400"
+                        >
+                          <svg className="h-2.5 w-2.5" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3 1.8v8.4a.8.8 0 0 0 1.22.68l6.4-4.2a.8.8 0 0 0 0-1.36l-6.4-4.2A.8.8 0 0 0 3 1.8z" /></svg>
+                          Resume
+                        </button>
+                      </div>
+                      {statuses[kb.kb_key]?.pausedAt && (
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          Paused {timeAgo(statuses[kb.kb_key].pausedAt)}
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -438,7 +600,7 @@ export default function IngestionList({ navigate }) {
                       label="Last run"
                       value={lastRun?.at ? timeAgo(lastRun.at) : "never"}
                       muted={!lastRun?.at}
-                      title={lastRun?.at ? new Date(lastRun.at).toLocaleString() : undefined}
+                      title={lastRun?.at ? formatDate(lastRun.at) : undefined}
                     />
                   </div>
 
@@ -604,7 +766,7 @@ export default function IngestionList({ navigate }) {
           const runs = Object.entries(statuses)
             .map(([key, s]) => ({ key, ...s?.lastIngestion, kbKey: key }))
             .filter((r) => r.at)
-            .sort((a, b) => new Date(b.at) - new Date(a.at))
+            .sort((a, b) => parseUtcDate(b.at) - parseUtcDate(a.at))
             .slice(0, 5);
 
           if (runs.length === 0) {
@@ -628,7 +790,7 @@ export default function IngestionList({ navigate }) {
                     <div className="ml-4 shrink-0 text-right">
                       <p className="text-xs text-slate-400">{timeAgo(run.at)}</p>
                       {run.durationMs != null && (
-                        <p className="text-[11px] text-slate-600">{(run.durationMs / 1000).toFixed(1)}s</p>
+                        <p className="text-[11px] text-slate-500">{(run.durationMs / 1000).toFixed(1)}s</p>
                       )}
                     </div>
                   </div>
@@ -647,7 +809,8 @@ export default function IngestionList({ navigate }) {
         onClose={closeCreate}
         onSaved={async () => {
           closeCreate();
-          notify("Knowledge base created.");
+          // Success toast comes from the api() auto-toaster (server message
+          // "Knowledge base 'x' created.") — no second notify() here.
           triggerNextStep("kb-created");
           await load();
         }}
@@ -659,7 +822,7 @@ export default function IngestionList({ navigate }) {
         onClose={closeEdit}
         onSaved={async () => {
           closeEdit();
-          notify("Knowledge base updated.");
+          // Success toast comes from the api() auto-toaster (server message).
           await load();
         }}
       />
@@ -670,7 +833,7 @@ export default function IngestionList({ navigate }) {
         threshold={300}
       />
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }
@@ -684,7 +847,7 @@ function KbStat({ label, value, muted, title }) {
   return (
     <div title={title} className="min-w-0">
       <p className="truncate text-[10px] uppercase tracking-wider text-slate-500">{label}</p>
-      <p className={cx("mt-0.5 truncate text-sm font-semibold tabular-nums", muted ? "text-slate-600" : "text-slate-200")}>
+      <p className={cx("mt-0.5 truncate text-sm font-semibold tabular-nums", muted ? "text-slate-500" : "text-slate-200")}>
         {value}
       </p>
     </div>

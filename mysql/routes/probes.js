@@ -173,6 +173,38 @@ export const PROBES = {
     });
   },
   neo4j: (fields) => probeNeo4j(fields),
+  // Pinecone — control-plane /indexes list proves the key without needing a
+  // data-plane host (which serverless pcsk_… keys can't derive). Requires the
+  // date-based X-Pinecone-API-Version header (2024-07+).
+  pinecone: async (fields) => {
+    if (!fields.api_key) return { ok: false, error: "Pinecone API key missing." };
+    return probeEndpoint("https://api.pinecone.io/indexes", {
+      headers: {
+        "Api-Key": fields.api_key,
+        "X-Pinecone-API-Version": "2025-01",
+      },
+    });
+  },
+  // Qdrant — GET /collections on the cluster proves host + key. Key is
+  // optional (absent on unauthenticated local instances), so it's only sent
+  // when provided.
+  qdrant: async (fields) => {
+    const host = String(fields.host || "").replace(/\/$/, "");
+    if (!host) return { ok: false, error: "Qdrant host missing." };
+    const headers = { "Content-Type": "application/json" };
+    if (fields.api_key) headers["api-key"] = fields.api_key;
+    return probeEndpoint(`${host}/collections`, { headers });
+  },
+  // Weaviate — GET /v1/schema on the cluster proves host + key. Key is
+  // optional (absent on unauthenticated local instances); when present it
+  // travels as a Bearer token (same as the adapter).
+  weaviate: async (fields) => {
+    const host = String(fields.host || "").replace(/\/$/, "");
+    if (!host) return { ok: false, error: "Weaviate host missing." };
+    const headers = { "Content-Type": "application/json" };
+    if (fields.api_key) headers["Authorization"] = `Bearer ${fields.api_key}`;
+    return probeEndpoint(`${host}/v1/schema`, { headers });
+  },
   anthropic: async (fields) => {
     if (!fields.api_key) return { ok: false, error: "Anthropic API key missing." };
     // Minimal max_tokens:1 POST — a 400 (bad body) or 429 (rate-limited) still

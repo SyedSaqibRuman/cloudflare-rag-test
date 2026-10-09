@@ -29,6 +29,7 @@
 // the graph.
 // --------------------------
 
+import pLimit from "p-limit";
 import { logToFile } from "../utils/logger.js";
 import { checkAbort } from "../utils/helpers.js";
 import { ENTITY_LABEL, normalizeRelationshipType } from "../knowledge/graph-schema.js";
@@ -38,9 +39,20 @@ import { createEntity } from "../knowledge/entity-service.js";
 import { createRelationship } from "../knowledge/relationship-service.js";
 import { CLAIM_LABEL, createClaim } from "../knowledge/claim-service.js";
 
-const EXTRACTION_MAX_CHUNKS = 50; // max chunks to extract from per item
+const EXTRACTION_MAX_CHUNKS = 10; // default max chunks to extract from per item
+const EXTRACTION_CONCURRENCY = 4; // default parallel LLM extraction calls (Neo4j writes stay sequential)
 const ENTITY_TIMEOUT_MS = 30_000; // per-chunk LLM extraction cap
 const NEO4J_TIMEOUT_MS = 20_000; // per-query cap (routing discovery can hang)
+
+/**
+ * Clamp a per-KB override to a sane range, falling back to the default when
+ * null/undefined/invalid. Keeps bad DB values from producing 0 or Infinity.
+ */
+function clampOverride(value, min, max, fallback) {
+  const n = Number(value);
+  if (value === null || value === undefined || !Number.isInteger(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
 const DEFAULT_CONFIDENCE = 0.8; // provenance: extraction without a score
 const MIN_CONFIDENCE = 0.5; // below this, a relationship/claim is dropped
 const INGEST_ACTOR = { type: "api", id: "ingest" }; // trusted pipeline actor
@@ -142,18 +154,100 @@ export function toProposals(extraction) {
  * @param {string} opts.kbKey          Knowledge base key
  * @param {Object} opts.graphConfig    { uri, username, password, database }
  * @param {Function} opts.extractEntities  LLM entity extraction function
+ * @param {number|null} [opts.maxChunks]       Per-KB cap override (1-50; null = default 10)
+ * @param {number|null} [opts.concurrency]     Per-KB parallelism override (1-10; null = default 4)
  * @returns {{ extractFromChunks: Function }}
  */
-export function createGraphExtractor({ companyName, kbKey, graphConfig, extractEntities }) {
+export function createGraphExtractor({ companyName, kbKey, graphConfig, extractEntities, maxChunks = null, concurrency = null }) {
+  const sampleCap = clampOverride(maxChunks, 1, 50, EXTRACTION_MAX_CHUNKS);
+  const extractConcurrency = clampOverride(concurrency, 1, 10, EXTRACTION_CONCURRENCY);
+/**
+ * Commit one chunk's normalized proposals to Neo4j (sequential writes).
+   * Entities MERGE by per-KB stable id; relationships become typed allowlist
+   * edges + the claims that back them; one bad proposal never kills the
+   * rest of the chunk.
+   */
+  async function commitProposals(session, chunk, { entities, relationships }, stats) {
+    // Evidence ties every write back to this chunk (proposal §5).
+    const evidence = normalizeEvidence([
+      { chunkId: chunk.id, title: chunk.title || null, url: chunk.url || null, source: "ingest" },
+    ]);
+
+    // 1) Entities → canonical nodes (MERGE by per-KB stable id).
+    for (const entity of entities) {
+      const res = await createEntity(session, {
+        companyName,
+        kbKey,
+        name: entity.name,
+        type: entity.type,
+        provenance: { ...INGEST_ACTOR, confidence: entity.confidence },
+      });
+      if (res.created) stats.nodesCreated++;
+    }
+
+    // 2) Relationships → typed allowlist edges, then the claim that
+    //    backs them. createRelationship resolves endpoints against
+    //    the canonical nodes (auto-creating stragglers not in the
+    //    entity list) and merges duplicate edges + evidence.
+    for (const rel of relationships) {
+      if (rel.confidence < MIN_CONFIDENCE) {
+        stats.skippedRelationships++;
+        continue;
+      }
+      try {
+        const edge = await createRelationship(session, {
+          companyName,
+          kbKey,
+          source: { name: rel.from },
+          type: rel.type,
+          target: { name: rel.to },
+          confidence: rel.confidence,
+          evidence,
+          actor: INGEST_ACTOR,
+          autoCreateEntities: true,
+        });
+        if (edge.created) stats.relationshipsCreated++;
+
+        // 3) Claims → first-class lifecycle. Fresh non-conflicting
+        //    triples are accepted (trusted import pipeline); a
+        //    contradiction demotes both sides to `conflicting`
+        //    inside createClaim, feeding the review queue.
+        if (rel.confidence >= MIN_CONFIDENCE) {
+          const claim = await createClaim(session, {
+            companyName,
+            kbKey,
+            subject: { name: rel.from },
+            predicate: rel.type,
+            object: { name: rel.to },
+            confidence: rel.confidence,
+            evidence,
+            actor: INGEST_ACTOR,
+            status: "accepted", // conflicts still triaged by createClaim
+            allowAutoCreateEntities: true,
+          });
+          if (claim.created) stats.claimsCreated++;
+        }
+      } catch (err) {
+        // One bad proposal must not kill the chunk's remaining ones.
+        stats.skippedRelationships++;
+        logToFile("error.log", `⚠️ Graph proposal skipped (${rel.from} ${rel.type} ${rel.to}): ${err.message}`);
+      }
+    }
+  }
+
   /**
    * Extract knowledge proposals from chunks and commit them through the
-   * Knowledge Service (single WRITE session, per-chunk best-effort).
+   * Knowledge Service (capped, parallel LLM extraction → sequential
+   * WRITE-session commits).
    * @param {Array}  chunks     Vector chunks [{ id, text, title, url, metadata }]
    * @param {AbortSignal} signal
+   * @param {Function} [onProgress]  Optional (subPhase, detail) reporter for
+   *   live progress — e.g. ("extracting", "3/10 chunks · 4 parallel") then
+   *   ("committing", "12 proposals to graph").
    * @returns {Promise<{ nodesCreated: number, relationshipsCreated: number,
    *   claimsCreated: number, skippedRelationships: number }>}
    */
-  async function extractFromChunks(chunks, signal) {
+  async function extractFromChunks(chunks, signal, onProgress) {
     const stats = { nodesCreated: 0, relationshipsCreated: 0, claimsCreated: 0, skippedRelationships: 0 };
     if (!graphConfig || !chunks.length) return stats;
 
@@ -163,99 +257,51 @@ export function createGraphExtractor({ companyName, kbKey, graphConfig, extractE
       return stats;
     }
 
-    // Limit extraction to avoid excessive LLM calls on large ingests.
-    const sample = chunks.slice(0, EXTRACTION_MAX_CHUNKS);
+    // Cap extraction to avoid excessive LLM calls on large ingests.
+    const sample = chunks.slice(0, sampleCap);
 
+    // ---- Phase 1: LLM extraction (parallel, no Neo4j) -------------------
+    const proposals = [];
+    let extracted = 0;
+    const limit = pLimit(extractConcurrency);
+    onProgress?.("extracting", `0/${sample.length} chunks · ${extractConcurrency} parallel`);
+    await Promise.all(
+      sample.map((chunk) =>
+        limit(async () => {
+          try {
+            checkAbort(signal);
+            const extraction = await extractEntities(chunk.text, chunk.title);
+            extracted += 1;
+            onProgress?.("extracting", `${extracted}/${sample.length} chunks · ${extractConcurrency} parallel`);
+            if (!extraction) return;
+            const normalized = toProposals(extraction);
+            stats.skippedRelationships += normalized.skipped;
+            if (!normalized.entities.length && !normalized.relationships.length) return;
+            proposals.push({ chunk, ...normalized });
+          } catch (err) {
+            if (err.name === "AbortError") return; // stop this task; run is aborting
+            logToFile("error.log", `⚠️ Graph extraction failed for chunk: ${err.message}`);
+          }
+        })
+      )
+    );
+
+    if (!proposals.length || signal?.aborted) return stats;
+
+    // ---- Phase 2: commit to Neo4j (single write session, sequential) ----
+    onProgress?.(
+      "committing",
+      `${proposals.length} chunk(s) → graph (${proposals.reduce((n, p) => n + p.relationships.length, 0)} relationships)`
+    );
     try {
       const { session, close } = await openKnowledgeSession(graphConfig, { write: true });
       try {
         // One-time per-run schema (unique entity ids + KB lookup indexes).
         await ensureGraphSchema(session);
 
-        // Process chunks in batches of 5 for LLM extraction
-        const BATCH_SIZE = 5;
-        for (let i = 0; i < sample.length; i += BATCH_SIZE) {
+        for (const proposal of proposals) {
           checkAbort(signal);
-          const batch = sample.slice(i, i + BATCH_SIZE);
-
-          for (const chunk of batch) {
-            checkAbort(signal);
-            try {
-              const extraction = await extractEntities(chunk.text, chunk.title);
-              if (!extraction) continue;
-              const { entities, relationships, skipped } = toProposals(extraction);
-              stats.skippedRelationships += skipped;
-              if (!entities.length && !relationships.length) continue;
-
-              // Evidence ties every write back to this chunk (proposal §5).
-              const evidence = normalizeEvidence([
-                { chunkId: chunk.id, title: chunk.title || null, url: chunk.url || null, source: "ingest" },
-              ]);
-
-              // 1) Entities → canonical nodes (MERGE by per-KB stable id).
-              for (const entity of entities) {
-                const res = await createEntity(session, {
-                  companyName,
-                  kbKey,
-                  name: entity.name,
-                  type: entity.type,
-                  provenance: { ...INGEST_ACTOR, confidence: entity.confidence },
-                });
-                if (res.created) stats.nodesCreated++;
-              }
-
-              // 2) Relationships → typed allowlist edges, then the claim that
-              //    backs them. createRelationship resolves endpoints against
-              //    the canonical nodes (auto-creating stragglers not in the
-              //    entity list) and merges duplicate edges + evidence.
-              for (const rel of relationships) {
-                if (rel.confidence < MIN_CONFIDENCE) {
-                  stats.skippedRelationships++;
-                  continue;
-                }
-                try {
-                  const edge = await createRelationship(session, {
-                    companyName,
-                    kbKey,
-                    source: { name: rel.from },
-                    type: rel.type,
-                    target: { name: rel.to },
-                    confidence: rel.confidence,
-                    evidence,
-                    actor: INGEST_ACTOR,
-                    autoCreateEntities: true,
-                  });
-                  if (edge.created) stats.relationshipsCreated++;
-
-                  // 3) Claims → first-class lifecycle. Fresh non-conflicting
-                  //    triples are accepted (trusted import pipeline); a
-                  //    contradiction demotes both sides to `conflicting`
-                  //    inside createClaim, feeding the review queue.
-                  if (rel.confidence >= MIN_CONFIDENCE) {
-                    const claim = await createClaim(session, {
-                      companyName,
-                      kbKey,
-                      subject: { name: rel.from },
-                      predicate: rel.type,
-                      object: { name: rel.to },
-                      confidence: rel.confidence,
-                      evidence,
-                      actor: INGEST_ACTOR,
-                      status: "accepted", // conflicts still triaged by createClaim
-                      allowAutoCreateEntities: true,
-                    });
-                    if (claim.created) stats.claimsCreated++;
-                  }
-                } catch (err) {
-                  // One bad proposal must not kill the chunk's remaining ones.
-                  stats.skippedRelationships++;
-                  logToFile("error.log", `⚠️ Graph proposal skipped (${rel.from} ${rel.type} ${rel.to}): ${err.message}`);
-                }
-              }
-            } catch (err) {
-              logToFile("error.log", `⚠️ Graph extraction failed for chunk: ${err.message}`);
-            }
-          }
+          await commitProposals(session, proposal.chunk, proposal, stats);
         }
       } finally {
         await close();

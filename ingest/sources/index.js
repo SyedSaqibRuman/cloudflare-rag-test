@@ -8,6 +8,9 @@
 
 import { createUrlSource } from "./url.js";
 import { createFileSource } from "./file.js";
+import { createRestSource, validateRestSourceConfig } from "./rest.js";
+
+export { validateRestSourceConfig };
 
 /**
  * Create a source adapter from KB configuration.
@@ -17,10 +20,15 @@ import { createFileSource } from "./file.js";
  * @param {Object}  opts.kb             KB row (may carry source_config JSON)
  * @param {string}  opts.companyName    Company key
  * @param {Object}  opts.wpAdapters     Legacy WordPress adapters { fetchPost, fetchPage, fetchWpByIds }
+ * @param {number}  [opts.maxUrls]      Cap on discovered URLs (config.maxUrls ∩ saved docLimit, from ingest.js)
  * @returns {{ fetchPage, fetchPost, fetchWpByIds }}
  */
-export function createSourceAdapter({ sourceType, kb, companyName, wpAdapters }) {
-  // WordPress: use the existing WP REST adapters (default, backward-compatible)
+export function createSourceAdapter({ sourceType, kb, companyName, wpAdapters, maxUrls }) {
+  // WordPress: use the existing WP REST adapters (default, backward-compatible).
+  // NOTE: "wordpress" and "custom" are WITHDRAWN as KB *choices*
+  // (shared/catalog-enums.js → KB_DISABLED_SOURCE_TYPES) but the adapters below
+  // still resolve them on purpose — existing rows keep their source_type and must
+  // keep ingesting. Disabling a source hides it; it never breaks stored data.
   if (!sourceType || sourceType === "wordpress") {
     return wpAdapters;
   }
@@ -32,15 +40,26 @@ export function createSourceAdapter({ sourceType, kb, companyName, wpAdapters })
     case "url": {
       const urls = config.urls || [];
       const sitemapUrl = config.sitemapUrl || null;
-      if (!urls.length && !sitemapUrl) {
-        throw new Error(`KB '${kb.kb_key}' has source_type 'url' but no URLs or sitemap configured in source_config.`);
+      // Automatic-discovery mode: the KB stores only a WEBSITE url and the
+      // sitemap is found at ingest time (robots.txt → fallbacks → indexes).
+      const websiteUrl = config.websiteUrl || null;
+      if (!urls.length && !sitemapUrl && !websiteUrl) {
+        throw new Error(
+          `KB '${kb.kb_key}' has source_type 'url' but no websiteUrl, URLs or sitemapUrl configured in source_config.`
+        );
       }
       return createUrlSource({
         urls,
         sitemapUrl,
+        websiteUrl,
         concurrency: config.concurrency ?? 3,
         timeout: config.timeout ?? 15000,
-        maxUrls: config.maxUrls ?? 1000,
+        // Caller-supplied cap wins (ingest.js already intersects the saved
+        // docLimit); fall back to the KB's own maxUrls; else the adapter default.
+        maxUrls: maxUrls ?? config.maxUrls ?? 1000,
+        maxDepth: config.maxDepth ?? 5,
+        allowSubdomains: config.allowSubdomains ?? false,
+        allowExternal: config.allowExternal ?? false,
       });
     }
 
@@ -55,12 +74,20 @@ export function createSourceAdapter({ sourceType, kb, companyName, wpAdapters })
       });
     }
 
-    case "custom":
-      // Custom sources are expected to inject their own adapters via the API
-      throw new Error(
-        `KB '${kb.kb_key}' uses source_type 'custom' — ` +
-        `use POST /gateway/kbs/${kb.kb_key}/ingest with a custom adapter.`
-      );
+    case "custom": {
+      // Custom = generic REST source, configured via source_config.rest.
+      // (Server-side adapters can still be injected by wrapping the returned
+      // adapter in ingest.js if ever needed.)
+      const restConfig = config.rest;
+      if (!restConfig) {
+        throw new Error(
+          `KB '${kb.kb_key}' has source_type 'custom' but no "rest" block in source_config. ` +
+          'Add one via PUT /gateway/kbs/' + kb.kb_key + '/sources — e.g. ' +
+          '{ "sourceType": "custom", "rest": { "endpoint": "https://api.example.com/items?page={page}" } }.'
+        );
+      }
+      return createRestSource({ rest: restConfig });
+    }
 
     default:
       throw new Error(`Unknown source_type '${sourceType}' for KB '${kb.kb_key}'.`);

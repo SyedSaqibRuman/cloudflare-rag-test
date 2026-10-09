@@ -3,10 +3,12 @@
 // --------------------------
 import { useState, useEffect } from "react";
 import { useCompanies } from "../context";
-import { Card, StatCard, Empty, Spinner, Button, SkeletonCard, Toast, InfoTip } from "../components/ui";
+import { Card, StatCard, Empty, Spinner, Button, SkeletonCard, InfoTip } from "../components/ui";
+import { useToast } from "../hooks";
 import { getTermTooltip } from "../components/glossary";
 import { useHeaderActions } from "../components/Layout";
 import { getUsageSummary, getUsageAggregate, getUsageTop, getUsageRecent } from "../api";
+import { parseUtcDate } from "../util";
 
 function formatNumber(n) {
   if (n == null) return "—";
@@ -26,7 +28,7 @@ function formatDuration(ms) {
   return `${Math.round(ms)}ms`;
 }
 
-function BarChart({ data, labelKey, valueKey, maxBars = 8 }) {
+function BarChart({ data, valueKey, maxBars = 8 }) {
   if (!data || data.length === 0) return <Empty message="No data" />;
   const sorted = [...data].sort((a, b) => Number(b[valueKey] || 0) - Number(a[valueKey] || 0)).slice(0, maxBars);
   const maxVal = Math.max(...sorted.map((d) => Number(d[valueKey] || 0)), 1);
@@ -60,7 +62,7 @@ export default function Usage() {
   const [topModels, setTopModels] = useState([]);
   const [recent, setRecent] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
   const [groupBy, setGroupBy] = useState("day");
   const [period, setPeriod] = useState("7d");
 
@@ -93,12 +95,13 @@ export default function Usage() {
       setTopModels(top);
       setRecent(rec);
     } catch (e) {
-      setToast({ tone: "red", message: e.message });
+      notify(e.message, "red");
     } finally {
       setLoading(false);
     }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [company, period, groupBy]);
 
   useHeaderActions(
@@ -172,7 +175,7 @@ export default function Usage() {
               {recent.map((r) => (
                 <div key={r.id} className="flex items-center gap-3 text-sm py-1 border-b border-gray-50 dark:border-gray-800 last:border-0">
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${r.response_status < 400 ? "bg-green-500" : "bg-red-500"}`} />
-                  <span className="text-gray-500 w-20 flex-shrink-0 text-xs">{new Date(r.created_at).toLocaleTimeString()}</span>
+                  <span className="text-gray-500 w-20 flex-shrink-0 text-xs">{parseUtcDate(r.created_at)?.toLocaleTimeString()}</span>
                   <span className="font-medium text-gray-700 dark:text-gray-300 truncate">{r.model_used || r.action}</span>
                   <span className="text-gray-400 text-xs flex-shrink-0">{r.response_status}</span>
                   <span className="text-gray-400 text-xs flex-shrink-0">{formatDuration(r.duration_ms)}</span>
@@ -183,8 +186,6 @@ export default function Usage() {
           )}
         </Card>
       </div>
-
-      {toast && <Toast tone={toast.tone} message={toast.message} onClose={() => setToast(null)} />}
     </div>
   );
 }

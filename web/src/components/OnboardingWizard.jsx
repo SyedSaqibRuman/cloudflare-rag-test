@@ -1,14 +1,39 @@
 // --------------------------
 // ONBOARDING WIZARD — guided first-use experience.
-// Shows a step-by-step flow: Content → AI Setup → Assistant → Test → Chatbot → Done.
-// Persists progress in localStorage so users can resume later.
+// Shows a step-by-step flow: Content → AI Setup → Assistant → Test → Done.
+//
+// Progress model (v2):
+// - Steps 1–3 are verified against REAL workspace state per company
+//   (KB exists / provider connection exists / assistant exists) — clicking
+//   through is no longer required to complete them.
+// - Step 4 (Test AI) stays manual: there is no persisted record of a test
+//   conversation, so it completes via click-through or "Mark as done".
+// - All state is scoped to the selected company (progress, dismiss, collapse)
+//   under namespaced localStorage keys; legacy un-namespaced keys are ignored.
 // --------------------------
 import { useState, useEffect } from "react";
-import { Card, Button, Badge } from "./ui";
+import { Card, Button, Badge, Spinner } from "./ui";
 import { cx } from "../util";
+import { useCompanies } from "../context";
+import { listKbs, listAssistants, listCredentials, getSetupStatus } from "../api";
+import { checkWorkspaceState, checkpointLinkResolver } from "../onboarding-state.js";
 
-const STORAGE_KEY = "pc_onboarding_progress";
-const DISMISS_KEY = "pc_onboarding_dismissed";
+const PROGRESS_KEY = "pc_onboarding_progress"; // + :company
+const DISMISS_KEY = "pc_onboarding_dismissed"; // + :company
+const COLLAPSE_KEY = "pc_onboarding_collapsed"; // + :company
+
+/** Company-scoped localStorage key. No company selected → shared fallback. */
+function keyFor(company, base) {
+  return company ? `${base}:${company}` : base;
+}
+
+function readJson(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "{}");
+  } catch {
+    return {};
+  }
+}
 
 // ------------------------------------------------------------------
 // Step definitions
@@ -26,6 +51,7 @@ const STEPS = [
     ),
     action: { label: "Add Knowledge", route: "ingestion" },
     tip: "Start with your website URL — we'll automatically fetch and index your pages.",
+    autoCheck: "kb",
   },
   {
     id: "ai-setup",
@@ -40,6 +66,7 @@ const STEPS = [
     ),
     action: { label: "Set Up Providers", route: "catalog" },
     tip: "You need at least one AI provider connected to create an assistant.",
+    autoCheck: "credentials",
   },
   {
     id: "assistant",
@@ -54,6 +81,7 @@ const STEPS = [
     ),
     action: { label: "Create Assistant", route: "assistants" },
     tip: "An assistant combines your knowledge base with an AI model to give smart answers.",
+    autoCheck: "assistants",
   },
   {
     id: "test",
@@ -66,75 +94,94 @@ const STEPS = [
     ),
     action: { label: "Test AI", route: "ask" },
     tip: "Try asking questions about your content to see the AI in action.",
+    autoCheck: null, // manual only — no persisted record of a test run
   },
 ];
 
 // ------------------------------------------------------------------
-// Helper: load/save progress
-// ------------------------------------------------------------------
-function loadProgress() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveProgress(progress) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
-}
-
-function isDismissed() {
-  return localStorage.getItem(DISMISS_KEY) === "1";
-}
-
-function dismiss() {
-  localStorage.setItem(DISMISS_KEY, "1");
-}
-
-// ------------------------------------------------------------------
-// Check if onboarding is needed (any step incomplete)
+// Hook: is onboarding needed for this company?
 // ------------------------------------------------------------------
 export function useOnboarding() {
+  const { company } = useCompanies();
   const [show, setShow] = useState(false);
 
   useEffect(() => {
-    if (isDismissed()) return;
-    // Show onboarding if user hasn't dismissed it
-    setShow(true);
-  }, []);
+    setShow(localStorage.getItem(keyFor(company, DISMISS_KEY)) !== "1");
+  }, [company]);
 
   return {
     show,
-    dismiss: () => { dismiss(); setShow(false); },
+    dismiss: () => {
+      localStorage.setItem(keyFor(company, DISMISS_KEY), "1");
+      setShow(false);
+    },
   };
 }
+
+// Real-state probe moved to ../onboarding-state.js (pure ESM, unit-tested).
+// Divergence note: these probes detect workspace ARTIFACTS (a credential row
+// exists), not config health — a revoked token leaves the wizard green while
+// SetupCheckpoints (setup-status) correctly flips to incomplete.
 
 // ------------------------------------------------------------------
 // OnboardingWizard component
 // ------------------------------------------------------------------
 export default function OnboardingWizard({ navigate, onDismiss }) {
-  const [progress, setProgress] = useState(loadProgress);
-  const [expanded, setExpanded] = useState(true);
+  const { company } = useCompanies();
+  const [manual, setManual] = useState(() => readJson(keyFor(company, PROGRESS_KEY)));
+  const [expanded, setExpanded] = useState(() => localStorage.getItem(keyFor(company, COLLAPSE_KEY)) !== "1");
+  const [auto, setAuto] = useState(null); // null = checking workspace
+  const [setupStatus, setSetupStatus] = useState(null);
 
-  const completedCount = STEPS.filter((s) => progress[s.id]).length;
-  const allDone = completedCount === STEPS.length;
-  const currentStep = STEPS.find((s) => !progress[s.id]) || STEPS[STEPS.length - 1];
-  const currentIdx = STEPS.findIndex((s) => s.id === currentStep.id);
-
-  // Auto-expand when not all done
+  // Re-read company-scoped state + check real workspace state on company change.
   useEffect(() => {
-    if (!allDone) setExpanded(true);
-  }, [allDone]);
+    setManual(readJson(keyFor(company, PROGRESS_KEY)));
+    setExpanded(localStorage.getItem(keyFor(company, COLLAPSE_KEY)) !== "1");
+    let alive = true;
+    setAuto(null);
+    setSetupStatus(null);
+    if (!company) {
+      setAuto({});
+      return;
+    }
+    checkWorkspaceState({ company, listKbs, listCredentials, listAssistants }).then((state) => {
+      if (alive) setAuto(state);
+    });
+    // Checkpoint status powers the deep-links: overlapping steps point at the
+    // authoritative "Finish setting up" bar instead of re-listing guidance.
+    // Best-effort — no status just means steps keep their own action buttons.
+    getSetupStatus(company)
+      .then((d) => alive && setSetupStatus(d))
+      .catch(() => alive && setSetupStatus(null));
+    return () => {
+      alive = false;
+    };
+  }, [company]);
+
+  const isDone = (stepId) => auto?.[stepId] === true || manual[stepId] === true;
+  const completedCount = STEPS.filter((s) => isDone(s.id)).length;
+  const allDone = completedCount === STEPS.length;
+  const currentStep = STEPS.find((s) => !isDone(s.id)) || STEPS[STEPS.length - 1];
+  const currentIdx = STEPS.findIndex((s) => s.id === currentStep.id);
+  const checking = auto === null;
+
+  const persistManual = (next) => {
+    setManual(next);
+    localStorage.setItem(keyFor(company, PROGRESS_KEY), JSON.stringify(next));
+  };
 
   const markComplete = (stepId) => {
-    const next = { ...progress, [stepId]: true };
-    setProgress(next);
-    saveProgress(next);
+    if (!manual[stepId]) persistManual({ ...manual, [stepId]: true });
+  };
+
+  const toggleExpanded = () => {
+    const next = !expanded;
+    setExpanded(next);
+    localStorage.setItem(keyFor(company, COLLAPSE_KEY), next ? "" : "1");
   };
 
   const handleDismiss = () => {
-    dismiss();
+    localStorage.setItem(keyFor(company, DISMISS_KEY), "1");
     onDismiss?.();
   };
 
@@ -177,13 +224,15 @@ export default function OnboardingWizard({ navigate, onDismiss }) {
             <h3 className="text-sm font-semibold text-indigo-300">
               Getting Started — Step {currentIdx + 1} of {STEPS.length}
             </h3>
-            <p className="text-xs text-slate-500">{completedCount}/{STEPS.length} completed</p>
+            <p className="text-xs text-slate-500">
+              {checking ? "Checking your workspace…" : `${completedCount}/${STEPS.length} completed`}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setExpanded(!expanded)}
+            onClick={toggleExpanded}
             className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800/70 hover:text-slate-300"
             title={expanded ? "Collapse" : "Expand"}
           >
@@ -208,18 +257,26 @@ export default function OnboardingWizard({ navigate, onDismiss }) {
       {expanded && (
         <div className="mt-4 space-y-2">
           {STEPS.map((step, idx) => {
-            const done = !!progress[step.id];
-            const isCurrent = step.id === currentStep.id && !done;
+            const autoDone = auto?.[step.id] === true;
+            const done = isDone(step.id);
+            const isCurrent = step.id === currentStep.id && !done && !checking;
+            // Deep-link wiring: covered steps point at the matching checkpoint
+            // (null when no status / tour-only step → own action button).
+            const link = checkpointLinkResolver(setupStatus)(step.id);
 
             return (
               <div
                 key={step.id}
                 className={cx(
-                  "flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors",
+                  // flex-wrap: on narrow screens the action drops to its own
+                  // right-aligned line instead of squeezing the text column
+                  // to ~100px (390px viewport audit).
+                  "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg px-3 py-2.5 transition-colors",
                   isCurrent && "bg-indigo-500/10 border border-indigo-500/20",
                   done && "opacity-60",
                   !done && !isCurrent && "opacity-40"
                 )}
+                data-checkpoint-link={link ? link.checkpointId : undefined}
               >
                 <div className={cx(
                   "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-sm font-bold",
@@ -227,7 +284,7 @@ export default function OnboardingWizard({ navigate, onDismiss }) {
                     ? "bg-emerald-500/20 text-emerald-400"
                     : isCurrent
                       ? "bg-indigo-500/20 text-indigo-400"
-                      : "bg-slate-800 text-slate-500"
+                      : "bg-slate-800 text-slate-300"
                 )}>
                   {done ? (
                     <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -237,46 +294,77 @@ export default function OnboardingWizard({ navigate, onDismiss }) {
                     idx + 1
                   )}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-40 sm:min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className={cx(
                       "text-sm font-medium",
                       done ? "text-slate-400 line-through" : isCurrent ? "text-slate-100" : "text-slate-400"
                     )}>
                       {step.title}
                     </span>
-                    {done && <Badge tone="green" className="text-[10px]">Done</Badge>}
+                    {done && autoDone && <Badge tone="green" className="text-[10px]" title="Detected in this workspace">Done · detected</Badge>}
+                    {done && !autoDone && <Badge tone="green" className="text-[10px]">Done</Badge>}
                     {isCurrent && <Badge tone="indigo" className="text-[10px]">Current</Badge>}
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">{step.description}</p>
                   {isCurrent && (
                     <p className="text-xs text-indigo-400/70 mt-1 italic">{step.tip}</p>
                   )}
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {!done && (
-                    <Button
-                      size="sm"
-                      variant={isCurrent ? "primary" : "ghost"}
-                      onClick={() => {
-                        navigate(step.route);
-                        if (!done) markComplete(step.id);
-                      }}
-                    >
-                      {step.action.label}
-                    </Button>
+                  {!done && link && link.isNext && (
+                    <p className="mt-0.5 text-[10px] uppercase tracking-wider text-indigo-400/60">
+                      ↳ Tracked by the setup bar above
+                    </p>
                   )}
-                  {!done && (
-                    <button
-                      type="button"
-                      onClick={() => markComplete(step.id)}
-                      className="rounded p-1 text-slate-600 hover:text-slate-400"
-                      title="Mark as done"
-                    >
-                      <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                    </button>
+                </div>
+                <div className="flex w-full items-center justify-end gap-1.5 sm:w-auto">
+                  {checking ? (
+                    <Spinner className="h-3.5 w-3.5 text-slate-500" />
+                  ) : (
+                    <>
+                      {!done && link && link.open && (
+                        <Button
+                          size="sm"
+                          variant={isCurrent ? "primary" : "ghost"}
+                          onClick={() => {
+                            // Deep-link into the setup-checkpoints bar: it un-dismisses,
+                            // highlights the matching checkpoint, and scrolls to itself.
+                            // The checkpoint's own route navigation handles the landing page.
+                            window.dispatchEvent(
+                              new CustomEvent("pc:focus-checkpoint", { detail: { id: link.checkpointId } })
+                            );
+                            navigate(link.route);
+                            markComplete(step.id);
+                          }}
+                          title={`Guided by the setup bar — ${link.label}`}
+                        >
+                          {step.action.label}
+                        </Button>
+                      )}
+                      {!done && (!link || !link.open) && (
+                        <Button
+                          size="sm"
+                          variant={isCurrent ? "primary" : "ghost"}
+                          onClick={() => {
+                            navigate(step.action.route);
+                            if (!done) markComplete(step.id);
+                          }}
+                        >
+                          {step.action.label}
+                        </Button>
+                      )}
+                      {!done && step.autoCheck === null && (
+                        <button
+                          type="button"
+                          onClick={() => markComplete(step.id)}
+                          className="rounded p-1.5 text-slate-500 hover:text-slate-400"
+                          title="Mark as done"
+                        >
+                          <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

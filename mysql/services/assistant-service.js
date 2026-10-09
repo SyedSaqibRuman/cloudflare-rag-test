@@ -19,6 +19,7 @@ export const ASSISTANT_KEY_RE = /^[a-z0-9-]+$/;
 // Backward-compatible HttpError — extends AppError so the error handler
 // middleware recognizes it and the test suite's `instanceof HttpError` checks pass.
 import { AppError } from "../../shared/errors.js";
+import { inspectBlockedPatterns } from "../../shared/blocked-patterns.js";
 
 export class HttpError extends AppError {
   constructor(status, message) {
@@ -32,6 +33,16 @@ function isPosInt(value) {
 
 /** Normalize a blocked-topics string: trim each line, drop empties, or null. */
 function normalizeBlockedTopics(raw) {
+  if (raw == null) return null;
+  const lines = String(raw)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines.join("\n") : null;
+}
+
+/** Normalize a blocked-patterns string the same way (one pattern per line). */
+function normalizeBlockedPatterns(raw) {
   if (raw == null) return null;
   const lines = String(raw)
     .split("\n")
@@ -98,6 +109,22 @@ export function validateAssistantInput(input = {}) {
       errors.blockedTopics = "blockedTopics must be at most 8000 characters.";
     }
   }
+  if (input.blockedPatterns !== undefined && input.blockedPatterns !== null) {
+    const raw = String(input.blockedPatterns);
+    const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length > 100) {
+      errors.blockedPatterns = "blockedPatterns supports at most 100 patterns (one per line).";
+    } else if (raw.length > 8000) {
+      errors.blockedPatterns = "blockedPatterns must be at most 8000 characters.";
+    } else {
+      // Every line must compile — literal substrings always do; /regex/ lines
+      // are checked here so a bad pattern fails at save time, not ask time.
+      const inspect = inspectBlockedPatterns(raw);
+      if (inspect.firstInvalid) {
+        errors.blockedPatterns = `blockedPatterns contains an invalid pattern: ${inspect.firstInvalid.slice(0, 60)}`;
+      }
+    }
+  }
 
   if (input.variables !== undefined && input.variables !== null) {
     if (!Array.isArray(input.variables)) {
@@ -142,6 +169,7 @@ export function validateAssistantInput(input = {}) {
       systemPrompt: input.systemPrompt?.trim() || null,
       guardrailPrompt: input.guardrailPrompt?.trim() || null,
       blockedTopics: normalizeBlockedTopics(input.blockedTopics),
+      blockedPatterns: normalizeBlockedPatterns(input.blockedPatterns),
       variables: input.variables == null ? [] : Array.isArray(input.variables) ? input.variables.map((v) => ({ key: String(v.key).trim(), value: String(v.value) })) : [],
       temperature: input.temperature === undefined || input.temperature === null ? 0.7 : Number(input.temperature),
       maxTokens: input.maxTokens === undefined || input.maxTokens === null ? 4096 : Number(input.maxTokens),
@@ -293,6 +321,7 @@ export async function updateAssistant(company, assistantKey, input, actor = {}) 
     systemPrompt: existing.system_prompt,
     guardrailPrompt: existing.guardrail_prompt,
     blockedTopics: existing.blocked_topics,
+    blockedPatterns: existing.blocked_patterns,
     temperature: Number(existing.temperature),
     maxTokens: existing.max_tokens,
     enableFunctionCalling: Boolean(existing.enable_function_calling),

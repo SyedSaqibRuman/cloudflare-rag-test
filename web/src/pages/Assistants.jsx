@@ -12,10 +12,12 @@ import {
   duplicateAssistant,
   api,
 } from "../api";
-import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton, Toggle, ArrowRightIcon, InfoTip } from "../components/ui";
+import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, IconButton, Toggle, ArrowRightIcon, InfoTip } from "../components/ui";
+import { Pagination } from "../components/ui/pagination";
 import { triggerNextStep } from "../components/NextStepPrompt";
 import { getTermTooltip } from "../components/glossary";
 import { useCompanies } from "../context";
+import { resolvePromptTemplate } from "#shared/prompt-variables.js";
 import { timeAgo } from "../util";
 import { useHeaderActions } from "../components/Layout";
 import { useToast, usePagination } from "../hooks";
@@ -55,25 +57,21 @@ function IconTrash() {
   );
 }
 
-/** Simple client-side prompt preview: resolves {{KEY}} → value from variables + company config. */
-function renderPromptPreview(template, variables, companyConfig = {}, assistantName = "") {
+/**
+ * Client-side prompt preview. Resolves {{KEY}} from the assistant's OWN
+ * variables merged over the company's PROMPT_VARIABLES tier (assistant wins) —
+ * the same merge the server applies. There are no built-in variables: company
+ * config fields (COMPANY_NAME, the URLs, …) are NOT injected, so an undefined
+ * placeholder stays literal and is visibly flagged to the operator.
+ */
+export function renderPromptPreview(template, variables, companyVariables = []) {
   if (!template) return "(no system prompt)";
-  let out = template;
-  const defaults = {
-    COMPANY_NAME: companyConfig.COMPANY_NAME || "",
-    CONSULTANT_NAME: assistantName || companyConfig.CONSULTANT_NAME || companyConfig.COMPANY_NAME || "",
-    CONTACT_US_URL: companyConfig.CONTACT_US_URL || "",
-    LOCATIONS_URL: companyConfig.LOCATIONS_URL || "",
-    SERVICES_URL: companyConfig.SERVICES_URL || "",
-    BASE_URL: companyConfig.BASE_URL || "",
-  };
-  for (const [key, value] of Object.entries(defaults)) {
-    out = out.replaceAll(`{{${key}}}`, value || "");
+  const merged = new Map();
+  for (const v of [...(companyVariables || []), ...(variables || [])]) {
+    const key = String(v?.key || "").trim().toUpperCase();
+    if (key) merged.set(key, v?.value ?? "");
   }
-  for (const { key, value } of variables || []) {
-    if (key.trim()) out = out.replaceAll(`{{${key.trim()}}}`, value || "(empty)");
-  }
-  return out;
+  return resolvePromptTemplate(template, Object.fromEntries(merged));
 }
 
 // -------- page --------------------------------------------------------------
@@ -86,7 +84,7 @@ export default function Assistants() {
   const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   const { page, perPage, setPage, setPerPage, paginationParams } = usePagination();
 
   // Modal state
@@ -94,6 +92,11 @@ export default function Assistants() {
   const [creds, setCreds] = useState([]);
   const [kbs, setKbs] = useState([]);
   const [models, setModels] = useState([]);
+  // Chat-model availability per configured provider (provider_key → count).
+  // Loaded when the modal opens so the Credential select can hide providers
+  // that can't power a chat (storage/vector/graph credentials) — the model
+  // dropdown behind them would always be empty and the binding dead.
+  const [chatModelCounts, setChatModelCounts] = useState({});
   const [form, setForm] = useState({
     assistantKey: "",
     assistantName: "",
@@ -104,6 +107,7 @@ export default function Assistants() {
     systemPrompt: "",
     guardrailPrompt: "",
     blockedTopics: "",
+    blockedPatterns: "",
     variables: [],
     temperature: "0.7",
     maxTokens: "4096",
@@ -123,13 +127,25 @@ export default function Assistants() {
   const [dupKey, setDupKey] = useState("");
   const [dupBusy, setDupBusy] = useState(false);
   const [editingVarIndex, setEditingVarIndex] = useState(null);
+  // The selected credential's provider key — drives the "no models registered"
+  // hint under the Model select (declared after `form` to avoid TDZ).
+  const credProvider = creds.find((c) => String(c.id) === String(form.credentialId))?.provider_key || null;
+  // Model options come ONLY from the selected credential's provider (that's
+  // whose API key runs the model at ask time) — catalog-wide values would be
+  // arbitrary: unbound to any key this company actually configured. Chat
+  // models only — an assistant needs a chat completion, not an embedding.
+  const chatModels = models.filter((m) => m.category === "chat");
+  // Credentials whose provider can serve chat — storage (R2/S3), vector DBs
+  // (Qdrant/Pinecone) etc. have zero chat models and would only produce a
+  // dead assistant binding. Hidden from the select instead.
+  const chatCreds = creds.filter((c) => (chatModelCounts[c.provider_key] ?? 1) > 0);
   const [keyTouched, setKeyTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busy, setBusy] = useState(false);
   const [modalTab, setModalTab] = useState("general"); // "general" | "prompt"
-  const [companyConfig, setCompanyConfig] = useState({});
+  const [companyVariables, setCompanyVariables] = useState([]);
 
   const load = async (key) => {
     if (!key) {
@@ -200,10 +216,30 @@ export default function Assistants() {
         api(`/cloudflare/config?company=${encodeURIComponent(companyKey)}`),
       ]);
       setCreds(c);
+      // Probe each configured provider's catalog once — providers with ≥1 chat
+      // model are chat-capable and stay in the Credential select; the rest
+      // (storage/vector/graph) are hidden here rather than listed with an
+      // always-empty Model dropdown behind them. Failures count as 0.
+      const counts = {};
+      await Promise.all(
+        [...new Set(c.map((x) => x.provider_key).filter(Boolean))].map(async (pk) => {
+          try {
+            const ms = await listProviderModels(pk);
+            counts[pk] = ms.filter((m) => m.category === "chat").length;
+          } catch {
+            counts[pk] = 0;
+          }
+        })
+      );
+      setChatModelCounts(counts);
       // listKbs resolves to { items, pagination } — unwrap the array.
       setKbs(Array.isArray(k) ? k : (k?.items ?? []));
-      setCompanyConfig(configData?.config?.GENERAL || {});
-      const companySystemPrompt = configData?.config?.GENERAL?.SYSTEM_PROMPT || "";
+      // SYSTEM_PROMPT + PROMPT_VARIABLES live in their own PROMPT section. (This
+      // used to read config.GENERAL.SYSTEM_PROMPT, which was always undefined
+      // because PROMPT_KEYS were in no CONFIG_SECTIONS group — new assistants
+      // silently started with an empty system prompt.)
+      const companySystemPrompt = configData?.config?.PROMPT?.SYSTEM_PROMPT || "";
+      setCompanyVariables(configData?.config?.PROMPT?.PROMPT_VARIABLES || []);
       if (assistant) {
         setForm({
           assistantKey: assistant.assistant_key,
@@ -215,6 +251,7 @@ export default function Assistants() {
           systemPrompt: assistant.system_prompt || "",
           guardrailPrompt: assistant.guardrail_prompt || "",
           blockedTopics: assistant.blocked_topics || "",
+          blockedPatterns: assistant.blocked_patterns || "",
           variables: assistant.assistant_variables?.length ? assistant.assistant_variables : [],
           temperature: String(assistant.temperature ?? 0.7),
           maxTokens: String(assistant.max_tokens ?? 4096),
@@ -232,9 +269,11 @@ export default function Assistants() {
           credentialId: "",
           modelId: "",
           primaryKbId: "",
+          kbIds: [],
           systemPrompt: companySystemPrompt,
           guardrailPrompt: "",
           blockedTopics: "",
+          blockedPatterns: "",
           variables: [],
           temperature: "0.7",
           maxTokens: "4096",
@@ -260,7 +299,6 @@ export default function Assistants() {
       }
     }
   };
-
   const onName = (v) => {
     setForm((f) => ({
       ...f,
@@ -287,6 +325,7 @@ export default function Assistants() {
         systemPrompt: form.systemPrompt.trim() || null,
         guardrailPrompt: form.guardrailPrompt.trim() || null,
         blockedTopics: form.blockedTopics.trim() || null,
+        blockedPatterns: form.blockedPatterns.trim() || null,
         variables: form.variables.filter((v) => v.key.trim()),
         temperature: Number(form.temperature),
         maxTokens: Number(form.maxTokens),
@@ -295,10 +334,10 @@ export default function Assistants() {
         isPublic: form.isPublic,
       };
       if (modal?.assistant) {
-        await updateAssistant(form.assistantKey.trim(), body, companyKey);
+        await updateAssistant(form.assistantKey.trim(), body, companyKey, { toast: false });
         notify(`Assistant '${form.assistantKey.trim()}' updated.`);
       } else {
-        await createAssistant(body, companyKey);
+        await createAssistant(body, companyKey, { toast: false });
         notify(`Assistant '${form.assistantKey.trim()}' created.`);
         triggerNextStep("assistant-created");
       }
@@ -316,7 +355,7 @@ export default function Assistants() {
     setBusy(true);
     setError(null);
     try {
-      await deleteAssistant(deleteTarget.assistant_key, companyKey);
+      await deleteAssistant(deleteTarget.assistant_key, companyKey, { toast: false });
       setDeleteTarget(null);
       notify(`Assistant '${deleteTarget.assistant_key}' deleted.`);
       await load(companyKey);
@@ -354,7 +393,7 @@ export default function Assistants() {
     if (!dupKey.trim()) return;
     setDupBusy(true);
     try {
-      await duplicateAssistant(duplicateTarget.assistant_key, dupKey.trim(), companyKey);
+      await duplicateAssistant(duplicateTarget.assistant_key, dupKey.trim(), companyKey, null, { toast: false });
       notify(`Duplicated as '${dupKey.trim()}'.`);
       setDuplicateTarget(null);
       setDupKey("");
@@ -532,20 +571,37 @@ export default function Assistants() {
                 label="Credential * (supplies the API key at runtime)"
                 options={[
                   { value: "", label: "— select a credential —" },
-                  ...creds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
+                  ...chatCreds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
                 ]}
                 value={form.credentialId}
                 onChange={(e) => onCredential(e.target.value)}
               />
-              <Select
-                label="Model (from the credential's provider)"
+              {creds.length > chatCreds.length && (
+                <p className="text-xs text-slate-500 -mt-2">
+                  {creds.length - chatCreds.length} non-chat credential{creds.length - chatCreds.length === 1 ? "" : "s"} (storage / vector DB) hidden — assistants need a chat provider.
+                </p>
+              )}
+              <div>
+                <Select
+                  label="Model (from the credential's provider)"
                 options={[
                   { value: "", label: "— provider default —" },
-                  ...models.map((m) => ({ value: String(m.id), label: `${m.model_name} · ${m.category}` })),
+                  ...chatModels.map((m) => ({ value: String(m.id), label: `${m.model_name}` })),
                 ]}
-                value={form.modelId}
-                onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
-              />
+                  value={form.modelId}
+                  onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
+                />
+                {form.credentialId && chatModels.length === 0 && (
+                  <p className="mt-1.5 text-xs text-amber-500">
+                    No chat models registered for this credential's provider — the assistant will use the company default.
+                    {credProvider && (
+                      <>
+                        {" "}Add chat models on the <button type="button" className="underline hover:no-underline" onClick={() => { location.hash = `#catalog/${credProvider}`; }}>provider detail page</button>, or pick a credential whose provider has models.
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
               <Select
                 label="Primary knowledge base"
                 options={[
@@ -663,35 +719,56 @@ export default function Assistants() {
                     onChange={(e) => setForm((f) => ({ ...f, blockedTopics: e.target.value }))}
                     placeholder={"crypto\ninvestments\ngambling"}
                   />
+                  <TextArea
+                    label="Blocked patterns — replaces the built-ins (one per line)"
+                    rows={4}
+                    value={form.blockedPatterns}
+                    onChange={(e) => setForm((f) => ({ ...f, blockedPatterns: e.target.value }))}
+                    placeholder={"crypto\n/write.*haiku/i\n\\binvestment\\b"}
+                  />
                   <p className="text-[11px] leading-relaxed text-slate-500">
                     Questions containing any blocked topic are refused before retrieval or an AI call, and blocked topics stay
                     out of the suggested follow-up questions. Matching is case-insensitive ("crypto" also blocks "cryptocurrency").
-                    Leave both empty to fall back to the company-level guardrails and the built-in off-topic patterns.
+                    Blocked patterns swap out the whole built-in off-topic set (poems/jokes/movies/code/recipes) for this
+                    assistant — each line is a literal phrase or a /regex/. Leave empty to inherit the company-level patterns
+                    (Config → Security) or the built-ins; leave both empty to fall back to the company-level guardrails.
                   </p>
                 </div>
               </div>
               <div className="space-y-2">
-                <p className="text-xs font-medium text-slate-300">Built-in variables</p>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    { key: "COMPANY_NAME", value: companyConfig.COMPANY_NAME || "", label: "Company Display Name" },
-                    { key: "CONSULTANT_NAME", value: companyConfig.CONSULTANT_NAME || "", label: "Assistant Name" },
-                    { key: "CONTACT_US_URL", value: companyConfig.CONTACT_US_URL || "", label: "Contact Us URL" },
-                    { key: "LOCATIONS_URL", value: companyConfig.LOCATIONS_URL || "", label: "Locations URL" },
-                    { key: "SERVICES_URL", value: companyConfig.SERVICES_URL || "", label: "Services URL" },
-                    { key: "BASE_URL", value: companyConfig.BASE_URL || "", label: "Base URL" },
-                  ].map((v) => (
-                    <span
-                      key={v.key}
-                      title={`${v.label}: ${v.value || "not set"}`}
-                      onClick={() => { navigator.clipboard?.writeText(`{{${v.key}}}`); notify(`Copied {{${v.key}}}`, "green"); }}
-                      className="cursor-pointer rounded-md border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-[11px] text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
-                    >
-                      {`{{${v.key}}}`}
-                    </span>
-                  ))}
-                </div>
-                <p className="text-[11px] text-slate-500">Click a variable to copy it, then paste it into the system prompt above.</p>
+                <p className="text-xs font-medium text-slate-300">Company variables</p>
+                {companyVariables.length === 0 ? (
+                  <p className="text-[11px] text-slate-500">
+                    This company defines no custom variables. Add them on Config → Prompt → Default
+                    System Prompt, or define your own below.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {companyVariables.map((v) => {
+                      const key = String(v.key || "").trim().toUpperCase();
+                      const shadowed = form.variables.some(
+                        (x) => String(x.key || "").trim().toUpperCase() === key
+                      );
+                      return (
+                        <span
+                          key={key}
+                          title={`${v.value || "empty"}${shadowed ? " — overridden below" : ""}`}
+                          onClick={() => { navigator.clipboard?.writeText(`{{${key}}}`); notify(`Copied {{${key}}}`, "green"); }}
+                          className={`cursor-pointer rounded-md border px-2 py-1 font-mono text-[11px] transition-colors ${
+                            shadowed
+                              ? "border-amber-700 bg-slate-900 text-amber-300 line-through"
+                              : "border-slate-700 bg-slate-900 text-slate-300 hover:border-indigo-500 hover:text-indigo-200"
+                          }`}
+                        >{`{{${key}}}`}</span>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-500">
+                  There are no built-in variables — company config fields are NOT injected into
+                  prompts. Click to copy a placeholder, then paste it into the system prompt above.
+                  Struck-through names are overridden by a variable below.
+                </p>
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -780,7 +857,7 @@ export default function Assistants() {
               <div>
                 <p className="mb-1.5 text-xs font-medium text-slate-300">Prompt preview</p>
                 <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">
-                  {renderPromptPreview(form.systemPrompt, form.variables, companyConfig, form.assistantName)}
+                  {renderPromptPreview(form.systemPrompt, form.variables, companyVariables)}
                 </div>
               </div>
             </div>
@@ -881,7 +958,7 @@ export default function Assistants() {
         </div>
       </Modal>
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

@@ -52,7 +52,7 @@ function Confidence({ value }) {
 
 function Evidence({ items, max = 2 }) {
   const list = Array.isArray(items) ? items.slice(0, max) : [];
-  if (!list.length) return <span className="text-xs text-slate-600">—</span>;
+  if (!list.length) return <span className="text-xs text-slate-500">—</span>;
   return (
     <div className="flex max-w-64 flex-wrap gap-1">
       {list.map((e, i) => (

@@ -244,7 +244,7 @@ export async function listClaims(session, { companyName, kbKey, status = null, e
             s.id AS subjectId, s.name AS subjectName,
             o.id AS objectId, o.name AS objectName,
             c.created_by AS createdBy, c.created_at AS createdAt, c.updated_at AS updatedAt
-     ORDER BY c.updated_at DESC LIMIT $limit`,
+     ORDER BY c.updated_at DESC LIMIT toInteger($limit)`,
     params
   );
   return res.records.map((r) => ({

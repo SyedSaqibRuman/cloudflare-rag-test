@@ -27,6 +27,9 @@ export const wrap = (fn) => (req, res) => {
       const expose = status < 500 || env.NODE_ENV !== "production";
       const body = { success: false, error: expose ? err.message : "Internal Server Error" };
       if (isAppError(err) && err.errors) body.errors = err.errors;
+      // Structured verdicts (e.g. the KB embedding probe) ride on the error so
+      // the portal can decode them into actionable UI instead of parsing prose.
+      if (err.probe) body.probe = err.probe;
       if (isAppError(err) && err.code) body.code = err.code;
       return res.status(status).json(body);
     }

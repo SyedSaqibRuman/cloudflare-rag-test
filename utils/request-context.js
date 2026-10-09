@@ -38,7 +38,13 @@ function parseHost(origin) {
   }
 }
 
-const isDevHost = (host) => host === "localhost" || host.endsWith(".localhost");
+const isDevHost =
+  (host) =>
+  host === "localhost" ||
+  host.endsWith(".localhost") ||
+  host === "127.0.0.1" ||
+  host === "[::1]" ||
+  host === "::1";
 
 /**
  * Resolve a company from the x-company-name header, with optional fallback

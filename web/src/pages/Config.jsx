@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { api, listProviders, getProvider, getKbOptions, listCredentials, listAssistants } from "../api";
 import AskApiKeyCard from "./config/AskApiKeyCard.jsx";
+import BlockedPatternsCard from "./config/BlockedPatternsCard.jsx";
 import ChatPlaygroundCard from "./config/ChatPlaygroundCard.jsx";
-import { Card, Button, Input, Select, Spinner, Toast, SkeletonCard, Tabs, TabPanel } from "../components/ui";
+import SystemPromptCard from "./config/SystemPromptCard.jsx";
+import { Card, Button, Input, Select, Spinner, SkeletonCard, Tabs, TabPanel } from "../components/ui";
 import { useCompanies } from "../context";
 import { useHeaderActions } from "../components/Layout";
 import { useToast } from "../hooks";
@@ -27,7 +29,7 @@ export default function Config() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const { toast, notify } = useToast();
+  const { notify } = useToast();
   // Initial enabled flag from the fetched AUTH section — the Ask API Key card
   // owns everything else about the key lifecycle.
   const [apiKeyInitial, setApiKeyInitial] = useState(false);
@@ -238,6 +240,7 @@ export default function Config() {
       await api(`/cloudflare/companies/${encodeURIComponent(company)}`, {
         method: "PUT",
         body: changed,
+        toast: false, // page notify()s its own phrasing
       });
       await load(company);
       await refresh();
@@ -253,7 +256,7 @@ export default function Config() {
     if (!window.confirm(`Reset '${company}' to defaults?`)) return;
     setError(null);
     try {
-      await api(`/cloudflare/companies/${encodeURIComponent(company)}/reset`, { method: "POST" });
+      await api(`/cloudflare/companies/${encodeURIComponent(company)}/reset`, { method: "POST", toast: false });
       await load(company);
       await refresh();
       notify("Company reset to defaults.");
@@ -390,6 +393,7 @@ export default function Config() {
             tabs={[
               { id: "general", label: "General" },
               { id: "models", label: "Models" },
+              { id: "prompt", label: "Prompt" },
               { id: "playground", label: "Playground" },
               { id: "security", label: "Security" },
             ]}
@@ -529,21 +533,32 @@ export default function Config() {
           </TabPanel>
 
           <TabPanel id="playground" active={activeTab}>
+          <div className="space-y-6">
           <ChatPlaygroundCard
             company={company}
             aiProvider={draft?.AI_PROVIDER || ""}
             llmModel={draft?.LLM_MODEL}
             options={modelOptions("chat", draft?.LLM_MODEL ?? "")}
           />
+          </div>
+          </TabPanel>
+
+          <TabPanel id="prompt" active={activeTab}>
+          <div className="space-y-6">
+          <SystemPromptCard company={company} onError={setError} notify={notify} />
+          </div>
           </TabPanel>
 
           <TabPanel id="security" active={activeTab}>
+          <div className="space-y-6">
           <AskApiKeyCard
             company={company}
             initialEnabled={apiKeyInitial}
             onError={setError}
             notify={notify}
           />
+          <BlockedPatternsCard company={company} onError={setError} notify={notify} />
+          </div>
           </TabPanel>
 
           </Tabs>
@@ -564,7 +579,7 @@ export default function Config() {
         </div>
       )}
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

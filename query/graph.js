@@ -32,6 +32,7 @@
 import { runCloudflareAI } from "../services/cloudflare_ai.js";
 import { getLlmModel } from "./llm.js";
 import { sanitizeText } from "./context.js";
+import { getGraphConfig } from "../config/graph.js";
 
 // Graph config resolution now lives in config/graph.js (shared with the
 // knowledge layer). Re-exported here so existing importers (kb-service,

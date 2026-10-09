@@ -46,7 +46,7 @@ export async function onboardCompany(company) {
     is_active: true,
   };
 
-  const kbId = await KbRepository.create(company.id, kbData);
+  await KbRepository.create(company.id, kbData);
 
   // Create a default assistant
   const assistantData = {
@@ -58,7 +58,7 @@ export async function onboardCompany(company) {
     is_active: true,
   };
 
-  const assistantId = await AssistantRepository.create(company.id, assistantData);
+  await AssistantRepository.create(company.id, assistantData);
 
   // Audit
   await AuditRepository.log({

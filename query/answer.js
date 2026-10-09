@@ -12,6 +12,44 @@ import { resolveAssistantOverrides, isRunnableModel, checkModelAccess } from "./
 import { getCompanyConfig } from "../config/index.js";
 
 // --------------------------
+// PROVIDER-EXECUTOR SEAM (lazy)
+// Non-Workers-AI assistant models run through the gateway provider executor
+// (ADR-012 ask runtime). Lazy-imported so query/ stays zero-dep for tests;
+// streamed delivery goes through the same onToken callback as Workers AI.
+// --------------------------
+async function runProviderChat({ companyName, execution, model, input, signal, onToken }) {
+  const { streamChat } = await import("../mysql/services/provider-executor.js");
+  const { messages, temperature, max_tokens } = input;
+  const out = await streamChat({
+    companyKey: companyName,
+    credentialId: execution.credentialId,
+    providerKey: execution.providerKey || undefined,
+    model,
+    messages,
+    options: {
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(max_tokens !== undefined ? { max_tokens } : {}),
+    },
+    signal,
+    onToken,
+  });
+  return { response: out.content || "" };
+}
+
+/**
+ * The LLM adapter the pipeline executes: the assistant's own provider via the
+ * gateway executor when its catalog model is a non-Workers-AI key bound to a
+ * credential, otherwise the company's Workers AI model (legacy path).
+ * @returns {{ model: string, execution: object|null }}
+ */
+function resolveLlmBinding(companyName, assistant) {
+  if (assistant?.model && !isRunnableModel(assistant.model) && assistant.execution?.credentialId) {
+    return { model: assistant.model, execution: assistant.execution };
+  }
+  return { model: assistantModel(companyName, assistant), execution: null };
+}
+
+// --------------------------
 // USAGE LOGGING
 // --------------------------
 /**
@@ -77,6 +115,19 @@ function assistantModel(companyName, assistant) {
 }
 
 /**
+ * Model-access gate condition: the gate runs when the assistant's catalog
+ * model is the one the pipeline will actually execute — a Workers AI key, or
+ * a non-CF key bound to the assistant's own credential (execution block).
+ * A non-CF model with no credential binding falls back to the company LLM,
+ * so gating it would deny an ask whose model is never called.
+ */
+function assistantModelExecutes(companyName, assistant) {
+  if (!assistant?.assistantKey || !assistant?.model) return false;
+  if (isRunnableModel(assistant.model)) return true;
+  return Boolean(assistant.execution?.credentialId);
+}
+
+/**
  * Compute the retrieval binding fingerprint for cache key isolation.
  * This ensures cache entries are only served when all retrieval factors
  * (embedding model, vector index, LLM model) match exactly.
@@ -94,9 +145,13 @@ function getRetrievalBinding(companyName, assistant) {
   // Vector index: assistant's primary KB → company config fallback.
   const vectorIndex = assistant?.vectorIndex || getVectorIndex(companyName);
   // LLM model: assistant's model → company config fallback.
-  const llmModel = assistantModel(companyName, assistant);
-
-  return { embeddingModel, vectorIndex, llmModel };
+  // The fingerprint uses the model that will actually execute — including the
+  // assistant's non-CF catalog model bound to its own credential.
+  const executedModel =
+    assistant?.model && !isRunnableModel(assistant.model) && assistant.execution?.credentialId
+      ? assistant.model
+      : assistantModel(companyName, assistant);
+  return { embeddingModel, vectorIndex, llmModel: executedModel };
 }
 
 /** Resolve the embedding model for cache binding. */
@@ -181,6 +236,7 @@ export async function runPipeline({
   companyName,
   llmCall,
   onToken,
+  assistantKey = null,
   steps = {},
 }) {
   const {
@@ -200,11 +256,24 @@ export async function runPipeline({
   const trimmed = question?.trim();
   if (!trimmed) return { answer: "", sources: [], matches: [], graph: null, cached: false };
 
-  const fastResponse = fastPathFn(trimmed, companyName);
-  if (fastResponse) return { answer: fastResponse, sources: [], matches: [], graph: null, cached: false };
-
-  const assistant = await resolveFn(companyName);
+  // Resolve the assistant BEFORE the fast path so canned responses (identity,
+  // greeting, contact…) carry the assistant's persona name — otherwise
+  // "what is your name?" answers as the company consultant even when an
+  // assistant with its own name is selected.
+  const assistant = await resolveFn(companyName, { assistantKey });
   const R = responsesFn(companyName, assistant?.assistantName || null);
+
+  // The fast-path resolves blocked patterns through the configurable tiers —
+  // assistant.blockedPatterns > company BLOCKED_PATTERNS > built-ins (shared/
+  // blocked-patterns.js). An assistant that ships its own pattern set fully
+  // replaces the built-ins (a recipes persona must not veto "recipe").
+  const fastResponse = fastPathFn(
+    trimmed,
+    companyName,
+    assistant?.assistantName || null,
+    assistant
+  );
+  if (fastResponse) return { answer: fastResponse, sources: [], matches: [], graph: null, cached: false };
 
   // Assistant-level guardrail: blocked topics configured on the selected
   // assistant are refused before any retrieval or LLM work (they add to the
@@ -215,14 +284,32 @@ export async function runPipeline({
 
   // Model-access gate: if an assistant has a credential + model, verify the
   // credential_model_access grant allows this model before making a paid LLM call.
-  if (modelAccessFn && assistant?.assistantKey) {
+  //
+  // Only meaningful when the assistant's catalog model is the one the pipeline
+  // will actually execute (assistantModelExecutes): a Workers AI key, or a
+  // non-CF key bound to the assistant's own credential (execution block).
+  // A non-CF model with NO credential binding falls back to the company's own
+  // LLM via assistantModel() — gating that fallback would deny an ask whose
+  // denied model is never called, blanking the answer. Denial itself is
+  // grants-aware: a credential with zero access grants is unmanaged and
+  // everything is allowed (see checkModelAccess in assistant.js).
+  if (modelAccessFn && assistantModelExecutes(companyName, assistant)) {
     const accessResult = await modelAccessFn(companyName, assistant);
     if (accessResult && !accessResult.allowed) {
-      return { answer: `Model access denied: ${accessResult.reason || "not authorized"}.`, sources: [], matches: [], graph: null, cached: false };
+      // denied:true marks a pre-LLM refusal — callers suppress follow-up
+      // suggestions so no questions are generated from this error string.
+      return {
+        answer: `Model access denied: ${accessResult.reason || "not authorized"}.`,
+        sources: [],
+        matches: [],
+        graph: null,
+        cached: false,
+        denied: true,
+      };
     }
   }
 
-  const cleanQuestion = (await rewriteFn(trimmed, history, companyName)).trim();
+  const cleanQuestion = (await rewriteFn(trimmed, history, companyName, { execution: assistant?.execution || null })).trim();
 
   // ADR-012 Phase 1: Cache key includes the full retrieval binding fingerprint
   // so that changing the embedding model, vector index, or LLM model invalidates
@@ -249,7 +336,11 @@ export async function runPipeline({
   }
 
   const { context, matches } = await retrieveFn(cleanQuestion, companyName, {
-    indexName: assistant?.vectorIndex || null,
+    // Assistant persona override wins; otherwise the company's configured
+    // VECTOR_INDEX is the resolved retrieval index — it may name a non-CF
+    // store (Pinecone/Qdrant/Weaviate KB binding), which retrieval.js routes
+    // through the KB's own adapters (ADR-012 Phase 2).
+    indexName: assistant?.vectorIndex || getVectorIndex(companyName) || null,
   });
   if (!context) return { answer: R.noContext, sources: [], matches: [], graph: null, cached: false };
 
@@ -268,14 +359,16 @@ export async function runPipeline({
     { role: "user", content: userMsgFn(fullContext, cleanQuestion) },
   ];
 
+  const llmBinding = resolveLlmBinding(companyName, assistant);
   const ai = await llmCall({
     messages,
-    model: assistantModel(companyName, assistant),
+    model: llmBinding.model,
     temperature: assistant?.temperature ?? 0.3,
     max_tokens: assistant?.maxTokens ?? 500,
     // Function calling: pass tools when the assistant has them enabled.
     ...(assistant?.enableFunctionCalling && assistant?.tools ? { tools: assistant.tools } : {}),
     onToken,
+    execution: llmBinding.execution,
   });
   const answer = ai.response || R.error;
 
@@ -285,6 +378,10 @@ export async function runPipeline({
     matches,
     graph,
     cached: false,
+    // Execution binding — callers use it to route side-calls (suggestions)
+    // through the same provider as the answer. llmModel records what ran.
+    execution: llmBinding.execution,
+    llmModel: llmBinding.model,
   };
 
   setCacheFn(cacheKey, result, companyName);
@@ -296,14 +393,25 @@ export async function runPipeline({
 // Accepts { signal } so the route can abort the (paid) AI call when the
 // client disconnects mid-request.
 // --------------------------
-export async function askQuestion(question, history = [], companyName, { signal, requestId } = {}) {
+export async function askQuestion(question, history = [], companyName, { signal, requestId, assistantKey = null } = {}) {
   const startTime = Date.now();
   try {
     const result = await runPipeline({
       question,
       history,
       companyName,
-      llmCall: async ({ messages, model, temperature, max_tokens, tools }) => {
+      assistantKey,
+      llmCall: async ({ messages, model, temperature, max_tokens, tools, onToken, execution }) => {
+        if (execution) {
+          return runProviderChat({
+            companyName,
+            execution,
+            model,
+            input: { messages, temperature, max_tokens },
+            signal,
+            onToken,
+          });
+        }
         const ai = await runCloudflareAI(
           companyName,
           model,
@@ -315,16 +423,20 @@ export async function askQuestion(question, history = [], companyName, { signal,
       steps: { checkModelAccess },
     });
 
-    // Log usage (best-effort, non-blocking).
+    // Log usage (best-effort, non-blocking) — against the model that actually
+    // executed (assistant's provider model or the company's Workers AI model).
     const durationMs = Date.now() - startTime;
-    const model = getLlmModel(companyName);
+    const model = result.execution ? result.llmModel || getLlmModel(companyName) : getLlmModel(companyName);
     logUsage(companyName, { model, durationMs, action: "ask", responseStatus: 200, requestId }).catch(() => {});
 
-    // Client gone — skip the follow-up suggestions call entirely.
-    const possibleQuestions = signal?.aborted
+    // Client gone — skip the follow-up suggestions call entirely. A pre-LLM
+    // denial is not an answer: never generate suggestions from it.
+    const possibleQuestions = signal?.aborted || result.denied
       ? []
-      : await generatePossibleQuestions(result.answer, companyName);
-    return { ...result, possibleQuestions };
+      : await generatePossibleQuestions(result.answer, companyName, { execution: result.execution || null });
+    // execution is an internal routing binding — never leak it to API clients.
+    const { execution: _execution, llmModel: _llmModel, ...publicResult } = result;
+    return { ...publicResult, possibleQuestions };
   } catch (err) {
     const durationMs = Date.now() - startTime;
     const model = getLlmModel(companyName);
@@ -346,7 +458,8 @@ export async function askQuestionStream(
   question,
   history = [],
   transport = createStreamTransport({ write: () => {} }),
-  companyName
+  companyName,
+  { assistantKey = null } = {}
 ) {
   const startTime = Date.now();
   try {
@@ -358,7 +471,10 @@ export async function askQuestionStream(
       return false;
     }
 
-    const fastResponse = checkFastPath(trimmed, companyName);
+    // Resolve the assistant before the fast path so canned identity/greeting
+    // responses carry the assistant's persona (parity with runPipeline).
+    const assistant = await resolveAssistantOverrides(companyName, { assistantKey });
+    const fastResponse = checkFastPath(trimmed, companyName, assistant?.assistantName || null, assistant);
     if (fastResponse) {
       transport.sendStart({ __start: false });
       transport.sendToken(fastResponse);
@@ -367,16 +483,36 @@ export async function askQuestionStream(
     }
 
     let answer = "";
+    // Tracks whether ANY text reached the client. Every runPipeline early return
+    // (cache hit, custom Q&A, no-context, model-access denial) yields answer text
+    // without calling the LLM, so no token is ever streamed — the client would
+    // render an empty bubble while still receiving the metadata frames.
+    let streamed = false;
 
     const result = await runPipeline({
       question,
       history,
       companyName,
+      assistantKey,
       onToken: (token) => {
+        if (token) streamed = true;
         transport.sendToken(token);
       },
       steps: { checkModelAccess },
-      llmCall: async ({ messages, model, temperature, max_tokens, tools }) => {
+      llmCall: async ({ messages, model, temperature, max_tokens, tools, onToken, execution }) => {
+        if (execution) {
+          return runProviderChat({
+            companyName,
+            execution,
+            model,
+            input: { messages, temperature, max_tokens },
+            signal: transport.signal,
+            onToken: (token) => {
+              if (token) streamed = true;
+              if (onToken) onToken(token);
+            },
+          });
+        }
         const body = { stream: true, messages, temperature, max_tokens };
         if (tools && Array.isArray(tools) && tools.length > 0) {
           body.tools = tools;
@@ -393,13 +529,10 @@ export async function askQuestionStream(
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let firstTokenReceived = false;
 
         const parser = createSseParser((parsed) => {
-          if (parsed.response && !firstTokenReceived) {
-            firstTokenReceived = true;
-          }
           if (parsed.response) {
+            streamed = true;
             answer += parsed.response;
             transport.sendToken(parsed.response);
           }
@@ -427,7 +560,15 @@ export async function askQuestionStream(
       return false;
     }
 
-    const possibleQuestions = await generatePossibleQuestions(result.answer, companyName);
+    // Non-streamed answer (cache hit / custom Q&A / no-context / denial / an LLM
+    // stream that produced no text): deliver the text as a single token so the
+    // bubble is never blank and the SSE contract stays token-based.
+    if (!streamed) transport.sendToken(result.answer);
+
+    // A pre-LLM denial is not an answer — never generate suggestions from it.
+    const possibleQuestions = result.denied
+      ? []
+      : await generatePossibleQuestions(result.answer, companyName, { execution: result.execution || null });
 
     transport.sendStart({ sources: result.sources, matches: result.matches, graph: result.graph });
     transport.sendPossibleQuestions(possibleQuestions);

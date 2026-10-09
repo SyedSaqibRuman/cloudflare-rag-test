@@ -15,6 +15,7 @@ import { Popover, PopoverTrigger, PopoverContent, PopoverItem, PopoverSeparator 
 import { NAV, PAGE_META } from "./layout/nav.js";
 import { NAV_ICONS } from "./layout/icons.jsx";
 import KeyboardShortcuts from "./KeyboardShortcuts";
+import SetupCheckpoints from "./SetupCheckpoints";
 
 const HeaderActionsCtx = createContext(null);
 
@@ -80,18 +81,18 @@ function LazyUserMenu({ username, isCollapsed, navigate, logout }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          title={username || "Admin"}
+          title={typeof username === "string" ? username : username?.name || username?.sub || "Admin"}
           className={cx(
             "flex items-center rounded-lg transition-colors hover:bg-slate-800/70",
             isCollapsed ? "mx-auto justify-center p-1" : "w-full gap-3 px-3 py-2 text-sm"
           )}
         >
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-base font-semibold text-indigo-300">
-            {(username || "A").charAt(0).toUpperCase()}
+            {(typeof username === "string" ? username : username?.name || username?.sub || "A").charAt(0).toUpperCase()}
           </span>
           {!isCollapsed && (
             <span className="min-w-0 flex-1 text-left">
-              <span className="block truncate text-sm font-medium text-slate-200">{username || "Admin"}</span>
+              <span className="block truncate text-sm font-medium text-slate-200">{typeof username === "string" ? username : username?.name || username?.sub || "Admin"}</span>
               <span className="block truncate text-[11px] text-slate-500">Administrator</span>
             </span>
           )}
@@ -133,6 +134,18 @@ function LazyUserMenu({ username, isCollapsed, navigate, logout }) {
       </PopoverContent>
     </Popover>
   );
+}
+
+// ------------------------------------------------------------------
+// Clerk component mode → <UserButton /> (profile + sign-out, Clerk-owned
+// session). Legacy env login → the CSS Popover user menu.
+// ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// User menu — CSS Popover (profile, API docs, logs, sign-out). Login is a
+// plain API call; there is no embedded third-party auth widget in the shell.
+// ------------------------------------------------------------------
+function UserMenuOrLegacy({ username, isCollapsed, navigate, logout }) {
+  return <LazyUserMenu username={username} isCollapsed={isCollapsed} navigate={navigate} logout={logout} />;
 }
 
 // ------------------------------------------------------------------
@@ -296,6 +309,24 @@ export default function Layout({ route, navigate, children }) {
             <CompanySelect company={company} companies={companies} select={select} onCreate={() => navigate("companies")} />
           </div>
         )}
+        {isCollapsed && company && (
+          <div className="px-2 pb-3">
+            <button
+              type="button"
+              title={`Workspace: ${company.company_name || company.company_key}${company.status ? ` (${company.status})` : ""}`}
+              aria-label={`Workspace: ${company.company_name || company.company_key}`}
+              onClick={() => navigate("companies")}
+              className="flex w-full items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 p-2 text-slate-300 transition-colors hover:bg-slate-800/70 hover:text-slate-100"
+            >
+              <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+                <rect x="14" y="14" width="7" height="7" rx="1" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Nav links */}
@@ -372,7 +403,7 @@ export default function Layout({ route, navigate, children }) {
             </div>
           )}
         </div>
-        <LazyUserMenu
+        <UserMenuOrLegacy
           username={username}
           isCollapsed={isCollapsed}
           navigate={navigate}
@@ -425,9 +456,9 @@ export default function Layout({ route, navigate, children }) {
         {renderSidebarContent(false, closeMobile)}
       </aside>
 
-      <main id="main" className={cx("flex-1 transition-[margin] duration-200", collapsed ? "md:ml-16" : "md:ml-60")}>
-        <header className="flex items-end justify-between gap-4 px-4 pt-4 pb-3 md:px-8 md:pt-6 md:pb-4">
-          <div className="flex items-center gap-3">
+      <main id="main" className={cx("min-w-0 flex-1 transition-[margin] duration-200", collapsed ? "md:ml-16" : "md:ml-60")}>
+        <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2 px-4 pt-4 pb-3 md:px-8 md:pt-6 md:pb-4">
+          <div className="flex min-w-0 items-center gap-3">
             {/* Hamburger menu — visible only below md breakpoint */}
             <button
               type="button"
@@ -438,13 +469,32 @@ export default function Layout({ route, navigate, children }) {
               <HamburgerIcon />
             </button>
             <div>
-              <h1 className="text-xl font-bold text-slate-50 md:text-2xl">{PAGE_META[route]?.title || "Dashboard"}</h1>
+              <h1 className="text-xl font-bold tracking-tight text-slate-50 md:text-2xl">{PAGE_META[route]?.title || "Dashboard"}</h1>
               <p className="text-xs text-slate-400 mt-0.5 md:text-sm md:mt-1">{PAGE_META[route]?.subtitle || ""}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          {/* Header actions. The outer group never wraps — the theme toggle
+              stays pinned to the first line on every page; page actions that
+              don't fit wrap right-aligned inside the inner group instead of
+              orphaning the toggle onto its own line (mobile audit). */}
+          <div className="flex flex-nowrap items-start gap-2 sm:items-center">
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
             {headerActions}
             <PageHelpButton pageId={route} />
+            {/* API docs — opens the Swagger UI in a new tab */}
+            <a
+              href="/api-docs"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="API documentation (Swagger UI)"
+              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-800/60 px-2.5 py-1.5 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+            >
+              <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+              </svg>
+              <span className="hidden md:inline">API Docs</span>
+            </a>
             {/* Search button — shows keyboard shortcut hint */}
             <button
               type="button"
@@ -457,13 +507,19 @@ export default function Layout({ route, navigate, children }) {
                 <path d="m21 21-4.35-4.35" />
               </svg>
               <span className="hidden lg:inline">Search</span>
-              <kbd className="hidden lg:inline rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-600">⌘K</kbd>
+              <kbd className="hidden lg:inline rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-500">⌘K</kbd>
             </button>
             <SessionTimeoutBadge />
+            </div>
             <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
         </header>
-        <div className="px-4 pb-8 md:px-8">{children}</div>
+        <div className="px-4 pb-8 md:px-8">
+          {/* Horizontal setup checkpoints — shown only while the selected
+              company's configuration is incomplete (sequential stepper) */}
+          <SetupCheckpoints navigate={navigate} />
+          {children}
+        </div>
       </main>
     </div>
     </HeaderActionsCtx.Provider>

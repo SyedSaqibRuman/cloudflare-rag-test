@@ -282,18 +282,27 @@ curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/buckets
 
 ## System Prompt Configuration
 
-The system prompt controls how the AI assistant behaves, what rules it follows, and what information it can reference. The prompt is stored as a template with `{{VARIABLE}}` placeholders that are resolved at runtime with live config values.
+The system prompt controls how the AI assistant behaves, what rules it follows, and what information it can reference. The prompt is stored as a template with `{{VARIABLE}}` placeholders that are resolved at runtime from **custom variables**.
 
-### Supported Variables
+### There Are No Built-In Variables
 
-| Variable | Resolves To | Example |
-|----------|-------------|---------|
-| `{{CONSULTANT_NAME}}` | Assistant name | `Sarah` |
-| `{{COMPANY_NAME}}` | Company name | `Popularcert` |
-| `{{CONTACT_US_URL}}` | Contact page URL | `https://popularcert.com/contact-us/` |
-| `{{LOCATIONS_URL}}` | Locations page URL | `https://popularcert.com/locations/` |
-| `{{SERVICES_URL}}` | Services page URL | `https://popularcert.com/services/` |
-| `{{BASE_URL}}` | Base URL | `https://popularcert.com` |
+`{{VARIABLE}}` placeholders used to be filled automatically from company config and the wall clock — `{{CONSULTANT_NAME}}`, `{{COMPANY_NAME}}`, `{{CONTACT_US_URL}}`, `{{LOCATIONS_URL}}`, `{{SERVICES_URL}}`, `{{BASE_URL}}`, `{{COMPANY_WEBSITE}}`, `{{ASSISTANT_NAME}}`, `{{CURRENT_DATE}}`, `{{CURRENT_YEAR}}`. **Those are gone.** Company config fields are no longer injected into prompts implicitly; every placeholder must be defined as data.
+
+Two tiers supply values, assistant winning on conflict:
+
+| Tier | Storage | Managed at |
+|---|---|---|
+| Company | `PROMPT_VARIABLES` config key (array of `{key, value}`) | Config → Prompt → Default System Prompt |
+| Assistant | `assistants.assistant_variables` | Assistants → edit → Prompt tab |
+
+Rules:
+
+- Keys are uppercase identifiers (`[A-Z][A-Z0-9_]*`, ≤ 64 chars); matching is case-insensitive, so `{{brand}}` resolves a `BRAND` variable.
+- At most 50 variables per tier; values ≤ 2000 characters.
+- **An unmatched placeholder is left literal** in the resolved prompt and listed in the `missing` array — it is never silently blanked, so gaps are visible instead of quietly deleting prompt text.
+- `CURRENT_DATE` / `CURRENT_YEAR` are no longer auto-computed. Define them as custom variables if you want a value, and remember a stored date goes stale.
+
+Existing tenants predate this change — run `node scripts/backfill-prompt-variables.mjs` (dry run by default, `--apply` to write) to materialize their former built-ins as `PROMPT_VARIABLES` so prompts resolve exactly as before.
 
 ### Get Current Prompt
 
@@ -301,7 +310,7 @@ The system prompt controls how the AI assistant behaves, what rules it follows, 
 GET /cloudflare/prompt
 ```
 
-Returns the current system prompt template, the resolved preview (with variables replaced), and available variables.
+Returns the template, the resolved preview, the merged variable map, each tier separately, and any unresolved placeholders.
 
 **Required Header:** `x-company-name`
 
@@ -319,15 +328,24 @@ curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/prompt
     "resolved": "You are Sarah, an AI assistant for Popularcert...",
     "variables": {
       "CONSULTANT_NAME": "Sarah",
-      "COMPANY_NAME": "Popularcert",
-      "CONTACT_US_URL": "https://popularcert.com/contact-us/",
-      "LOCATIONS_URL": "https://popularcert.com/locations/",
-      "SERVICES_URL": "https://popularcert.com/services/",
-      "BASE_URL": "https://popularcert.com"
-    }
+      "COMPANY_NAME": "Popularcert"
+    },
+    "companyVariables": [
+      { "key": "CONSULTANT_NAME", "value": "Sarah" },
+      { "key": "COMPANY_NAME", "value": "Popularcert" }
+    ],
+    "assistantVariables": [],
+    "missing": []
   }
 }
 ```
+
+| Field | Description |
+|---|---|
+| `variables` | Merged map (company ⊕ assistant, assistant wins) — what the LLM receives |
+| `companyVariables` | The company's `PROMPT_VARIABLES` tier |
+| `assistantVariables` | The selected assistant's own variables |
+| `missing` | Placeholders the template uses that no tier defines (kept literal) |
 
 ### Update Prompt
 
@@ -335,7 +353,7 @@ curl -H "x-company-name: popularcert" http://localhost:3000/cloudflare/prompt
 PUT /cloudflare/prompt
 ```
 
-Updates the system prompt template. Accepts `{{VARIABLE}}` placeholders that are resolved at runtime.
+Updates the system prompt template and, optionally, its variables in the same write.
 
 **Required Header:** `x-company-name`
 
@@ -344,19 +362,15 @@ Updates the system prompt template. Accepts `{{VARIABLE}}` placeholders that are
 curl -X PUT http://localhost:3000/cloudflare/prompt \
   -H "Content-Type: application/json" \
   -H "x-company-name: popularcert" \
-  -d '{"template": "You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}. Be professional and concise. Contact: {{CONTACT_US_URL}}"}'
+  -d '{"template": "You are {{CONSULTANT_NAME}}...", "variables": [{"key": "CONSULTANT_NAME", "value": "Sarah"}]}'
 ```
 
 **Request Body:**
-```json
-{
-  "template": "You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}..."
-}
-```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `template` | string | Yes | The system prompt template with `{{VARIABLE}}` placeholders |
+| `variables` | array | No | `[{key, value}]` replacing `PROMPT_VARIABLES`. Omit to keep the current set. |
 
 **Response (200):**
 ```json
@@ -364,8 +378,12 @@ curl -X PUT http://localhost:3000/cloudflare/prompt \
   "success": true,
   "message": "System prompt updated.",
   "prompt": {
-    "template": "You are {{CONSULTANT_NAME}}, an AI assistant for {{COMPANY_NAME}}...",
-    "resolved": "You are Sarah, an AI assistant for Popularcert..."
+    "template": "You are {{CONSULTANT_NAME}}...",
+    "resolved": "You are Sarah...",
+    "variables": { "CONSULTANT_NAME": "Sarah" },
+    "companyVariables": [{ "key": "CONSULTANT_NAME", "value": "Sarah" }],
+    "assistantVariables": [],
+    "missing": []
   }
 }
 ```
@@ -374,13 +392,14 @@ curl -X PUT http://localhost:3000/cloudflare/prompt \
 ```json
 {
   "success": false,
-  "error": "template must be a non-empty string."
+  "error": "PROMPT_VARIABLES key 'bad key!' is invalid — use letters, digits and underscores, starting with a letter (e.g. BRAND_NAME)."
 }
 ```
 
 ### How It Works
 
-- The template is stored per company as `SYSTEM_PROMPT` in the config store (MySQL `company_config` or `db/<company>.db`)
-- Variables like `{{CONSULTANT_NAME}}` are replaced with live config values at request time
-- If a config value changes (e.g., consultant name), the prompt updates automatically without restarting
-- Use `POST /cloudflare/prompt/reset` to revert to the default template
+- The template is stored per company as `SYSTEM_PROMPT`; its variables as `PROMPT_VARIABLES` (a JSON array) in the config store (MySQL `company_config` or `db/<company>.db`)
+- Both are returned by `GET /cloudflare/config` under the `PROMPT` section
+- Placeholders resolve at request time from the merged tiers; the ask pipeline (`query/prompts.js`) applies the same merge as the Config page preview
+- Editing a variable's value updates the live prompt without a restart
+- Use `POST /cloudflare/prompt/reset` to revert both the template **and** the default variable set

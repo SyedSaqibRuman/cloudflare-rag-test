@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "2a56b64e78be262d",
+        "id": "96d66a080b59002a",
         "type": "tabs",
         "children": [
           {
-            "id": "ecb840b0c71f9d79",
+            "id": "c01124598864b7e6",
             "type": "leaf",
             "state": {
               "type": "graph",
@@ -181,8 +181,10 @@
       "bases:Create new base": false
     }
   },
-  "active": "ecb840b0c71f9d79",
+  "active": "c01124598864b7e6",
   "lastOpenFiles": [
+    "04 - Features/Ask Pipeline.md",
+    "Welcome.md",
     "00 - Home/Documentation Map.md",
     "05 - Data/MySQL Gateway Schema.md",
     "08 - Decisions/ADR - Frozen v5 schema and checksummed migrations.md",
@@ -209,9 +211,7 @@
     "07 - Development/Development Workflow.md",
     "07 - Development/Debugging.md",
     "07 - Development/Common Problems.md",
-    "07 - Development/Coding Standards.md",
     "07 - Development",
-    "06 - Infrastructure/Storage.md",
     "06 - Infrastructure",
     "05 - Data",
     "04 - Features",

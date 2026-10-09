@@ -9,6 +9,7 @@
 import { ModelRepository } from "../repositories.js";
 import * as Registry from "./provider-registry.js";
 import * as Executor from "./provider-executor.js";
+import { testProviderModels } from "./model-tester.js";
 import { genericModelsUrl } from "../routes/probes.js";
 
 export const MODEL_CATEGORIES = ["chat", "embedding", "reranker", "image", "tts", "stt", "vision"];
@@ -50,7 +51,26 @@ export function normalizeModels(models = [], category = "chat") {
  * models is the normalized array; `fetched` counts how many landed in the DB.
  * Throws ExecutorError on network/HTTP issues so the route can surface them.
  */
-export async function fetchProviderModels({ companyKey, providerKey, credentialId = null }) {
+/**
+ * Outage guard for the verified sync: when EVERY (or ~every) advertised chat
+ * model times out with zero responders and no hard failures, the provider is
+ * almost certainly down — not "all models dead". NVIDIA's developer endpoint
+ * flaps in waves (observed repeatedly), and a wave must not be read as a
+ * verdict. A meaningful share of hard failures (404s, 5xx — anything that got
+ * an actual answer) proves the endpoint is up, so the sweep is conclusive.
+ * @param {{ok:number, timeouts:number, failed:number}} summary  tester summary
+ *        (timeouts ⊆ failed — failed counts every non-OK result)
+ * @param {number} advertised  advertised chat-model count
+ * @returns {boolean} true when the sweep is inconclusive
+ */
+export function isSweepInconclusive(summary, advertised) {
+  if (!advertised || summary.ok > 0) return false;
+  const hardFails = (summary.failed ?? 0) - (summary.timeouts ?? 0);
+  if (hardFails / advertised >= 0.1) return false;
+  return (summary.timeouts ?? 0) / advertised >= 0.8;
+}
+
+export async function fetchProviderModels({ companyKey, providerKey, credentialId = null, verify = true }) {
   const { provider, fields } = await Executor.resolveCredentialFields(companyKey, {
     credentialId,
     providerKey,
@@ -91,12 +111,58 @@ export async function fetchProviderModels({ companyKey, providerKey, credentialI
   const models = normalizeModels(raw);
   if (!models.length) return { fetched: 0, providerKey, models: [], skipped: true };
 
-  for (const m of models) {
+  // Verified sync (default): the provider's own /models list is NOT the truth
+  // — NVIDIA advertises chat models whose inference functions no longer exist
+  // (Function '<uuid>': Not found). Probe every advertised chat model with the
+  // batch tester and only upsert models that actually respond; embedding-class
+  // models are upserted untested (a chat ping is the wrong probe for them).
+  // Timeout/capacity failures are NOT dead — the model is dropped from this
+  // sync but will be offered again on the next fetch.
+  let verified = models;
+  let verification = null;
+  if (verify) {
+    const chatKeys = new Set(
+      models.filter((m) => m.category === "chat").map((m) => m.modelKey)
+    );
+    const sweep = await testProviderModels({
+      companyKey,
+      providerKey,
+      credentialId,
+      category: "chat",
+      models: models
+        .filter((m) => m.category === "chat")
+        .map((m) => ({ ...m, id: null })),
+    });
+    const responding = new Set(sweep.results.filter((r) => r.ok).map((r) => r.modelKey));
+    // Outage guard: all-timeouts ≠ all-dead. During a provider outage window
+    // skip the chat upserts entirely and report inconclusive — the catalog is
+    // untouched (fetch is upsert-only anyway) and the user retries later.
+    const inconclusive = isSweepInconclusive(sweep.summary, chatKeys.size);
+    verified = models.filter((m) => (m.category !== "chat" || responding.has(m.modelKey)) && !inconclusive);
+    verification = {
+      chatAdvertised: chatKeys.size,
+      chatResponding: sweep.summary.ok,
+      chatDropped: inconclusive ? 0 : chatKeys.size - sweep.summary.ok,
+      timeouts: sweep.summary.timeouts,
+      inconclusive,
+      results: sweep.results.map((r) => ({ modelKey: r.modelKey, ok: r.ok, statusCode: r.statusCode, error: r.error })),
+    };
+  }
+
+  for (const m of verified) {
     // ModelRepository.upsert is a single atomic statement (ON DUPLICATE KEY) —
     // no transaction needed.
     await ModelRepository.upsert(provider.id, m);
   }
 
   Registry.invalidateRegistry();
-  return { fetched: models.length, providerKey, models };
+  return {
+    fetched: verified.length,
+    providerKey,
+    models: verified,
+    verification,
+    dropped: verification
+      ? models.filter((m) => !verified.includes(m)).map((m) => m.modelKey)
+      : [],
+  };
 }

@@ -8,6 +8,7 @@ import {
   updateConfig,
   resetConfig,
   CONFIG_SECTIONS,
+  PROMPT_VARIABLE_KEYS,
 } from "../../config/index.js";
 
 import { companyFromHeader } from "./helpers.js";
@@ -23,7 +24,14 @@ router.get("/", (req, res) => {
   const config = {};
   for (const { section, keys } of CONFIG_SECTIONS) {
     config[section] = {};
-    for (const key of keys) config[section][key] = c[key] ?? "";
+    for (const key of keys) {
+      // PROMPT_VARIABLES is an array of {key,value} — return it as such rather
+      // than the `?? ""` string fallback used for scalar keys, so the Config
+      // page can render an editor instead of a text input.
+      config[section][key] = PROMPT_VARIABLE_KEYS.includes(key)
+        ? (c[key] || [])
+        : (c[key] ?? "");
+    }
   }
   config.AUTH = { API_KEY_ENABLED: !!c.API_KEY };
   return res.json({ success: true, config });

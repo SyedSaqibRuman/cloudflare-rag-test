@@ -4,6 +4,7 @@ import { getChunk } from "../services/r2.js";
 import { rerankMatches } from "./reranker.js";
 import { buildContext } from "./context.js";
 import { hybridScore, dedupeMatches } from "./scoring.js";
+import { retrieveNonCfContext } from "./kb-retrieval.js";
 
 // --------------------------
 // CONFIGURATION
@@ -25,6 +26,17 @@ const ABSOLUTE_MIN_SCORE = 0.5;
 //   5. slice top 5 → fetch chunks → buildContext
 // --------------------------
 export async function retrieveContext(question, companyName, { indexName = null } = {}) {
+  // ADR-012 Phase 2: when the target index belongs to a non-CF vector store
+  // (Pinecone/Qdrant/Weaviate), query it through the owning KB's own adapters
+  // (vector + embedding). Returns null when the index is CF-owned (or the
+  // KB-driven path can't resolve) → the CF fast-path below runs unchanged.
+  try {
+    const kbResult = await retrieveNonCfContext(question, companyName, indexName, VECTOR_LIMIT);
+    if (kbResult) return kbResult;
+  } catch {
+    /* fall through to the CF path — retrieval must never throw */
+  }
+
   const embeddings = await generateEmbeddings([question], companyName);
   if (!embeddings?.[0]) return { context: null, matches: [] };
 

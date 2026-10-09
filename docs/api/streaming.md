@@ -52,11 +52,13 @@ data: [DONE]
 
 | Event | Description |
 |-------|-------------|
-| `data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}\|null}` | Structured start frame carrying retrieval metadata before the first token (same shapes as the non-streaming `/ask` response) |
+| `data: {"__start":true,"sources":[...],"matches":[...],"graph":{...}\|null}` | Structured start frame carrying retrieval metadata (same shapes as the non-streaming `/ask` response). **Arrives AFTER the tokens**, once the pipeline finishes — see the ordering note below. |
 | `data: {"token":"..."}` | Each streamed token |
 | `data: {"possibleQuestions":[...]}` | 3–5 suggested follow-up questions generated from the answer (small LLM); rendered by the Test AI page as clickable "Suggested questions" chips. Best-effort — omitted/empty on errors, canned fast-path answers, or aborted requests |
 | `data: {"error":"..."}` | Error occurred |
 | `data: [DONE]` | Stream completed successfully |
+
+> **Frame order:** on a RAG answer the tokens stream first and the `__start` metadata frame follows them (`query/answer.js` sends it after the run completes), so clients must not rely on `__start` to clear a "Thinking…" placeholder. On the fast path (greetings, identity, contact) there is no `__start` frame at all — instead the legacy `__START_RESPONSE__` sentinel is emitted as a token, then one token, then `[DONE]`. Filter the sentinel or it renders as visible text. Full integration guide: `docs/api/chat-integration.md`.
 
 > **Legacy frames (still parsed by clients, no longer emitted on the normal path):** the standalone `data: {"sources":[...]}` frame and the `data: {"token":"__START_RESPONSE__"}` sentinel. The transport still sends the sentinel as the preamble of `__start:false` start frames (empty-question / fast-path / error responses); well-behaved clients filter it. The structured `__start` frame above replaced both on RAG answers.
 

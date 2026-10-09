@@ -41,6 +41,15 @@ export class CloudflareVectorAdapter {
   }
 
   async ensureIndex() {
+    // Guard the nameless-resource case: without this, Cloudflare returns a
+    // cryptic 400 "vectorize.index.invalid_name - Index name \"\"" long after
+    // resolveKbAdapters should have caught the empty name (defense in depth —
+    // legacy paths construct the adapter directly).
+    if (!this.vectorIndexName) {
+      throw new Error(
+        "Vectorize index name is not set — bind the KB to a vector resource that carries an index name (external id or config.index_name)."
+      );
+    }
     const dims = this.dimensions || (this.companyName ? getConfig(this.companyName).EMBEDDING_DIMENSIONS : DEFAULT_DIMENSIONS) || DEFAULT_DIMENSIONS;
     await createVectorIndex(this.vectorIndexName, this.companyName, dims);
   }
@@ -159,10 +168,13 @@ export class CloudflareVectorAdapter {
     const idx = indexName || this.vectorIndexName;
     if (!idx) return null;
     try {
-      const res = await getCFClient(this.companyName).vectorize.indexes.get(idx, {
-        account_id: acId,
+      // vectorize.indexes.info() carries vectorCount (indexes.get() returns
+      // only metadata). The SDK's _thenUnwrap already returns the result
+      // object — there is no extra .result layer (2026-09-30 change log).
+      const info = await getCFClient(this.companyName).vectorize.indexes.info(idx, {
+        account_id: accountId(this.companyName),
       });
-      return res?.result?.vectorCount ?? null;
+      return info?.vectorCount ?? null;
     } catch {
       return null;
     }

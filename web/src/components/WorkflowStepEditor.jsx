@@ -102,7 +102,7 @@ export default function WorkflowStepEditor({ steps = [], onChange }) {
     dragRef.current = index;
   };
 
-  const handleDragOver = (e, index) => {
+  const handleDragOver = (e, _index) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
   };

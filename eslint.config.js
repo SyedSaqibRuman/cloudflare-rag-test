@@ -25,6 +25,8 @@ export default [
       // the app (see AGENTS.md), and several are CJS which the ESM parser
       // rejects. Keep them out of the lint pass.
       "scripts/**",
+      // Playwright test runner + ephemeral report/trace artifacts.
+      "playwright/**",
     ],
   },
 
@@ -62,7 +64,7 @@ export default [
       // these (effect-driven loads keyed on one dep); honor them.
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
-      "no-unused-vars": ["error", { varsIgnorePattern: "^_" }],
+      "no-unused-vars": ["error", { varsIgnorePattern: "^_", argsIgnorePattern: "^_" }],
     },
   },
 ];

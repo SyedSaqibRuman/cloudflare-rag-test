@@ -94,6 +94,23 @@ export const CredentialRepository = {
    */
   async create(companyId, input) {
     const pool = await getPool();
+    // Recreate-after-delete: soft-deleted rows are invisible to the app but
+    // still occupy the uk_company_provider_env_cred unique key. Permanently
+    // purge any soft-deleted row that would collide with this insert.
+    // Best-effort: an FK RESTRICT (a live assistant row still referencing the
+    // deleted credential) keeps the row — the INSERT below then fails with
+    // ER_DUP_ENTRY and the route surfaces a 409 instead.
+    try {
+      await pool.query(
+        `DELETE FROM credentials
+          WHERE company_id = ? AND provider_id = ?
+            AND credential_key = ? AND deleted_at IS NOT NULL
+            AND environment_id <=> ?`,
+        [companyId, input.providerId, input.credentialKey, input.environmentId ?? null]
+      );
+    } catch {
+      // A failed purge must not mask the real insert outcome (see above).
+    }
     const [result] = await pool.query(
       `INSERT INTO credentials
          (company_id, provider_id, environment_id, credential_key, credential_name,

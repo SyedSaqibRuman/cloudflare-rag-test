@@ -149,7 +149,7 @@ export async function listEntities(session, { companyName, kbKey, type = null, q
     session,
     `MATCH (e:${ENTITY_LABEL})
      WHERE ${where.join(" AND ")}
-     WITH e SKIP $offset LIMIT $limit
+     WITH e SKIP toInteger($offset) LIMIT toInteger($limit)
      MATCH (e)-[r]-(n:${ENTITY_LABEL})
      RETURN e.id AS id, e.name AS name, e.type AS type, e.aliases AS aliases,
             e.confidence AS confidence, e.created_at AS createdAt, e.updated_at AS updatedAt,

@@ -33,13 +33,16 @@ Best-effort everywhere: missing MySQL, unknown assistant, or any thrown error �
 
 | Concern | With assistant | Without |
 |---|---|---|
-| Static reply identity (identity/contact/discovery copy) | `assistantName` replaces CONSULTANT_NAME in canned responses | consultant default |
-| Fast-path timing | canned path taken **before** assistant resolution (TD-9 nuance) | — |
+| Static reply identity (identity/contact/discovery copy) | `assistantName` replaces the consultant default in canned responses | consultant default |
+| Fast-path timing | assistant resolved **first**; its name feeds the identity fast-path (TD-9 resolved 2026-09-17) | — |
 | Cache key | includes assistantKey segment | empty segment |
 | Rewriter/cache miss? | unchanged SMALL_LLM | unchanged |
-| System prompt | assistant.system_prompt (+variable array merged) | company SYSTEM_PROMPT |
+| System prompt | assistant.system_prompt, `{{VAR}}` resolved from assistant.variables ⊕ company PROMPT_VARIABLES (assistant wins) | company SYSTEM_PROMPT + its PROMPT_VARIABLES |
+| Guardrail prompt | assistant.guardrail_prompt **replaces** the built-in Topic Scope system block (so it must re-include the injection defense) | company GUARDRAIL_PROMPT else built-in |
+| Blocked topics | assistant.blocked_topics (newline-separated substring regexes) refused pre-retrieval; adds to company BLOCKED_TOPICS | company BLOCKED_TOPICS + built-ins |
+| Blocked patterns | assistant.blocked_patterns **fully replaces** the built-in fast-path veto set (literal lines or `/regex/` — see `shared/blocked-patterns.js`; recipes/code personas ship their own set) | company `BLOCKED_PATTERNS` config, else built-ins |
 | History window | same MAX_HISTORY=6 | same |
-| Generation model | assistant.model **only if `@cf/`·`@cloudflare/` prefixed** (`isRunnableModel`) else company LLM_MODEL | LLM_MODEL |
+| Generation model | assistant.model — executed through the gateway provider executor with the assistant's credential when non-`@cf`·non-`@cloudflare` (`execution` binding); Workers AI path for `@cf`/`@cloudflare` keys; company LLM_MODEL only as fallback when no credential is bound | LLM_MODEL |
 | temperature/max_tokens | override else 0.3/500 | 0.3/500 |
 | Retrieval index | primary KB's `vector_external_id` passed as indexName | company VECTOR_INDEX |
 | Graph | enabled flag + database override | implicit if creds exist |
@@ -48,7 +51,7 @@ Best-effort everywhere: missing MySQL, unknown assistant, or any thrown error �
 
 ## Management surfaces
 
-- Portal **Assistants page** (CRUD against `/gateway/assistants*`): binds credential, catalog model, primary KB, graph resource, `enable_graph_context`, assistant_variables ({{KEY}} injections), temperature/max_tokens, activation toggle.
+- Portal **Assistants page** (CRUD against `/gateway/assistants*`): binds credential, catalog model, primary KB, graph resource, `enable_graph_context`, assistant_variables ({{KEY}} injections — override the company tier), system prompt, guardrail prompt + blocked topics + blocked patterns (Prompt tab, guardrails section), temperature/max_tokens, activation toggle. The Prompt tab also shows the company's `PROMPT_VARIABLES` as copyable chips, striking through any the assistant overrides. Company-level blocked patterns live on Config → Security (Blocked Patterns card).
 - Company attach: Config page dropdown writes `ASSISTANT_KEY` (validated `^[a-z0-9-]{3,63}$`).
 - Switching assistants instantly alters answers because resolution happens per ask call (cache keyed accordingly).
 

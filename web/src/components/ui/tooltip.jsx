@@ -46,10 +46,20 @@ export function Tooltip({ children, content, side = "top", className }) {
 
   if (!content) return children;
 
+  // Caller can pass positioning utilities (e.g. "absolute right-3 top-3").
+  // When they do, skip our default `relative` so the caller's `absolute`
+  // wins over our `relative` in Tailwind's CSS source order (`.absolute` is
+  // declared before `.relative`, so adding `relative` later overrides it).
+  const callerIsPositioned = /\b(?:absolute|fixed|sticky)\b/.test(className || "");
+  const wrapClass = cx(
+    callerIsPositioned ? "inline-flex" : "relative inline-flex",
+    className
+  );
+
   return (
     <span
       ref={ref}
-      className={cx("relative inline-flex", className)}
+      className={wrapClass}
       onMouseEnter={() => setShow(true)}
       onMouseLeave={() => setShow(false)}
       onFocus={() => setShow(true)}

@@ -7,7 +7,7 @@ import { resolveCreds, getConfig } from "../config/index.js";
 // --------------------------
 // 🔹 Embed usage logging (best-effort, non-blocking)
 // --------------------------
-async function logEmbedUsage(companyName, { inputTokens = 0, batchSize = 0 } = {}) {
+async function logEmbedUsage(companyName, { inputTokens = 0, batchSize: _batchSize = 0 } = {}) {
   try {
     const { CompanyRepository, CredentialRepository, UsageRepository } = await import("../mysql/repositories.js");
     const company = await CompanyRepository.findByKey(companyName);
@@ -17,7 +17,6 @@ async function logEmbedUsage(companyName, { inputTokens = 0, batchSize = 0 } = {
     const cfCred = creds?.find((c) => c.provider_key === "cloudflare" || c.provider_key === "cloudflare-ai");
 
     const { estimateCost, getPool } = await import("../mysql/services/cost.js");
-    const pool = await getPool();
     let costUsd = 0;
     try {
       const costResult = await estimateCost({
@@ -74,16 +73,14 @@ function cleanString(str = "") {
 // 🔹 Index Management (via Cloudflare SDK)
 // --------------------------
 export async function listVectors(companyName) {
-  try {
-    const res = await getCFClient(companyName).vectorize.indexes.list({
-      account_id: accountId(companyName),
-    });
-    return res?.result || [];
-  } catch (error) {
-    logToFile("error.log", `List vectors error: ${error.message}`);
-    console.error("Error listing vectors:", error);
-    return [];
-  }
+  // Deliberately NOT caught here. A swallowed error used to return [] which
+  // made ensureIndex/createVectorIndex believe an existing index was missing
+  // and attempt a duplicate create — and any caller listing indexes got a
+  // silent empty answer. Callers decide their own failure semantics.
+  const res = await getCFClient(companyName).vectorize.indexes.list({
+    account_id: accountId(companyName),
+  });
+  return res?.result || [];
 }
 
 export async function findVector(name, companyName) {
@@ -202,6 +199,12 @@ export async function upsertVectors(
             type: cleanString(chunk.metadata?.type || ""),
             slug: cleanString(chunk.metadata?.slug || ""),
             chunkIndex: Number(chunk.metadata?.chunkIndex ?? i),
+            // Web-source provenance (set only by the url/website adapter).
+            // Stored but NOT added to metadataIndexes — this is display/audit
+            // data, not a filter, so existing indexes need no change.
+            ...(chunk.metadata?.sourceType ? { sourceType: cleanString(chunk.metadata.sourceType) } : {}),
+            ...(chunk.metadata?.websiteUrl ? { websiteUrl: cleanString(chunk.metadata.websiteUrl) } : {}),
+            ...(chunk.metadata?.lastModified ? { lastModified: cleanString(chunk.metadata.lastModified) } : {}),
           },
         });
       });

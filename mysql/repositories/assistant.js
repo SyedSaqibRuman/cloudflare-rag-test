@@ -59,11 +59,11 @@ export const AssistantRepository = {
       `INSERT INTO assistants
          (company_id, assistant_key, assistant_name, description,
           credential_id, model_id, model_key, system_prompt, assistant_variables,
-          guardrail_prompt, blocked_topics,
+          guardrail_prompt, blocked_topics, blocked_patterns,
           temperature, max_tokens, enable_function_calling, enable_streaming,
           tools, primary_kb_id, kb_ids, enable_graph_context,
           graph_resource_id, is_active, is_public)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.assistantKey,
@@ -76,6 +76,7 @@ export const AssistantRepository = {
         input.variables?.length ? JSON.stringify(input.variables) : null,
         input.guardrailPrompt ?? null,
         input.blockedTopics ?? null,
+        input.blockedPatterns ?? null,
         input.temperature ?? 0.7,
         input.maxTokens ?? 4096,
         input.enableFunctionCalling ?? true,
@@ -104,6 +105,7 @@ export const AssistantRepository = {
       systemPrompt: "system_prompt",
       guardrailPrompt: "guardrail_prompt",
       blockedTopics: "blocked_topics",
+      blockedPatterns: "blocked_patterns",
       variables: "assistant_variables",
       temperature: "temperature",
       maxTokens: "max_tokens",

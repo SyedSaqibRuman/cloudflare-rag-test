@@ -114,6 +114,7 @@ test("resolveAssistantOverrides maps the assistant into pipeline overrides", asy
       systemPrompt: "You are Support Bot.",
       guardrailPrompt: null,
       blockedTopics: null,
+    blockedPatterns: null,
       variables: [],
       model: "@cf/meta/llama-3.1-8b-instruct-fp8",
       temperature: 0.2,

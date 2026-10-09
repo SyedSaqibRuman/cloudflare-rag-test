@@ -1,18 +1,31 @@
 import { useEffect, useState, useCallback } from "react";
-import { logUiToast } from "./api";
+import { pushToast, subscribeNewestToast } from "./toast-store";
 
-// Shared toast state + dispatcher. Every portal page uses this instead of its
-// own local notify/setToast pair, so ALL toasts are recorded to logs/UI.logs
-// on the server (fire-and-forget) — the admin gets an audit trail of every
-// UI notification. toast is { msg, tone } (tone: "green" | "red").
-export function useToast(duration = 3000) {
+// Shared toast hook — thin wrapper over the GLOBAL toast store
+// (toast-store.js + <ToastViewport /> mounted once in App.jsx). Every portal
+// page uses this instead of its own local notify/setToast pair, so toasts:
+//   • survive page-internal navigation (they render in the App-level viewport)
+//   • stack (up to 4) instead of the older one being replaced mid-flight
+//   • are recorded to logs/UI.logs on the server (fire-and-forget) — the
+//     admin gets an audit trail of every UI notification.
+// `toast` is { msg, tone } — the newest toast, kept for the legacy
+// <Toast message={toast?.msg} tone={toast?.tone} /> render sites.
+// notify(msg, tone) keeps its original signature.
+export function useToast(duration = 3500) {
   const [toast, setToast] = useState(null);
 
-  const notify = (msg, tone = "green") => {
-    setToast({ msg, tone });
-    if (msg) logUiToast(msg, tone);
-    setTimeout(() => setToast(null), duration);
-  };
+  useEffect(() => {
+    // Mirror the newest global toast into this hook's local view so legacy
+    // <Toast message={toast?.msg} /> renders stay meaningful.
+    return subscribeNewestToast(setToast);
+  }, []);
+
+  const notify = useCallback(
+    (msg, tone = "green") => {
+      pushToast(msg, tone, { ttl: duration });
+    },
+    [duration]
+  );
 
   return { toast, notify };
 }

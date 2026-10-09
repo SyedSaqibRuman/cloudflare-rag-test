@@ -839,7 +839,7 @@ test("POST assistant saves enableFunctionCalling and tools", async () => {
   ];
   const server = await listen(makeApp());
   try {
-    const { res, json } = await req(server, "POST", "/gateway/assistants", {
+    const { res } = await req(server, "POST", "/gateway/assistants", {
       ...VALID_BODY,
       enableFunctionCalling: true,
       tools,
@@ -860,7 +860,7 @@ test("PUT assistant updates tools and enableFunctionCalling", async () => {
   ];
   const server = await listen(makeApp());
   try {
-    const { res, json } = await req(server, "PUT", "/gateway/assistants/sales-bot", {
+    const { res } = await req(server, "PUT", "/gateway/assistants/sales-bot", {
       enableFunctionCalling: true,
       tools,
     }, HEADERS);
@@ -909,7 +909,7 @@ test("GET /gateway/public/assistants/:key returns 404 for non-public assistant",
   publicApp.use("/gateway/public", publicRoutes);
   const server = await listen(publicApp);
   try {
-    const { res, json } = await req(server, "GET", "/gateway/public/assistants/sales-bot", undefined, HEADERS);
+    const { res } = await req(server, "GET", "/gateway/public/assistants/sales-bot", undefined, HEADERS);
     assert.equal(res.status, 404);
   } finally {
     restoreCompany();
@@ -918,44 +918,87 @@ test("GET /gateway/public/assistants/:key returns 404 for non-public assistant",
   }
 });
 
-// -------- M3: VARIABLES INTERPOLATION -------------------------------------
+// -------- M3: PROMPT VARIABLE RESOLUTION -----------------------------------
+//
+// The resolver used to inject nine implicit built-ins (CONSULTANT_NAME,
+// COMPANY_NAME, the four URLs, COMPANY_WEBSITE, ASSISTANT_NAME, CURRENT_DATE,
+// CURRENT_YEAR). They are gone: assistant/company CUSTOM variables are the only
+// source, and an unmatched {{PLACEHOLDER}} stays literal. The rules live in
+// shared/prompt-variables.js so the portal resolves previews identically.
 
-test("resolvePromptVariables handles custom assistant variables", async () => {
+test("resolvePromptVariables expands only custom variables", async () => {
   const { resolvePromptVariables } = await import("../../config/prompts.js");
-  const template = "Hello {{CUSTOM_VAR}}, welcome to {{COMPANY_NAME}}!";
-  const result = resolvePromptVariables(template, { COMPANY_NAME: "TestCo" }, {
-    variables: [{ key: "CUSTOM_VAR", value: "World" }],
+  const template = "Hello {{CUSTOM_VAR}}, call {{PHONE}}.";
+  const result = resolvePromptVariables(template, null, {
+    variables: [
+      { key: "CUSTOM_VAR", value: "World" },
+      { key: "PHONE", value: "555-0100" },
+    ],
   });
-  assert.equal(result, "Hello World, welcome to TestCo!");
+  assert.equal(result, "Hello World, call 555-0100.");
 });
 
-test("resolvePromptVariables adds CURRENT_DATE and CURRENT_YEAR", async () => {
+test("resolvePromptVariables no longer expands any built-in variable", async () => {
   const { resolvePromptVariables } = await import("../../config/prompts.js");
-  const template = "Today is {{CURRENT_DATE}} in {{CURRENT_YEAR}}.";
-  const result = resolvePromptVariables(template, {});
-  const year = new Date().getFullYear().toString();
-  assert.match(result, /^Today is \d{4}-\d{2}-\d{2} in /);
-  assert.match(result, new RegExp(year));
+  // A full company config is passed exactly as the old API expected — none of
+  // these may resolve, because they are no longer built-in.
+  const config = {
+    COMPANY_NAME: "TestCo",
+    CONSULTANT_NAME: "Sarah",
+    BASE_URL: "https://example.com",
+    CONTACT_US_URL: "https://example.com/contact",
+    LOCATIONS_URL: "https://example.com/locations",
+    SERVICES_URL: "https://example.com/services",
+  };
+  const template = "{{CONSULTANT_NAME}}|{{COMPANY_NAME}}|{{BASE_URL}}|{{COMPANY_WEBSITE}}|{{ASSISTANT_NAME}}|{{CURRENT_DATE}}|{{CURRENT_YEAR}}";
+  const result = resolvePromptVariables(template, config, { assistantName: "Neo" });
+  assert.equal(result, template);
+});
+
+test("resolvePromptVariables lets a custom variable shadow a former built-in name", async () => {
+  const { resolvePromptVariables } = await import("../../config/prompts.js");
+  const result = resolvePromptVariables("You are {{CONSULTANT_NAME}}.", null, {
+    variables: [{ key: "CONSULTANT_NAME", value: "Neo" }],
+  });
+  assert.equal(result, "You are Neo.");
 });
 
 test("resolvePromptVariables preserves unmatched placeholders", async () => {
   const { resolvePromptVariables } = await import("../../config/prompts.js");
-  const template = "Hello {{COMPANY_NAME}} and {{UNKNOWN}}.";
-  const result = resolvePromptVariables(template, { COMPANY_NAME: "found" });
-  assert.equal(result, "Hello found and {{UNKNOWN}}.");
+  const result = resolvePromptVariables("Hello {{MISSING}} and {{BRAND}}.", null, {
+    variables: [{ key: "BRAND", value: "Acme" }],
+  });
+  assert.equal(result, "Hello {{MISSING}} and Acme.");
 });
 
-test("resolvePromptVariables returns empty string for null template", async () => {
+test("resolvePromptVariables falls back to the company PROMPT_VARIABLES tier", async () => {
   const { resolvePromptVariables } = await import("../../config/prompts.js");
-  assert.equal(resolvePromptVariables(null, {}), "");
-  assert.equal(resolvePromptVariables(undefined, {}), "");
+  const config = {
+    PROMPT_VARIABLES: [{ key: "BRAND", value: "Acme" }, { key: "CITY", value: "Berlin" }],
+  };
+  // No assistant tier at all → company variables resolve.
+  assert.equal(
+    resolvePromptVariables("{{BRAND}} / {{CITY}}", config),
+    "Acme / Berlin"
+  );
+  // Assistant tier wins on conflict, and company-only keys survive.
+  assert.equal(
+    resolvePromptVariables("{{BRAND}} / {{CITY}}", config, {
+      variables: [{ key: "BRAND", value: "Acme Recipes" }],
+    }),
+    "Acme Recipes / Berlin"
+  );
+});
+
+test("resolvePromptVariables returns an empty string for a null template", async () => {
+  const { resolvePromptVariables } = await import("../../config/prompts.js");
+  assert.equal(resolvePromptVariables(null, null, { variables: [{ key: "A", value: "b" }] }), "");
 });
 
 test("assistant overrides with variables are passed to the pipeline", async () => {
   // This test verifies the structure of the resolved assistant overrides.
   // Note: we cannot stub ES module exports directly, so we test the
   // function's behavior by checking the DB query and parsing logic.
-  const { resolveAssistantOverrides } = await import("../../query/assistant.js");
   const restoreCompany = stub(CompanyRepository, "findByKey", async () => COMPANY);
   const restoreAssistant = stub(AssistantRepository, "findByKey", async () => ({
     ...EXISTING,
@@ -979,7 +1022,6 @@ test("assistant overrides with variables are passed to the pipeline", async () =
 
 test("assistant overrides include enableFunctionCalling and tools", async () => {
   // Verify the assistant repository returns the right shape for tools parsing.
-  const { resolveAssistantOverrides } = await import("../../query/assistant.js");
   const tools = [{ type: "function", function: { name: "test_tool" } }];
   const restoreCompany = stub(CompanyRepository, "findByKey", async () => COMPANY);
   const restoreAssistant = stub(AssistantRepository, "findByKey", async () => ({
