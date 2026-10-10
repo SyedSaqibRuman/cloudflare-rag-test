@@ -93,3 +93,43 @@ temp/
 # --------------------------
 
 .graphify/
+
+# --------------------------
+# 🔹 Ad-hoc dev / experiment scripts & probes (unreferenced one-offs)
+# --------------------------
+# NOTE: auth-clerk.js and scripts/backfill-prompt-variables.mjs are REAL modules
+# (imported by routes/auth.js / documented) — do NOT ignore them; commit them.
+scripts/cleanup-web-auto-stale-vectors.mjs
+scripts/clerk-e2e-check.mjs
+scripts/clerk-e2e-user.mjs
+scripts/e2e-kb-cron-fire.mjs
+scripts/e2e-kb-cron-pause.mjs
+scripts/e2e-kb-health-lifecycle.mjs
+scripts/e2e-kb-health-matrix.mjs
+scripts/e2e-kb-health-tenants.mjs
+scripts/e2e-xss-preview.mjs
+scripts/probe-maxicert-rest.mjs
+scripts/tmp-ask-list-recipes.mjs
+scripts/tmp-mint-token.mjs
+pc-create-index-tmp.mjs
+
+# --------------------------
+# 🔹 Chat / conversation dumps
+# --------------------------
+processed/
+
+# --------------------------
+# 🔹 Issue tracker (.scratch) — markdown issues are tracked
+#    (see docs/agents/issue-tracker.md); screenshots/scratch artifacts are not.
+# --------------------------
+.scratch/**/*.png
+.scratch/**/*.jpg
+.scratch/**/*.jpeg
+.scratch/**/*.gif
+.scratch/**/*.webp
+.scratch/**/*.pdf
+.scratch/**/*.docx
+.scratch/**/*.txt
+.scratch/**/*.cjs
+.scratch/**/*.mjs
+
