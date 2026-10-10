@@ -4,6 +4,7 @@
 // --------------------------
 import { getPool } from "../pool.js";
 import { mapRow } from "./helpers.js";
+import { KB_DEFAULT_SOURCE_TYPE } from "../../shared/catalog-enums.js";
 
 // ------------------------------------------------------------------
 const KB_SELECT = `SELECT k.*,
@@ -49,6 +50,76 @@ export const KbRepository = {
     return rows[0] ? mapRow(rows[0]) : null;
   },
 
+  /**
+   * Live (non-deleted) KBs of any company that bind the given provider_resource
+   * id as their vector / graph / storage resource. Powers the delete guard in
+   * mysql/routes/shared-helpers.js (assertResourceNotKbBound): a resource that
+   * a KB still points at must not be deletable — a stale pointer makes ingest
+   * fail with "Vector store is not configured".
+   * @param {number|string} resourceId
+   * @returns {Promise<Array<{ id: number, kb_key: string, kb_name: string, company_id: number }>>}
+   */
+  async listByResource(resourceId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, kb_key, kb_name, company_id,
+              vector_resource_id, graph_resource_id, storage_resource_id
+         FROM knowledge_bases
+        WHERE deleted_at IS NULL
+          AND (vector_resource_id = ? OR graph_resource_id = ? OR storage_resource_id = ?)
+        ORDER BY kb_key`,
+      [resourceId, resourceId, resourceId]
+    );
+    return rows.map(mapRow);
+  },
+
+  /**
+   * Live KBs (any company) whose bound VECTOR resource's external id equals
+   * `externalId` (e.g. a Vectorize index name). Cloudflare index lists carry
+   * no stable id, so the legacy index routes match KB bindings through the
+   * gateway resource rows instead (2026-09-30 index-guard).
+   * @param {string} externalId
+   * @returns {Promise<Array<{ id, kb_key, kb_name, company_id }>>}
+   */
+  async listByVectorExternalId(externalId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT kb.id, kb.kb_key, kb.kb_name, kb.company_id
+         FROM knowledge_bases kb
+         JOIN provider_resources pr ON pr.id = kb.vector_resource_id
+        WHERE kb.deleted_at IS NULL
+          AND pr.external_resource_id = ?
+        ORDER BY kb.kb_key`,
+      [externalId]
+    );
+    return rows;
+  },
+
+  /**
+   * Null out every KB binding (vector/graph/storage_resource_id) that points
+   * at the given provider_resource id, across live KBs of all companies. Used
+   * by destructive paths that cannot be blocked — the force provider delete
+   * purge — so no KB is left with a dangling resource pointer (which makes
+   * ingest fail with "Resource #N not found"). Returns the number of KB rows
+   * that had a binding cleared.
+   * @param {number|string} resourceId
+   * @returns {Promise<number>}
+   */
+  async clearResourceBinding(resourceId) {
+    const pool = await getPool();
+    const [result] = await pool.query(
+      `UPDATE knowledge_bases
+          SET vector_resource_id  = IF(vector_resource_id  = ?, NULL, vector_resource_id),
+              graph_resource_id   = IF(graph_resource_id   = ?, NULL, graph_resource_id),
+              storage_resource_id = IF(storage_resource_id = ?, NULL, storage_resource_id),
+              updated_at = NOW()
+        WHERE deleted_at IS NULL
+          AND (vector_resource_id = ? OR graph_resource_id = ? OR storage_resource_id = ?)`,
+      [resourceId, resourceId, resourceId, resourceId, resourceId, resourceId]
+    );
+    return result.affectedRows || 0;
+  },
+
   async create(companyId, input) {
     const pool = await getPool();
     const [result] = await pool.query(
@@ -58,8 +129,9 @@ export const KbRepository = {
           embedding_model_id, embedding_model_provider,
           chunk_size, chunk_overlap, retrieval_top_k, retrieval_score_threshold,
           enable_graph_rag, enable_hybrid_search, source_type, status, is_active,
+          graph_extract_max_chunks, graph_extract_concurrency,
           webhook_url, webhook_secret, webhook_events, source_config)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.kbKey,
@@ -76,9 +148,11 @@ export const KbRepository = {
         input.retrievalScoreThreshold ?? 0.7,
         input.enableGraphRag ?? false,
         input.enableHybridSearch ?? true,
-        input.sourceType ?? "wordpress",
+        input.sourceType ?? KB_DEFAULT_SOURCE_TYPE,
         input.status ?? "active",
         input.isActive ?? true,
+        input.graphExtractMaxChunks ?? null,
+        input.graphExtractConcurrency ?? null,
         input.webhookUrl ?? null,
         input.webhookSecret ?? null,
         input.webhookEvents ?? null,
@@ -103,6 +177,8 @@ export const KbRepository = {
       retrievalTopK: "retrieval_top_k",
       retrievalScoreThreshold: "retrieval_score_threshold",
       enableGraphRag: "enable_graph_rag",
+      graphExtractMaxChunks: "graph_extract_max_chunks",
+      graphExtractConcurrency: "graph_extract_concurrency",
       enableHybridSearch: "enable_hybrid_search",
       sourceType: "source_type",
       sourceConfig: "source_config",
@@ -140,6 +216,14 @@ export const KbRepository = {
     await pool.query(`UPDATE knowledge_bases SET status = ? WHERE id = ?`, [status, kbId]);
   },
 
+  /** Flip a KB out of "indexing" (e.g. to "active") when a run stops or pauses
+      — abort deliberately leaves the row untouched (D12), so callers recover
+      it best-effort. */
+  async clearIndexingStatus(kbId) {
+    const pool = await getPool();
+    await pool.query(`UPDATE knowledge_bases SET status = 'active' WHERE id = ? AND status = 'indexing'`, [kbId]);
+  },
+
   /** Persist ingestion statistics from the last completed run. */
   /** Update source_config (JSON blob for URL/file sources). */
   async setSourceConfig(kbId, config) {
@@ -160,6 +244,8 @@ export const KbRepository = {
          last_ingestion_documents_skipped = ?,
          last_ingestion_chunks_created = ?,
          last_ingestion_mode = ?,
+         last_ingestion_embedding_fallbacks = ?,
+         last_ingestion_embedding_error = ?,
          last_error = NULL
        WHERE id = ?`,
       [
@@ -168,6 +254,8 @@ export const KbRepository = {
         stats.documentsSkipped ?? null,
         stats.chunksCreated ?? null,
         stats.mode ?? null,
+        stats.embeddingFallbacks ?? null,
+        stats.embeddingAdapterError ?? null,
         kbId,
       ]
     );

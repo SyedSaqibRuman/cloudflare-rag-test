@@ -158,5 +158,17 @@ export const ModelRepository = {
     const [result] = await pool.query(`DELETE FROM provider_models WHERE id = ?`, [id]);
     return result.affectedRows > 0;
   },
+
+  /**
+   * Hard delete EVERY model of one provider ("Delete All Models" bulk action).
+   * Pricing and credential_model_access rows CASCADE with each model, so
+   * tenant grants for the provider disappear with it. Returns the number of
+   * models removed.
+   */
+  async removeByProvider(providerId) {
+    const pool = await getPool();
+    const [result] = await pool.query(`DELETE FROM provider_models WHERE provider_id = ?`, [providerId]);
+    return result.affectedRows;
+  },
 };
 

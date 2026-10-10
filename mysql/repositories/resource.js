@@ -233,5 +233,28 @@ export const ResourceRepository = {
     const [result] = await pool.query(`DELETE FROM provider_resources WHERE id = ?`, [id]);
     return result.affectedRows > 0;
   },
+
+  /**
+   * Find a resource row by its external_resource_id (the actual Cloudflare
+   * resource name) scoped to a company and optional resource_type.  Used by
+   * the KB service to resolve live resource names into owned provider_resources
+   * rows.
+   */
+  async findByExternalId(companyId, externalId, resourceType) {
+    const pool = await getPool();
+    const typeFilter = resourceType ? `AND pr.resource_type = ?` : "";
+    const args = resourceType ? [companyId, externalId, resourceType] : [companyId, externalId];
+    const [rows] = await pool.query(
+      `SELECT pr.id, pr.company_id, pr.resource_type, pr.resource_name,
+              pr.external_resource_id
+         FROM provider_resources pr
+        WHERE pr.company_id = ? AND pr.external_resource_id = ?
+          ${typeFilter}
+          AND pr.is_active = TRUE AND pr.deleted_at IS NULL
+        LIMIT 1`,
+      args
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  },
 };
 
