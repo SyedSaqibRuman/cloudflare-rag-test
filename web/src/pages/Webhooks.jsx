@@ -50,6 +50,7 @@ export default function Webhooks() {
   };
 
   // Reload on company change
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload on company change; load only reads `company`
   useEffect(() => { load(); }, [company]);
 
   const openCreate = () => {
