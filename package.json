@@ -2,7 +2,7 @@
   "type": "module",
   "scripts": {
     "start": "node app.js",
-    "dev": "nodemon app.js",
+    "dev": "node app.js",
     "mcp": "node mcp/index.js",
     "test": "node --test \"config/__tests__/*.test.js\" \"query/__tests__/*.test.js\" \"cron/__tests__/*.test.js\" \"ingest/__tests__/*.test.js\" \"routes/__tests__/*.test.js\" \"mysql/__tests__/*.test.js\" \"services/__tests__/*.test.js\" \"web/src/**/__tests__/*.test.js\" \"knowledge/__tests__/*.test.js\" \"mcp/__tests__/*.test.js\" \"shared/__tests__/*.test.js\"",
     "lint": "eslint ."
