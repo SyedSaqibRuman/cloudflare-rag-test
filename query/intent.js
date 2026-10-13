@@ -1,4 +1,52 @@
 import { buildResponses } from "./prompts.js";
+import { getConfig } from "../config/index.js";
+import { resolveBlockedPatterns } from "../shared/blocked-patterns.js";
+
+/** Escape a string so it can be used inside a RegExp as a literal substring. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Parse a newline-separated blocked-topics string ("topic A\ntopic B") into
+ * case-insensitive substring regexes. Unparseable lines are skipped.
+ */
+function parseBlockedTopics(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const regexes = [];
+  for (const line of raw.split("\n")) {
+    const topic = line.trim();
+    if (!topic) continue;
+    try {
+      regexes.push(new RegExp(escapeRegExp(topic), "i"));
+    } catch {
+      /* skip unparseable line */
+    }
+  }
+  return regexes;
+}
+
+/**
+ * True when the question contains any topic from a blocked-topics string.
+ * Shared by the company config check and the per-assistant guardrail check
+ * (an assistant's BLOCKED_TOPICS adds to — never replaces — company patterns).
+ */
+export const matchesBlockedTopics = (q, blockedTopics) =>
+  parseBlockedTopics(blockedTopics).some((p) => p.test(q));
+
+/**
+ * The company's BLOCKED_TOPICS substring vetoes — always apply on top of
+ * whichever blocked-pattern tier resolved (they are plain keywords, not
+ * replaceable policy).
+ */
+function companyBlockedTopics(companyName) {
+  if (!companyName) return [];
+  try {
+    return parseBlockedTopics(getConfig(companyName)?.BLOCKED_TOPICS);
+  } catch {
+    return [];
+  }
+}
 
 // --------------------------
 // REGEX PATTERNS
@@ -23,11 +71,15 @@ const PLAIN_GREETING_REGEX =
 // --------------------------
 // INTENT PATTERNS
 // --------------------------
-const BLOCKED_PATTERNS = [
-  /write.*poem/i, /tell.*joke/i, /write.*story/i, /generate.*code/i,
-  /\bmovie\b/i, /\bsong\b/i, /\brecipe\b/i,
-  /^(test|testing|ping|hello world|dummy|sample|asdf|qwerty|foo|bar)$/i,
-];
+// The blocked-pattern set is CONFIGURABLE, not hardcoded: it resolves per ask
+// through shared/blocked-patterns.js — assistant.blocked_patterns > company
+// BLOCKED_PATTERNS > BUILT_IN_BLOCKED_PATTERN_LINES (the former hardcoded
+// BLOCKED_PATTERNS array, now just the fallback tier). BLOCKED_TOPICS below
+// keeps its old role: plain substring vetoes that ALWAYS apply on top of
+// whichever pattern tier resolved.
+// Test-string gate (test/asdf/foo…) is infrastructure hygiene, not topic
+// policy: it stays ANCHORED full-match and always applies regardless of tier.
+const TEST_STRING_REGEX = /^(test|testing|ping|hello world|dummy|sample|asdf|qwerty|foo|bar)$/i;
 
 const CONTACT_PATTERNS = [
   /\b(contact|call me|call us|reach out|reach us)\b/i,
@@ -36,7 +88,12 @@ const CONTACT_PATTERNS = [
   /\b(pricing inquiry|request pricing|pricing details)\b/i,
   /\b(phone number|mobile number|email address|whatsapp number)\b/i,
   /\b(cost|costs|price|prices|pricing|fee|fees|charge|charges|how much|expense|expenses|affordable|cheap|rate|rates)\b/i,
-  /\b(ceo|cto|coo|founder|owner|director|chairman|who (is|runs|owns|founded|leads))\b/i,
+  /\b(ceo|cto|coo|founder|owner|director|chairman)\b/i,
+  // "who runs/owns/founded/leads …" is always contact-ish, but a bare "who is …"
+  // is usually a CONTENT question ("who is the author of this book") — require
+  // a person-role word after "who is" instead of matching every "who is" query.
+  /\bwho\s+(runs|owns|founded|leads)\b/i,
+  /\bwho\s+is\s+(the\s+)?(ceo|cto|coo|founder|owner|director|chairman|consultant|expert|agent|person\s+in\s+charge)\b/i,
 ];
 
 const IDENTITY_PATTERNS = [
@@ -65,7 +122,24 @@ export const isOfficeQuery = (q) => OFFICE_PATTERNS.some((p) => p.test(q));
 export const isHelpQuery = (q) => HELP_PATTERNS.some((p) => p.test(q));
 export const isIdentityQuery = (q) => IDENTITY_PATTERNS.some((p) => p.test(q));
 export const isContactQuery = (q) => CONTACT_PATTERNS.some((p) => p.test(q));
-export const isBusinessQuery = (q) => !BLOCKED_PATTERNS.some((p) => p.test(q));
+export const isBusinessQuery = (q, companyName = null, patterns = null) => {
+  if (TEST_STRING_REGEX.test(q.trim())) return false;
+  // Default tier when the caller didn't resolve one: company BLOCKED_PATTERNS
+  // (configurable) else the built-ins — shared/blocked-patterns.js owns the
+  // tiering. Best-effort: unknown companies fall through to built-ins without
+  // throwing (getConfig throws COMPANY_NOT_FOUND for unknown names).
+  let companyPatterns = null;
+  if (companyName && !patterns) {
+    try {
+      companyPatterns = getConfig(companyName)?.BLOCKED_PATTERNS ?? null;
+    } catch {
+      companyPatterns = null;
+    }
+  }
+  const effective = patterns ?? resolveBlockedPatterns(null, companyPatterns);
+  if (effective.some((p) => p.test(q))) return false;
+  return !companyBlockedTopics(companyName).some((p) => p.test(q));
+};
 export const isDiscoveryQuery = (q) => DISCOVERY_PATTERNS.some((p) => p.test(q));
 
 // Strips greeting/intro filler, then checks if remainder is too short with no intent words.
@@ -73,6 +147,7 @@ export const isDiscoveryQuery = (q) => DISCOVERY_PATTERNS.some((p) => p.test(q))
 export function isVagueQuery(question) {
   const stripped = question.replace(GREETING_PREFIX_REGEX, "").trim();
   if (!stripped) return false;
+  // Intentional ASCII-range check (non-Latin scripts bypass).
   if (/[^\u0000-\u007F]/.test(stripped)) return false;
   return stripped.length <= 30 && !QUESTION_WORDS_REGEX.test(stripped);
 }
@@ -80,8 +155,8 @@ export function isVagueQuery(question) {
 // --------------------------
 // FAST PATH CHECK
 // --------------------------
-export function checkFastPath(question, companyName) {
-  const R = buildResponses(companyName);
+export function checkFastPath(question, companyName, assistantName = null, assistantOverrides = null) {
+  const R = buildResponses(companyName, assistantName);
   if (!question || question.length <= 1) return R.invalid;
   if (PLAIN_GREETING_REGEX.test(question)) return R.greeting;
 
@@ -93,7 +168,20 @@ export function checkFastPath(question, companyName) {
   }
 
   if (isIdentityQuery(question)) return R.identity;
-  if (!isBusinessQuery(question)) return R.blocked;
+  // Effective blocked-pattern tier: assistant.blockedPatterns > company
+  // BLOCKED_PATTERNS > built-ins (shared/blocked-patterns.js owns the layering);
+  // isBusinessQuery also enforces the always-on test-string gate and the
+  // company's BLOCKED_TOPICS substring vetoes on top of the tier.
+  let companyPatterns = null;
+  if (companyName) {
+    try {
+      companyPatterns = getConfig(companyName)?.BLOCKED_PATTERNS ?? null;
+    } catch {
+      companyPatterns = null;
+    }
+  }
+  const patterns = resolveBlockedPatterns(assistantOverrides?.blockedPatterns ?? null, companyPatterns);
+  if (!isBusinessQuery(question, companyName, patterns)) return R.blocked;
   if (isContactQuery(question)) return R.contact;
   if (isDiscoveryQuery(question)) return R.discovery;
   if (isOfficeQuery(question)) return R.office;

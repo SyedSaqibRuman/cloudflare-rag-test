@@ -4,8 +4,10 @@
 // (ResourceConfigFields).
 // --------------------------
 import { useState } from "react";
-import { Badge, Input, Select } from "../../components/ui";
+import { Input, Select } from "../../components/ui";
 
+// Config-schema driven inputs for the resource provisioning form
+// (provider_resource_types.config_schema drives the fields).
 export function ResourceConfigFields({ schema, values, onChange }) {
   if (!schema || typeof schema !== "object") return null;
   const entries = Object.entries(schema);
@@ -56,12 +58,6 @@ function parseOptions(raw) {
   }
 }
 
-export function statusBadge(c) {
-  if (c.last_verification_status === "success") return <Badge tone="green">verified</Badge>;
-  if (c.last_verification_status === "failed") return <Badge tone="red">failed</Badge>;
-  return <Badge tone="slate">unverified</Badge>;
-}
-
 // Dynamic field list rendered from a provider's auth schema (provider_auth_schemas).
 
 export function AuthFields({ schema, values, onChange }) {
@@ -105,6 +101,7 @@ export function AuthFields({ schema, values, onChange }) {
             <PasswordField
               key={f.field_name}
               label={label}
+              placeholder={f.placeholder || ""}
               value={values[f.field_name] || ""}
               onChange={(e) => onChange(f.field_name, e.target.value)}
             />
@@ -115,6 +112,7 @@ export function AuthFields({ schema, values, onChange }) {
             key={f.field_name}
             label={label}
             type={f.field_type === "url" ? "url" : "text"}
+            placeholder={f.placeholder || ""}
             value={values[f.field_name] || ""}
             onChange={(e) => onChange(f.field_name, e.target.value)}
             autoComplete="off"
@@ -129,7 +127,7 @@ export function AuthFields({ schema, values, onChange }) {
 // Password input with an inline show/hide eye toggle — same pattern as the
 // login page. One toggle per field (each password field has its own state).
 
-function PasswordField({ label, value, onChange }) {
+function PasswordField({ label, placeholder, value, onChange }) {
   const [show, setShow] = useState(false);
   return (
     <label className="block">
@@ -138,6 +136,7 @@ function PasswordField({ label, value, onChange }) {
         <input
           type={show ? "text" : "password"}
           value={value}
+          placeholder={placeholder || ""}
           onChange={onChange}
           autoComplete="off"
           spellCheck="false"

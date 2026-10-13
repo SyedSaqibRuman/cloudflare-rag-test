@@ -5,6 +5,47 @@ import { chunkArray } from "../utils/helpers.js";
 import { resolveCreds, getConfig } from "../config/index.js";
 
 // --------------------------
+// 🔹 Embed usage logging (best-effort, non-blocking)
+// --------------------------
+async function logEmbedUsage(companyName, { inputTokens = 0, batchSize: _batchSize = 0 } = {}) {
+  try {
+    const { CompanyRepository, CredentialRepository, UsageRepository } = await import("../mysql/repositories.js");
+    const company = await CompanyRepository.findByKey(companyName);
+    if (!company) return;
+
+    const creds = await CredentialRepository.listByCompany(company.id);
+    const cfCred = creds?.find((c) => c.provider_key === "cloudflare" || c.provider_key === "cloudflare-ai");
+
+    const { estimateCost, getPool } = await import("../mysql/services/cost.js");
+    let costUsd = 0;
+    try {
+      const costResult = await estimateCost({
+        modelKey: getConfig(companyName).EMBEDDING_MODEL || "@cf/baai/bge-base-en-v1.5",
+        inputTokens,
+        outputTokens: 0,
+        getPool,
+      });
+      costUsd = costResult.costUsd;
+    } catch { /* pricing unavailable */ }
+
+    await UsageRepository.log({
+      companyId: company.id,
+      credentialId: cfCred?.id || null,
+      action: "ingest.embed",
+      modelUsed: getConfig(companyName).EMBEDDING_MODEL || "@cf/baai/bge-base-en-v1.5",
+      inputUnits: inputTokens || null,
+      outputUnits: null,
+      durationMs: null,
+      costUsd: costUsd || null,
+      responseStatus: 200,
+      requestId: null,
+    });
+  } catch {
+    // Best-effort — usage logging must never disrupt ingestion
+  }
+}
+
+// --------------------------
 // 🔹 Config
 // --------------------------
 const DIMENSIONS = 768;
@@ -32,16 +73,14 @@ function cleanString(str = "") {
 // 🔹 Index Management (via Cloudflare SDK)
 // --------------------------
 export async function listVectors(companyName) {
-  try {
-    const res = await getCFClient(companyName).vectorize.indexes.list({
-      account_id: accountId(companyName),
-    });
-    return res?.result || [];
-  } catch (error) {
-    logToFile("error.log", `List vectors error: ${error.message}`);
-    console.error("Error listing vectors:", error);
-    return [];
-  }
+  // Deliberately NOT caught here. A swallowed error used to return [] which
+  // made ensureIndex/createVectorIndex believe an existing index was missing
+  // and attempt a duplicate create — and any caller listing indexes got a
+  // silent empty answer. Callers decide their own failure semantics.
+  const res = await getCFClient(companyName).vectorize.indexes.list({
+    account_id: accountId(companyName),
+  });
+  return res?.result || [];
 }
 
 export async function findVector(name, companyName) {
@@ -160,6 +199,12 @@ export async function upsertVectors(
             type: cleanString(chunk.metadata?.type || ""),
             slug: cleanString(chunk.metadata?.slug || ""),
             chunkIndex: Number(chunk.metadata?.chunkIndex ?? i),
+            // Web-source provenance (set only by the url/website adapter).
+            // Stored but NOT added to metadataIndexes — this is display/audit
+            // data, not a filter, so existing indexes need no change.
+            ...(chunk.metadata?.sourceType ? { sourceType: cleanString(chunk.metadata.sourceType) } : {}),
+            ...(chunk.metadata?.websiteUrl ? { websiteUrl: cleanString(chunk.metadata.websiteUrl) } : {}),
+            ...(chunk.metadata?.lastModified ? { lastModified: cleanString(chunk.metadata.lastModified) } : {}),
           },
         });
       });
@@ -167,12 +212,17 @@ export async function upsertVectors(
       const ndjson = lines.join("\n") + "\n";
 
       // --------------------------
+      // 🔹 Log usage for embedding batch (best-effort)
+      // --------------------------
+      logEmbedUsage(companyName, { inputTokens: texts.join(" ").length, batchSize: batch.length }).catch(() => {});
+
+      // --------------------------
       // 🔹 Upsert via SDK
       // --------------------------
       const vectorIndex = indexName;
       if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
-      const res = await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
+      await getCFClient(companyName).vectorize.indexes.upsert(vectorIndex, {
         account_id: accountId(companyName),
         "unparsable-behavior": "error",
         body: ndjson,
@@ -196,9 +246,9 @@ export async function upsertVectors(
 // --------------------------
 // 🔹 Vector Query
 // --------------------------
-export async function vectorQuery(vector, topK, companyName) {
+export async function vectorQuery(vector, topK, companyName, { indexName = null } = {}) {
   try {
-    const vectorIndex = getVectorIndex(companyName);
+    const vectorIndex = indexName || getVectorIndex(companyName);
     if (!vectorIndex) throw new Error("VECTOR_INDEX is not configured.");
 
     const res = await getCFClient(companyName).vectorize.indexes.query(vectorIndex, {

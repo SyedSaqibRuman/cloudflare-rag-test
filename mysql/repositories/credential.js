@@ -3,11 +3,16 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 export const CredentialRepository = {
-  async listByCompany(companyId, { includeInactive = false } = {}) {
+  /**
+   * List a company's credentials. With `includeStored` the encrypted blob is
+   * also selected so the route can decrypt NON-SECRET fields for the edit form
+   * (password/secret values never leave the server — the route strips them).
+   */
+  async listByCompany(companyId, { includeInactive = false, includeStored = false } = {}) {
     const pool = await getPool();
     const [rows] = await pool.query(
       `SELECT c.id, c.provider_id, p.provider_key, p.provider_name,
@@ -19,6 +24,7 @@ export const CredentialRepository = {
               c.last_test_latency_ms, c.last_rotated_at, c.next_rotation_at,
               c.rotation_policy, c.auto_rotate_enabled, c.expires_at,
               c.created_at, c.updated_at
+              ${includeStored ? ", c.encrypted_credentials, c.encryption_version" : ""}
          FROM credentials c
          JOIN providers p  ON p.id = c.provider_id
          LEFT JOIN company_environments ce ON ce.id = c.environment_id
@@ -88,6 +94,23 @@ export const CredentialRepository = {
    */
   async create(companyId, input) {
     const pool = await getPool();
+    // Recreate-after-delete: soft-deleted rows are invisible to the app but
+    // still occupy the uk_company_provider_env_cred unique key. Permanently
+    // purge any soft-deleted row that would collide with this insert.
+    // Best-effort: an FK RESTRICT (a live assistant row still referencing the
+    // deleted credential) keeps the row — the INSERT below then fails with
+    // ER_DUP_ENTRY and the route surfaces a 409 instead.
+    try {
+      await pool.query(
+        `DELETE FROM credentials
+          WHERE company_id = ? AND provider_id = ?
+            AND credential_key = ? AND deleted_at IS NOT NULL
+            AND environment_id <=> ?`,
+        [companyId, input.providerId, input.credentialKey, input.environmentId ?? null]
+      );
+    } catch {
+      // A failed purge must not mask the real insert outcome (see above).
+    }
     const [result] = await pool.query(
       `INSERT INTO credentials
          (company_id, provider_id, environment_id, credential_key, credential_name,
@@ -119,9 +142,12 @@ export const CredentialRepository = {
   },
 
   /**
-   * Update credential metadata (name, environment, flags). An optional
-   * `encryptedCredentials` blob is swapped in WITHOUT bumping the rotation
-   * version (unlike `rotate`) — used for in-place edits of secret values.
+   * Update credential metadata (name, environment, flags, is_active). An
+   * optional `encryptedCredentials` blob is swapped in WITHOUT bumping the
+   * rotation version (unlike `rotate`) — used for in-place edits of secret
+   * values. Undefined inputs keep the stored value (is_active included), so
+   * the 9Router-style enable/disable toggle only flips when the caller
+   * actually passes a boolean.
    */
   async update(id, input) {
     const pool = await getPool();
@@ -132,6 +158,7 @@ export const CredentialRepository = {
               config = ?,
               priority = ?,
               is_default = ?,
+              is_active = COALESCE(?, is_active),
               rotation_policy = ?,
               auto_rotate_enabled = ?,
               encrypted_credentials = COALESCE(?, encrypted_credentials),
@@ -143,6 +170,7 @@ export const CredentialRepository = {
         input.config ? JSON.stringify(input.config) : null,
         input.priority ?? null,
         input.isDefault ?? null,
+        input.isActive ?? null,
         input.rotationPolicy ?? null,
         input.autoRotateEnabled ?? null,
         input.encryptedCredentials ?? null,
@@ -207,6 +235,33 @@ export const CredentialRepository = {
     const pool = await getPool();
     const [result] = await pool.query(`DELETE FROM credentials WHERE id = ?`, [id]);
     return result.affectedRows > 0;
+  },
+
+  /**
+   * Check if a model is allowed for a credential via credential_model_access.
+   * Returns { allowed: boolean, access?: object, reason?: string }.
+   */
+  async checkModelAccess(credentialId, modelId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT cma.id, cma.is_enabled, cma.rate_limit_per_min, cma.rate_limit_per_day,
+              cma.monthly_quota_tokens, cma.monthly_quota_used_tokens,
+              cma.is_default_for_category, cma.notes
+         FROM credential_model_access cma
+        WHERE cma.credential_id = ? AND cma.provider_model_id = ?`,
+      [credentialId, modelId]
+    );
+    if (!rows.length) {
+      return { allowed: false, reason: "No access grant found for this credential/model pair." };
+    }
+    const access = mapRow(rows[0]);
+    if (!access.is_enabled) {
+      return { allowed: false, access, reason: "Model access is disabled for this credential." };
+    }
+    if (access.monthly_quota_tokens && access.monthly_quota_used_tokens >= access.monthly_quota_tokens) {
+      return { allowed: false, access, reason: "Monthly token quota exceeded." };
+    }
+    return { allowed: true, access };
   },
 };
 

@@ -1,6 +1,6 @@
-# Credentials — Provider Connection & Auto-Verify
+# Credentials — Provider Connections & Auto-Verify
 
-Credentials are **per-company, per-provider API keys** stored in the AI gateway layer (admin portal → **Credentials** page). Each credential row points at a provider from the Catalog, holds the secret fields that provider's auth schema defines, and can be **verified** against the live provider.
+Credentials are **per-company, per-provider API keys** stored in the AI gateway layer. There is no standalone Connections page anymore: provider credentials are managed on the **provider detail page** (admin portal → **Providers** → click a provider → **Connections** card), following the 9Router model of one card per provider with its stored API keys listed inline. Each credential row points at a provider from the catalog, holds the secret fields that provider's auth schema defines, and can be **verified** against the live provider.
 
 ---
 
@@ -8,9 +8,9 @@ Credentials are **per-company, per-provider API keys** stored in the AI gateway 
 
 | Concept | Details |
 |---------|---------|
-| Scope | Credentials belong to a **company** (tenant) — pick the company in the page header. |
+| Scope | Credentials belong to a **company** (tenant) — pick the company in the sidebar company picker. |
 | Provider | Each credential connects to one catalog provider (OpenAI, Cloudflare, …). |
-| Auth schema | The credential form is generated from the provider's `provider_auth_schemas` (defined in the provider wizard, Step 3). |
+| Auth schema | The credential form is generated from the provider's `provider_auth_schemas` (defined in the provider's catalog entry — seeded/imported, not editable in the portal). |
 | Encryption | Values are encrypted **individually** with AES-256-GCM (`gcm:` blobs) inside one JSON blob (`encrypted_credentials`). Decrypted values exist only in memory — never in API responses. Requires `APP_ENCRYPTION_KEY`. |
 | Verification | `last_verification_status` is stored per credential (`success` / `failed` / `unverified`) and shown as a status badge. |
 
@@ -18,11 +18,11 @@ Credentials are **per-company, per-provider API keys** stored in the AI gateway 
 
 ---
 
-## Connecting a provider (New Credential)
+## Connecting a provider (Add Connection)
 
-1. **Open the Credentials page** and select the **company** in the header.
-2. Click **New Credential**.
-3. **Select a provider** — the form below it loads the provider's credential fields from its auth schema (`GET /gateway/providers/:key/auth-form`). With no credentials yet, the page offers **Quick start** chips for `openai`, `anthropic`, and `cloudflare`.
+1. Open **Providers** (`#catalog`), click the provider card, and select the **company** in the sidebar company picker.
+2. Click **Add Connection** on the provider detail page's **Connections** card.
+3. The provider is locked to the page you're on; the form loads the provider's credential fields from its auth schema (`GET /gateway/providers/:key/auth-form`).
 4. **Name** the credential — the **credential key auto-generates** from the name (lowercased, spaces → `_`). The key is the stable identifier for this credential; once you type it manually it stops auto-syncing.
 5. **Fill the secret fields** (e.g. the API key, shown as a password input). If the provider has no schema, a plain **API Key** field is shown instead.
 6. Optionally pick an **environment** (dev/prod/…) and toggle **Default credential**.
@@ -33,13 +33,15 @@ Credentials are **per-company, per-provider API keys** stored in the AI gateway 
 1. The route validates `providerKey`, `credentialKey`, and `credentialName` (400 if missing), and the provider must exist.
 2. `validateFieldsAgainstSchema` checks the submitted fields against the provider's auth schema — required fields present, values matching their `validation_regex` (400 `Invalid credential fields.` with per-field errors otherwise).
 3. Each field is **encrypted** (`encryptCredential`) into `gcm:` blobs; the blob and `encryption_version` are persisted; `credential.created` is audit-logged (sensitive).
-4. Returns **201** with `credentialId`.
+4. Before the insert, any **soft-deleted** credential with the same key (company + provider + environment) is permanently purged — soft-deleted rows are invisible to the app but would still occupy the unique index, blocking recreation of a key you just deleted.
+5. `credential_key` is unique **per company + provider + environment** (`uk_company_provider_env_cred`) — the same key may exist in different companies, or under different providers in the same company (migration `029` dropped the old global `uk_credential_key`, which wrongly made keys unique across ALL tenants). A collision returns **409 `CREDENTIAL_KEY_EXISTS`** with an actionable message instead of a raw 500.
+6. Returns **201** with `credentialId`.
 
 ---
 
 ## Auto-verify after save
 
-Immediately after a successful save, the portal **automatically verifies** the new credential and shows the probe result inline on the Credentials card:
+Immediately after a successful save, the portal **automatically verifies** the new credential and shows the probe result in a toast:
 
 1. `POST /gateway/credentials/:id/verify`
 2. The credential is decrypted and **format-verified** against the auth schema (required fields + regexes). This alone marks the result `success` or `failed`.
@@ -48,32 +50,40 @@ Immediately after a successful save, the portal **automatically verifies** the n
    - Probe success → `latencyMs` is recorded.
 4. `last_verification_status` + `last_verified_at` are persisted, `credential.verified.success|failed` is audit-logged, and the response is `{ success, status, latencyMs?, error?, warning? }`.
 
-The inline banner shows a spinner while probing, then a **green** success state or a **red** failure with the reason. The list row badge (`verified` / `failed` / `unverified`) reflects the latest result, and you can re-run verification any time with the ✓ button on a row.
+Each key row's badge (`verified` / `failed` / `unverified`) on the Connections card reflects the latest result, and you can re-run verification any time with the ✓ button on the row.
 
 > Providers without a probe still get format-level verification — a well-formed credential reports `success` even without a live network call.
+
+### Prefilled edit form (non-secret fields)
+
+When you edit a credential, **non-secret** stored fields come back decrypted and prefill the form — e.g. Cloudflare's **Account ID** (`account_id`) and **API Base URL** (`base_url`) — so you see what's saved and can change it. Secrets (password-type schema fields such as `api_token`) always stay blank: leave them empty to keep the stored value, enter a new value to replace it.
+
+Mechanically, the credentials list accepts `?includeStored=1` (the portal sends it for the edit form). The server decrypts each blob and returns only fields the provider's auth schema **declares** as non-password — stored values under undeclared names (e.g. a legacy generic `api_key` field) are never exposed, and the raw encrypted blob never leaves the server.
 
 ---
 
 ## Managing credentials
 
+The provider detail page's **Connections** card lists that provider's stored API keys **inline** (no separate table). Per-key rows:
+
 | Action | How |
 |--------|-----|
 | **Verify** | ✓ icon on a row → `POST /gateway/credentials/:id/verify` (same probe pipeline as auto-verify). |
-| **Rotate** | ⟳ icon → `POST /gateway/credentials/:id/rotate` with `{ fields, reason }`. Only the submitted values change — empty fields keep the current secret. New values are encrypted and written back; `credential.rotated` is audit-logged. |
+| **Edit** | Pencil icon → the same modal, prefilled with the non-secret stored fields. |
+| **Enable/disable** | Toggle on the row flips `is_active` (`PUT /gateway/credentials/:id` with `{ isActive }`). |
 | **Delete** | 🗑 icon → `DELETE /gateway/credentials/:id`. Soft-deletes the row so it can no longer be resolved; `credential.deleted` is audit-logged. |
-| **Model access** | Grid icon → grant the credential access to specific catalog models with optional `rateLimitPerMin` / `monthlyQuotaTokens` / `isDefaultForCategory` (`POST /gateway/credentials/:id/models`). |
-| **Environments** | The Environments card creates/deletes env keys (dev, prod, …) so the same provider can carry separate credentials per environment. |
+
+**Rotate** and per-credential **model access** are API-only today (the portal UI was removed): `POST /gateway/credentials/:id/rotate` with `{ fields, reason }` (only submitted values change — empty fields keep the current secret; `credential.rotated` is audit-logged) and `POST /gateway/credentials/:id/models` (grant access to specific catalog models with optional `rateLimitPerMin` / `monthlyQuotaTokens` / `isDefaultForCategory`). Environments are also created via the API (`POST /gateway/companies/:key/environments`); the credential modal still lets you assign a credential to an existing environment.
 
 ---
 
 ## Provider resources (provisioning)
 
-Beneath the credentials, the **Resources** card provisions **infrastructure resources** (vector index, object bucket, …) under a company credential — the *company → credential → resource* chain.
+Provisioning **infrastructure resources** (vector index, object bucket, …) under a company credential — the *company → credential → resource* chain — is **API-only** in the portal today:
 
-1. Click **Provision resource**, pick the **provider** → its **credential** → the **resource type** the provider's catalog advertises (from `provider_resource_types`).
+1. `POST /gateway/companies/:key/resources` with `{ providerKey, credentialId, resourceType, resourceKey, resourceName, config? }`.
 2. **Name** the resource — the **resource key auto-generates** from the name (lowercased, spaces → `-`; must match `/^[a-z0-9-]+$/`, 3–63 chars, unique per company).
 3. Fill any **config fields** the provider's resource template defines (`config_schema` — e.g. index name, dimensions, bucket region).
-4. **Save** → `POST /gateway/companies/:key/resources`.
 
 ### What happens on save (under the hood)
 
@@ -83,9 +93,9 @@ Beneath the credentials, the **Resources** card provisions **infrastructure reso
 4. The template's `max_per_credential` cap is enforced (409 when the credential already has that many).
 5. Duplicate resource keys → 409; otherwise the row is created with `status: provisioned` and `resource.created` is audit-logged; returns **201** with `resourceId`.
 
-**Edit / delete** — the pencil icon updates editable metadata (`PUT /gateway/resources/:id`: name, external id/url/region, description, config, status, defaults — `resourceKey` and the credential binding are immutable). The 🗑 icon **soft-deletes** (`DELETE /gateway/resources/:id`) so the row can no longer be resolved by lookups or knowledge bases.
+**Edit / delete** — `PUT /gateway/resources/:id` updates editable metadata (name, external id/url/region, description, config, status, defaults — `resourceKey` and the credential binding are immutable); `DELETE /gateway/resources/:id` **soft-deletes** so the row can no longer be resolved by lookups or knowledge bases.
 
-> Resources are what **knowledge bases** bind to: the KB create modal's vector / storage dropdowns list `vector_index` / `object_bucket` resources from this card (see [KBs](../README.md) — or the KB docs).
+> Resources are what **knowledge bases** bind to: the KB create modal's vector / storage dropdowns list `vector_index` / `object_bucket` resources (see [KBs](../README.md) — or the KB docs).
 
 ---
 
@@ -95,7 +105,7 @@ All routes under `/gateway` sit behind `requireAdmin` (admin routes carry no rat
 
 | Method & Path | Purpose |
 |---------------|---------|
-| `GET /gateway/companies/:key/credentials` | List a company's credentials (decrypted values never leave the DB). |
+| `GET /gateway/companies/:key/credentials` | List a company's credentials. `?includeInactive=1` includes disabled rows; `?includeStored=1` also returns decrypted **non-secret** fields (prefill for the edit form) — password/secret values never leave the DB. |
 | `POST /gateway/companies/:key/credentials` | Create a credential — body `{ providerKey, credentialKey, credentialName, environmentKey?, fields, config?, isDefault?, priority? }`. |
 | `POST /gateway/credentials/:id/verify` | Format-verify + live probe; records status, returns `{ success, status, latencyMs?, error?, warning? }`. |
 | `POST /gateway/credentials/:id/rotate` | Rotate — body `{ fields?, rotationPolicy?, reason? }`. |
@@ -114,8 +124,8 @@ All routes under `/gateway` sit behind `requireAdmin` (admin routes carry no rat
 
 ## Related
 
-- **Providers** — define the auth schema and probes that drive this page: [docs/providers.md](providers.md).
-- **Resources** — provision infrastructure (vector index, object bucket) under a credential from this same page; bind them to knowledge bases later.
+- **Providers** — define the auth schema and probes that drive the Connections card: [docs/providers.md](providers.md).
+- **Resources** — provision infrastructure (vector index, object bucket) under a credential via the API; bind them to knowledge bases later.
 - **Assistants** — bind a credential + model + KBs into a runtime persona: `GET/POST /gateway/assistants`, `GET/PUT/DELETE /gateway/assistants/:key`.
 - **Gateway API** — full endpoint docs: `docs/AI_API_REFERENCE.md` → **Gateway - Provider Catalog** / credentials endpoints.
-- **Implementation** — portal: `web/src/pages/credentials/` (`page.jsx` + `modals.jsx` + `cards.jsx`); routes + probes: `mysql/routes/` (`credentials.js`, `probes.js`); encryption/verification: `mysql/services/credential-service.js` + `config/encryption.js`; persistence: `mysql/repositories/` (`credential.js`, `resource.js`).
+- **Implementation** — portal: `web/src/pages/credentials/` (`use-credential-modal.js` + `modals.jsx` + `fields.jsx` + `helpers.js`), consumed by `web/src/pages/catalog/connections-card.jsx`; routes + probes: `mysql/routes/` (`credentials.js`, `probes.js`); encryption/verification: `mysql/services/credential-service.js` + `config/encryption.js`; persistence: `mysql/repositories/` (`credential.js`, `resource.js`).

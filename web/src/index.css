@@ -2,11 +2,6 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/*
- * Light/dark theme via CSS variables remapped in @theme inline.
- * Light = standard Tailwind slate on light surfaces; dark = default
- * dark slate. Accent text shades are adjusted per theme for contrast.
- */
 @theme inline {
   --color-slate-50: var(--ui-slate-50);
   --color-slate-100: var(--ui-slate-100);
@@ -125,33 +120,128 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Dropdown menu enter/exit (used via data-[state=open|closed]:menu-enter/exit).
-   Reduced-motion users get no animation (media query below zeroes durations). */
-@keyframes ui-zoom-in {
+/* Native <select> needs explicit bg/color for Windows dark mode */
+select {
+  color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------
+ * Popover/dropdown open animation — grows from its anchor edge.
+ * transform-origin is set inline from the popover's resolved side/align,
+ * so the scale radiates outward from the trigger button rather than from
+ * the element's top-left corner. Reduced-motion is disabled globally below.
+ * ------------------------------------------------------------------ */
+@keyframes popover-in {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: scale(0.94);
   }
   to {
     opacity: 1;
     transform: scale(1);
   }
 }
-@keyframes ui-zoom-out {
+
+.popover-pop-in {
+  animation: popover-in 120ms ease-out;
+}
+
+/* Toast entrance: slide up + settle (compositor-only). The viewport stacks
+   bottom-right; the newest card rises into place. Collapsed to instant by
+   the global reduced-motion guard below. */
+@keyframes toast-pop-in {
   from {
-    opacity: 1;
-    transform: scale(1);
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
   }
   to {
-    opacity: 0;
-    transform: scale(0.95);
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
-@utility menu-enter {
-  animation: ui-zoom-in 0.12s ease-out;
+
+.toast-pop-in {
+  animation: toast-pop-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
-@utility menu-exit {
-  animation: ui-zoom-out 0.1s ease-in forwards;
+
+/* Dialog entrance: material arrival (scale + rise, no bounce — critically
+   damped feel). Collapsed to instant by the reduced-motion guard. */
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.modal-pop-in {
+  animation: modal-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
+}
+
+/* Skeleton shimmer: a soft light sweep across loading placeholders. The bar
+   keeps Tailwind's animate-pulse; the sweep adds directionality so loading
+   states feel like progress, not dead gray blocks. Compositor-only; the
+   reduced-motion guard below collapses it. */
+@keyframes skeleton-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.07),
+    transparent
+  );
+  animation: skeleton-sweep 1.6s ease-in-out infinite;
+}
+
+/* --------------------------
+// AUTH SCREEN — Apple-style entrance + press feedback.
+// Staggered fade/riser on the brand block and card (compositor-friendly
+// opacity/transform only); the global reduced-motion guard above collapses
+// these to an instant cross-fade.
+// -------------------------- */
+@keyframes auth-enter-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.auth-enter {
+  animation: auth-enter-in 480ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+/* Press feedback on pointer-down (not just hover) — the button dips the
+   instant it's pressed, and stays dip-able while busy via active: on the
+   disabled state being suppressed by pointer-events-none. */
+.auth-press:active:not(:disabled) {
+  transform: scale(0.97);
+  transition: transform 100ms ease-out;
+}
+
+/* Material card: the light-catching top edge of a translucent surface
+   (border-top is brighter than the sides — reads as glass, not plastic). */
+.auth-card {
+  border-top-color: rgb(255 255 255 / 0.14);
+  box-shadow:
+    0 24px 60px -12px rgb(0 0 0 / 0.55),
+    0 0 0 1px rgb(0 0 0 / 0.2);
 }
 
 @media (prefers-reduced-motion: reduce) {

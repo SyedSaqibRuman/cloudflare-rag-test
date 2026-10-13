@@ -1,152 +1,323 @@
-import "dotenv/config";
-
-import { fetchPage, fetchPost } from "./services/wp.js";
-import { saveContent } from "./utils/fileWriter.js";
-import { logToFile } from "./utils/logger.js";
-import { AbortError } from "./utils/helpers.js";
-
-import { createBucket, uploadObject, getR2Bucket } from "./services/r2.js";
-import { createVectorIndex, upsertVectors, getVectorIndex } from "./services/vectorize.js";
+// --------------------------
+// INGESTION COMPOSITION ROOT
+// Accepts { signal, companyName, kbKey } from the job runner and wires the
+// pipeline with provider-agnostic adapters resolved from the Knowledge Base.
+//
+// KB path: resolveKbAdapters(kb, company, companyName) → { store, embedding, vector }
+// Legacy path: resolveLegacyAdapters(companyName, config) → { store, embedding, vector }
+//
+// All I/O is adapter-mediated — the pure pipeline in ingest/pipeline.js never
+// touches Cloudflare, S3, or any specific provider directly.
+// --------------------------
 
 import { createRegistry } from "./ingest/registry.js";
 import { runIngestion } from "./ingest/pipeline.js";
+import { capMaxUrls, resolveEffectiveScope } from "./ingest/scope.js";
+import { resolveKbAdapters, resolveLegacyAdapters } from "./ingest/resolve.js";
+import { createGraphExtractor, createLlmEntityExtractor } from "./ingest/graph-extract.js";
+import { createSourceAdapter } from "./ingest/sources/index.js";
+import { fireIngestionWebhook } from "./ingest/webhooks.js";
+import { createIngestionStatsRecorder } from "./ingest/stats-recorder.js";
+import { fetchPost, fetchPage, fetchWpByIds } from "./services/wp.js";
 
-import {
-  CompanyRepository,
-  KbRepository,
-  ResourceRepository,
-  ModelRepository,
-  AuditRepository,
-} from "./mysql/repositories.js";
-import { EMBEDDING_DIMENSIONS } from "./config/schema.js";
+import { CompanyRepository, KbRepository, AuditRepository } from "./mysql/repositories.js";
+
+import { getConfig } from "./config/index.js";
+import { AbortError } from "./utils/helpers.js";
+import { logToFile } from "./utils/logger.js";
+import { NotFoundError, ValidationError } from "./shared/errors.js";
 
 // --------------------------
-// 🔹 Main — accepts { signal, companyName, kbKey } from the job runner
-// Composition root: reads the company's resource names, wires the live
-// store/index adapters, and hands the pure pipeline to runIngestion.
-// With kbKey the KB row (gateway) overrides index/bucket/embedding/chunk
-// settings (D11/F9); without it the legacy config-only path runs with the
-// same behaviour as before.
+// 🔹 Main
 // --------------------------
-export async function main({ signal, companyName, kbKey } = {}) {
+export async function main({ signal, companyName, kbKey, maxPages, scope, setProgress } = {}) {
+  // Hoisted so the single failure recorder in the catch below can reach them
+  // from every stage — adapter config guards, source resolution, pipeline run.
+  let kbId = null;
+  let company = null;
+  let webhookConfig = null; // { webhookUrl, webhookSecret, webhookEvents } from KB row
+  let embedStatsRef = null; // EmbedFallbackStats from the KB adapter resolution
+  let savedScope = null; // KB's saved scope from source_config (also caps URL discovery)
+  let savedMaxUrls; // explicit source_config.maxUrls (undefined → adapter default)
+  let ingestionScope = null; // effective run scope (request override wins over saved)
+  let statsRecorder = null; // checkpoints last-run stats on the KB row (see below)
+
   try {
     console.log("🔧 Initializing...");
-
-    let bucketName = getR2Bucket(companyName);
-    let vectorIndex = getVectorIndex(companyName);
 
     let r2Prefix = "site";
     let chunkOptions = {};
     let registry = createRegistry(companyName);
-    let embeddingModel = null; // @cf/ catalog override (F9); null → config model
-    let kbId = null;
-    let company = null;
+    let kb = null;
+
+    // 🔹 Resolve adapters from the Knowledge Base or legacy config
+    let store, index;
+    let sourceAdapter = { fetchPost, fetchPage, fetchWpByIds };
 
     if (kbKey) {
+      // KB-driven path: resolve all infrastructure from the KB's resource bindings
       company = await CompanyRepository.findByKey(companyName);
-      if (!company) throw new Error(`Company '${companyName}' not found.`);
+      if (!company) throw new NotFoundError(`Company '${companyName}' not found.`, "COMPANY_NOT_FOUND");
 
-      const kb = await KbRepository.findByKey(company.id, kbKey);
-      if (!kb) throw new Error(`Knowledge base '${kbKey}' not found.`);
+      kb = await KbRepository.findByKey(company.id, kbKey);
+      if (!kb) throw new NotFoundError(`Knowledge base '${kbKey}' not found.`, "KB_NOT_FOUND");
       kbId = kb.id;
 
       await KbRepository.setStatus(kb.id, "indexing");
 
-      // Resource resolution (D11): KB resource row → company config fallback.
-      // Resolves BEFORE the config guards so a pinned resource can supply a
-      // bucket/index that the company config lacks.
-      if (kb.vector_resource_id) {
-        const res = await ResourceRepository.findById(kb.vector_resource_id);
-        if (res?.external_resource_id) vectorIndex = res.external_resource_id;
-      }
-      if (kb.storage_resource_id) {
-        const res = await ResourceRepository.findById(kb.storage_resource_id);
-        if (res?.external_resource_id) bucketName = res.external_resource_id;
-      }
+      // Resolve all adapters from the KB's resource bindings (D11).
+      // embedStats: counts KB-bound embedding fallbacks so a dead embedding
+      // model is visible on the KB detail page (not just in server logs).
+      const { createEmbedFallbackStats } = await import("./mysql/adapters/embed-fallback.js");
+      const embedStats = createEmbedFallbackStats();
+      const adapters = await resolveKbAdapters(kb, company, companyName, { embedStats });
+      embedStatsRef = embedStats;
 
-      // Embedding model (F9): only catalog models that are also @cf/ runtime
-      // models (present in EMBEDDING_DIMENSIONS) can override the company
-      // config; OpenAI catalog entries fall back to the config model.
-      if (kb.embedding_model_id) {
-        const model = await ModelRepository.findById(kb.embedding_model_id);
-        if (model && EMBEDDING_DIMENSIONS[model.model_key]) embeddingModel = model.model_key;
+      // Config guards: a KB run must have both storage and vector resolved.
+      // These throw BEFORE any work — the catch below records the failure on
+      // the KB row so the portal shows WHY the run exited instead of a
+      // silent fast-exit (the KB_VECTOR_NOT_CONFIGURED papercut).
+      if (!adapters.store) {
+        throw new ValidationError(
+          adapters.storeError
+            ? `Object storage is not configured for KB '${kbKey}': ${adapters.storeError}`
+            : `Object storage is not configured for KB '${kbKey}'.`,
+          "KB_STORAGE_NOT_CONFIGURED"
+        );
+      }
+      if (!adapters.vector) {
+        throw new ValidationError(
+          adapters.vectorError
+            ? `Vector store is not configured for KB '${kbKey}': ${adapters.vectorError}`
+            : `Vector store is not configured for KB '${kbKey}'.`,
+          "KB_VECTOR_NOT_CONFIGURED"
+        );
       }
 
       r2Prefix = `kb/${kbKey}`;
       chunkOptions = { size: kb.chunk_size || 512 };
       registry = createRegistry(companyName, kbKey, { chunkSize: chunkOptions.size });
-    }
 
-    const dims = embeddingModel ? EMBEDDING_DIMENSIONS[embeddingModel] : undefined;
+      store = adapters.store;
+      index = adapters.vector;
 
-    const store = {
-      ensureBucket: () => createBucket(bucketName, companyName),
-      saveContent: (name, markdown) => saveContent(name, markdown, "md"),
-      uploadChunk: (r2Key, payload) => uploadObject(r2Key, payload, companyName, bucketName),
-    };
-
-    const index = {
-      ensureIndex: () => createVectorIndex(vectorIndex, companyName, dims),
-      upsert: (chunks) =>
-        upsertVectors(chunks, companyName, {
-          indexName: vectorIndex,
-          embeddingModel: embeddingModel || undefined,
-          dimensions: dims,
-        }),
-    };
-
-    try {
-      // Config guards live INSIDE the try so a missing bucket/index on a KB
-      // run still flips the row to "error" + audits (D12).
-      if (!bucketName) {
-        throw new Error(kbKey ? `R2_BUCKET_NAME is not configured for KB '${kbKey}'.` : "R2_BUCKET_NAME is not configured.");
-      }
-      if (!vectorIndex) {
-        throw new Error(kbKey ? `VECTOR_INDEX is not configured for KB '${kbKey}'.` : "VECTOR_INDEX is not configured.");
+      // Store webhook config for post-ingest notifications
+      if (kb.webhook_url) {
+        webhookConfig = {
+          webhookUrl: kb.webhook_url,
+          webhookSecret: kb.webhook_secret,
+          webhookEvents: kb.webhook_events || "completed,failed",
+        };
       }
 
-      await runIngestion({
-        fetchPost,
-        fetchPage,
-        store,
-        index,
-        registry,
-        signal,
-        companyName,
-        r2Prefix,
-        chunkOptions,
-      });
-      if (kbId) await KbRepository.setStatus(kbId, "active");
-    } catch (error) {
-      // KB status flip + audit on failure (D12); abort leaves the row as-is.
-      if (kbId && !(error instanceof AbortError || error.name === "AbortError")) {
-        await KbRepository.setStatus(kbId, "error");
+      // Parse the KB's SAVED scope and resolve the EFFECTIVE run scope
+      // BEFORE building the source adapter: when the run's scope is "limit N"
+      // (saved docLimit, or a per-run request override), URL/sitemap discovery
+      // is capped at N so a 1000-page sitemap is never fetched just to be
+      // trimmed downstream — over-fetching is what ingested 288 docs for a
+      // docLimit-3 KB (maxicert-web-auto, 2026-09-29). An explicit
+      // { scope: "all" } request override still fetches the whole site: the
+      // request defines the run; the saved config defines the default.
+      if (kb?.source_config) {
         try {
-          await AuditRepository.log({
-            actorType: "system",
-            companyId: company.id,
-            action: "kb.ingest.failed",
-            entityType: "kb",
-            entityId: kbId,
-            afterState: { error: error.message },
-            reason: "ingest failure",
-          });
-        } catch {
-          // audit is best-effort — never mask the real ingest error
-        }
+          const cfg = typeof kb.source_config === "string" ? JSON.parse(kb.source_config) : kb.source_config;
+          if (cfg.scope) savedScope = { scope: cfg.scope, limit: cfg.docLimit || undefined, items: cfg.selectedPages || undefined };
+          if (cfg.maxUrls != null) savedMaxUrls = Number(cfg.maxUrls);
+        } catch { /* ignore parse errors */ }
       }
-      throw error;
+      ingestionScope = resolveEffectiveScope(scope, savedScope, maxPages);
+      const adapterMaxUrls = capMaxUrls(savedMaxUrls, ingestionScope);
+
+      // Resolve the source adapter based on KB source_type
+      sourceAdapter = createSourceAdapter({
+        sourceType: kb.source_type,
+        kb,
+        companyName,
+        wpAdapters: { fetchPost, fetchPage, fetchWpByIds },
+        maxUrls: adapterMaxUrls,
+      });
+    } else {
+      // Legacy path: company-level config (backward compatible)
+      const config = getConfig(companyName);
+      const adapters = resolveLegacyAdapters(companyName, config);
+
+      if (!adapters.store) {
+        throw new ValidationError("R2_BUCKET_NAME is not configured.", "R2_BUCKET_NOT_CONFIGURED");
+      }
+      if (!adapters.vector) {
+        throw new ValidationError("VECTOR_INDEX is not configured.", "VECTOR_INDEX_NOT_CONFIGURED");
+      }
+
+      store = adapters.store;
+      index = adapters.vector;
     }
 
+    // 🔹 Graph adapter: optional Neo4j extraction during ingestion
+    // Only when the KB explicitly enables GraphRAG (kb.enable_graph_rag)
+    let graphAdapter = null;
+    if (kbKey && company && kb?.enable_graph_rag) {
+      try {
+        const { getGraphConfig } = await import("./query/graph.js");
+        const graphConfig = getGraphConfig(companyName);
+      if (graphConfig) {
+        graphAdapter = createGraphExtractor({
+          companyName,
+          kbKey,
+          graphConfig,
+          extractEntities: createLlmEntityExtractor(companyName),
+          // Per-KB tuning (migration 023); null → global defaults (10 / 4).
+          maxChunks: kb.graph_extract_max_chunks ?? null,
+          concurrency: kb.graph_extract_concurrency ?? null,
+        });
+        const tuning =
+          kb.graph_extract_max_chunks != null || kb.graph_extract_concurrency != null
+            ? ` (maxChunks=${kb.graph_extract_max_chunks ?? "default"}, concurrency=${kb.graph_extract_concurrency ?? "default"})`
+            : "";
+        console.log(`🕸️ Graph extraction enabled for KB '${kbKey}'${tuning}`);
+      }
+      } catch {
+        // Graph extraction is best-effort — missing deps or bad config
+      }
+    }
+
+    // Normalize scope: prefer the explicit scope from the API request;
+    // fall back to the KB's saved source_config; then legacy maxPages; then
+    // "all". The KB path resolved this BEFORE creating the source adapter so
+    // the discovery cap could use the same effective scope — keep the legacy
+    // path's computation here.
+    if (!ingestionScope) ingestionScope = resolveEffectiveScope(scope, savedScope, maxPages);
+
+    // Last-run stats (docs/chunks/duration) are checkpointed onto the KB row
+    // WHILE the run is in flight, not only on completion — a run that is
+    // stopped, paused, fails, or is killed by a server restart used to leave
+    // last_ingestion_* NULL, so the portal's KB cards showed "Chunks — /
+    // Last run never" even though documents and vectors existed. The final
+    // write below (finalize) still stamps the exact return stats on success.
+    statsRecorder = createIngestionStatsRecorder({
+      kbId,
+      mode: ingestionScope.scope || "all",
+      embedStats: embedStatsRef,
+    });
+
+    const stats = await runIngestion({
+      fetchPost: sourceAdapter.fetchPost,
+      fetchPage: sourceAdapter.fetchPage,
+      fetchWpByIds: sourceAdapter.fetchWpByIds,
+      store,
+      index,
+      registry,
+      signal,
+      companyName,
+      r2Prefix,
+      chunkOptions,
+      scope: ingestionScope,
+      setProgress: (p) => {
+        statsRecorder.onProgress(p);
+        setProgress?.(p);
+      },
+      graphAdapter,
+    });
+
+    if (kbId) {
+      await KbRepository.setStatus(kbId, "active");
+      // Persist the run's exact stats on the KB row so the status endpoint
+      // can return them without re-querying the registry.
+      await statsRecorder.finalize(stats);
+      try {
+        await AuditRepository.log({
+          actorType: "system",
+          companyId: company?.id || null,
+          action: "kb.ingest.completed",
+          entityType: "kb",
+          entityId: kbId,
+          afterState: {
+            mode: ingestionScope.scope || "all",
+            documentsProcessed: stats.processed,
+            documentsSkipped: stats.skipped,
+            chunksCreated: stats.chunks,
+            durationMs: statsRecorder.durationMs(),
+          },
+          reason: "ingest completion",
+        });
+      } catch {
+        /* audit is best-effort */
+      }
+
+      // Fire webhook on success (fire-and-forget)
+      if (webhookConfig) {
+        fireIngestionWebhook({
+          ...webhookConfig,
+          stats: {
+            documentsProcessed: stats.processed,
+            documentsSkipped: stats.skipped,
+            chunksCreated: stats.chunks,
+            durationMs: statsRecorder.durationMs(),
+            mode: ingestionScope.scope || "all",
+          },
+          kbKey,
+          companyName,
+          status: "completed",
+        });
+      }
+    }
   } catch (error) {
+    // Aborts own the lifecycle (stop/pause flows restore the status) — the
+    // row is left as-is and the exit is clean. The partial stats ARE flushed
+    // though (docs processed / chunks so far) so a stopped run still stamps
+    // the KB card's Chunks / Last run cells instead of leaving them blank.
     if (error instanceof AbortError || error.name === "AbortError") {
       console.log("🛑 Ingestion stopped by user.");
       logToFile("process.log", "🛑 Ingestion aborted by user");
+      await statsRecorder?.finalizePartial();
       return; // clean exit — do not rethrow
     }
+
+    // D12: record the failure on the KB row for ANY non-abort error after the
+    // KB row was resolved — including pre-flight config guards (storage/vector
+    // not configured, unknown source_type) that previously exited silently,
+    // leaving the row stuck "indexing" with no visible error anywhere.
+    if (kbId) {
+      // Flush partial run stats BEFORE the error is recorded: the stats write
+      // nulls last_error (it's a "successful run" stamp), so ordering matters.
+      await statsRecorder?.finalizePartial();
+      try {
+        await KbRepository.setStatus(kbId, "error");
+      } catch {
+        /* best-effort */
+      }
+      try {
+        await KbRepository.setIngestionError(kbId, error.message);
+      } catch {
+        /* best-effort */
+      }
+      try {
+        await AuditRepository.log({
+          actorType: "system",
+          companyId: company?.id || null,
+          action: "kb.ingest.failed",
+          entityType: "kb",
+          entityId: kbId,
+          afterState: { error: error.message },
+          reason: "ingest failure",
+        });
+      } catch {
+        // audit is best-effort — never mask the real ingest error
+      }
+
+      // Fire webhook on failure (fire-and-forget)
+      if (webhookConfig) {
+        fireIngestionWebhook({
+          ...webhookConfig,
+          stats: {},
+          kbKey,
+          companyName,
+          status: "failed",
+          error: error.message,
+        });
+      }
+    }
+
     console.error("Fatal error:", error);
     throw error;
   }
 }
-
-// main();

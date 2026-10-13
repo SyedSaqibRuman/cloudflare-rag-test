@@ -27,6 +27,34 @@ export function getToken() {
   }
 }
 
+/** Decode a JWT payload (no signature verification — client-side only). */
+function decodeJwtPayload(token) {
+  try {
+    const base64 = token.split(".")[1];
+    if (!base64) return null;
+    const json = atob(base64.replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+/** Get the session expiry timestamp (ms) from the JWT, or null. */
+export function getTokenExpiry() {
+  const token = getToken();
+  if (!token) return null;
+  const payload = decodeJwtPayload(token);
+  if (!payload?.exp) return null;
+  return payload.exp * 1000; // exp is in seconds
+}
+
+/** Get remaining session time in seconds, or null. */
+export function getSessionRemaining() {
+  const expiry = getTokenExpiry();
+  if (!expiry) return null;
+  return Math.max(0, Math.floor((expiry - Date.now()) / 1000));
+}
+
 export function setToken(token) {
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token);

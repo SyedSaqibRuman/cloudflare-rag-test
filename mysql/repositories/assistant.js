@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // Binds a credential + model + knowledge bases to a runtime persona.
 // ------------------------------------------------------------------
@@ -49,14 +49,21 @@ export const AssistantRepository = {
 
   async create(companyId, input) {
     const pool = await getPool();
+    // Before inserting, hard-delete any soft-deleted row with the same key
+    // so the unique constraint doesn't block re-creation.
+    await pool.query(
+      `DELETE FROM assistants WHERE company_id = ? AND assistant_key = ? AND deleted_at IS NOT NULL`,
+      [companyId, input.assistantKey]
+    );
     const [result] = await pool.query(
       `INSERT INTO assistants
          (company_id, assistant_key, assistant_name, description,
-          credential_id, model_id, model_key, system_prompt,
+          credential_id, model_id, model_key, system_prompt, assistant_variables,
+          guardrail_prompt, blocked_topics, blocked_patterns,
           temperature, max_tokens, enable_function_calling, enable_streaming,
           tools, primary_kb_id, kb_ids, enable_graph_context,
           graph_resource_id, is_active, is_public)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.assistantKey,
@@ -66,6 +73,10 @@ export const AssistantRepository = {
         input.modelId ?? null,
         input.modelKey ?? null,
         input.systemPrompt ?? null,
+        input.variables?.length ? JSON.stringify(input.variables) : null,
+        input.guardrailPrompt ?? null,
+        input.blockedTopics ?? null,
+        input.blockedPatterns ?? null,
         input.temperature ?? 0.7,
         input.maxTokens ?? 4096,
         input.enableFunctionCalling ?? true,
@@ -92,6 +103,10 @@ export const AssistantRepository = {
       modelId: "model_id",
       modelKey: "model_key",
       systemPrompt: "system_prompt",
+      guardrailPrompt: "guardrail_prompt",
+      blockedTopics: "blocked_topics",
+      blockedPatterns: "blocked_patterns",
+      variables: "assistant_variables",
       temperature: "temperature",
       maxTokens: "max_tokens",
       enableFunctionCalling: "enable_function_calling",
@@ -128,6 +143,33 @@ export const AssistantRepository = {
       `UPDATE assistants SET deleted_at = NOW() WHERE id = ? AND deleted_at IS NULL`,
       [id]
     );
+    return result.affectedRows > 0;
+  },
+
+  /**
+   * All assistants (incl. soft-deleted) referencing any of the given
+   * credential ids — used by the provider-delete purge, where the plain
+   * RESTRICT FK on assistants.credential_id blocks a hard credential delete
+   * regardless of the assistant's deleted_at.
+   */
+  async listByCredentialIds(credentialIds) {
+    if (!credentialIds.length) return [];
+    const pool = await getPool();
+    const placeholders = credentialIds.map(() => "?").join(",");
+    const [rows] = await pool.query(
+      `SELECT id, company_id, assistant_key, assistant_name, credential_id, deleted_at
+         FROM assistants
+        WHERE credential_id IN (${placeholders})`,
+      credentialIds
+    );
+    return rows.map(mapRow);
+  },
+
+  /** Hard delete — force provider removal (bypasses the soft delete above).
+   *  Chatbots cascade on assistant delete; nothing else references assistants. */
+  async removePermanent(id) {
+    const pool = await getPool();
+    const [result] = await pool.query(`DELETE FROM assistants WHERE id = ?`, [id]);
     return result.affectedRows > 0;
   },
 };

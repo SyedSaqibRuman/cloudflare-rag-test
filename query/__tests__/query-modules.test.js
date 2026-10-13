@@ -1,4 +1,4 @@
-import { describe, it, before } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 // Ensure default company config is loaded before tests that need it
@@ -179,7 +179,7 @@ describe("scoring", () => {
 // --------------------------
 // CACHE TESTS
 // --------------------------
-import { getCacheKey, getCached, setCache } from "../cache.js";
+import { getCacheKey, getCached, setCache, clearCompanyCache } from "../cache.js";
 
 describe("cache", () => {
   describe("getCacheKey", () => {
@@ -210,6 +210,15 @@ describe("cache", () => {
       const key = getCacheKey("test", "co");
       assert.match(key, /^[a-f0-9]{32}$/);
     });
+
+    it("scopes the key by assistant so switching assistants misses the cache", () => {
+      const plain = getCacheKey("hello", "company1");
+      const asstA = getCacheKey("hello", "company1", "support-bot");
+      const asstB = getCacheKey("hello", "company1", "sales-bot");
+      assert.notEqual(plain, asstA);
+      assert.notEqual(asstA, asstB);
+      assert.equal(getCacheKey("hello", "company1", "support-bot"), asstA); // deterministic
+    });
   });
 
   describe("getCached / setCache", () => {
@@ -239,6 +248,30 @@ describe("cache", () => {
       setCache(key, "first");
       setCache(key, "second");
       assert.equal(getCached(key), "second");
+    });
+  });
+
+  describe("clearCompanyCache", () => {
+    it("removes only the target company's entries", () => {
+      const keyA = getCacheKey("q-a", "acme");
+      const keyB = getCacheKey("q-b", "acme");
+      const keyOther = getCacheKey("q-c", "globex");
+      setCache(keyA, "a", "acme");
+      setCache(keyB, "b", "acme");
+      setCache(keyOther, "c", "globex");
+
+      const removed = clearCompanyCache("acme");
+      assert.equal(removed, 2);
+      assert.equal(getCached(keyA), null);
+      assert.equal(getCached(keyB), null);
+      assert.deepEqual(getCached(keyOther), "c");
+    });
+
+    it("returns 0 when the company has no entries", () => {
+      const key = getCacheKey("q-d", "acme");
+      setCache(key, "d", "acme");
+      assert.equal(clearCompanyCache("nobody"), 0);
+      assert.deepEqual(getCached(key), "d");
     });
   });
 });
@@ -378,7 +411,9 @@ import {
   isHelpQuery,
   isVagueQuery,
   checkFastPath,
+  matchesBlockedTopics,
 } from "../intent.js";
+import { resolveBlockedPatterns } from "../../shared/blocked-patterns.js";
 
 describe("intent", () => {
   describe("isIdentityQuery", () => {
@@ -433,6 +468,17 @@ describe("intent", () => {
     it("does not match unrelated queries", () => {
       assert.ok(!isContactQuery("what is certification"));
     });
+
+    it("does not hijack content questions that merely start with 'who is'", () => {
+      // Regression: the old pattern matched a bare `who is`, routing every
+      // "who is …" content question to the canned contact response instead
+      // of RAG (caught live: "Who is the author of this Java book?").
+      assert.ok(!isContactQuery("who is the author of this Java book?"));
+      assert.ok(!isContactQuery("who is a notary public"));
+      // …while the actual person-role intents still match
+      assert.ok(isContactQuery("who is the CEO"));
+      assert.ok(isContactQuery("who founded the company"));
+    });
   });
 
   describe("isBusinessQuery", () => {
@@ -457,6 +503,130 @@ describe("intent", () => {
 
     it("blocks movie queries", () => {
       assert.ok(!isBusinessQuery("what movie should I watch?"));
+    });
+
+    it("blocks code/programming requests", () => {
+      assert.ok(!isBusinessQuery("create a basic C program"));
+      assert.ok(!isBusinessQuery("write me a Python script"));
+      assert.ok(!isBusinessQuery("can you build an app for me?"));
+      assert.ok(!isBusinessQuery("how do I write a function in Java"));
+      assert.ok(!isBusinessQuery("make a calculator program"));
+    });
+
+    it("still allows certification queries containing ambiguous words", () => {
+      assert.ok(isBusinessQuery("what is ISO 9001?"));
+      assert.ok(isBusinessQuery("how to get certified?"));
+      assert.ok(isBusinessQuery("how do I make an appointment with a consultant"));
+      assert.ok(isBusinessQuery("what is an API key and how do I use it?"));
+    });
+
+    it("assistant-owned patterns replace the built-in tier (recipes assistant works)", () => {
+      // A recipes assistant ships its own blocked_patterns — the built-in
+      // "recipe"/"movie"/"poem" vetoes must not fire on its own domain.
+      const patterns = resolveBlockedPatterns("crypto\n/write.*haiku/i", null);
+      assert.ok(isBusinessQuery("how do I make chocolate chip cookies?", null, patterns));
+      assert.ok(isBusinessQuery("give me a recipe for baked mac and cheese", null, patterns));
+      assert.ok(isBusinessQuery("what movie was that dish in?", null, patterns));
+      assert.ok(isBusinessQuery("write me a poem about bread", null, patterns));
+      assert.ok(!isBusinessQuery("what is cryptocurrency?", null, patterns));
+      assert.ok(!isBusinessQuery("write me a haiku about the sea", null, patterns));
+    });
+
+    it("company BLOCKED_PATTERNS config tier replaces the built-ins", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prevPatterns = runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = "/\\bmovie\\b/i";
+        assert.ok(!isBusinessQuery("what movie should I watch?", companyName));
+        // "recipe" no longer blocked — the built-in tier was fully replaced.
+        assert.ok(isBusinessQuery("give me a recipe for cookies", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = prevPatterns;
+      }
+    });
+
+    it("built-in tier applies when no assistant or company override exists", () => {
+      assert.ok(!isBusinessQuery("give me a recipe for cookies"));
+      assert.ok(!isBusinessQuery("what movie should I watch?"));
+      // Test-string gate stays anchored full-match and always applies.
+      assert.ok(!isBusinessQuery("asdf"));
+      assert.ok(isBusinessQuery("what is a test kit?"));
+    });
+
+    it("company BLOCKED_TOPICS substring vetoes always apply on top", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "crypto";
+        assert.ok(!isBusinessQuery("what is cryptocurrency?", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
+    });
+
+    it("checkFastPath answers recipe questions when the assistant overrides patterns", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const overrides = { blockedPatterns: "crypto\ninvestment" };
+      const result = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", overrides);
+      assert.equal(result, null); // null → proceeds to retrieval
+    });
+
+    it("checkFastPath still refuses blocked patterns without an assistant override", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const result = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", null);
+      assert.ok(result);
+      assert.ok(result.toLowerCase().includes("not able to find"));
+    });
+
+    it("checkFastPath honors the company BLOCKED_PATTERNS tier", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prevPatterns = runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = "crypto\n/write.*haiku/i";
+        const blocked = checkFastPath("best cryptocurrency exchange?", companyName, "Neo", null);
+        assert.ok(blocked);
+        const allowed = checkFastPath("How do I make recipe-style brownies at home?", companyName, "Neo", null);
+        assert.equal(allowed, null);
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_PATTERNS = prevPatterns;
+      }
+    });
+
+    it("blocks topics listed in the company's BLOCKED_TOPICS config", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "crypto\ninvestment";
+        assert.ok(!isBusinessQuery("should I invest in cryptocurrency?", companyName));
+        assert.ok(!isBusinessQuery("what are the best investment strategies?", companyName));
+        // Unrelated certification queries still pass
+        assert.ok(isBusinessQuery("what is ISO 9001?", companyName));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
+    });
+
+    it("matchesBlockedTopics flags substrings and ignores empty input", () => {
+      assert.equal(matchesBlockedTopics("what is cryptocurrency?", "crypto"), true);
+      assert.equal(matchesBlockedTopics("best investment strategies", "crypto\ninvestment"), true);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", "crypto"), false);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", ""), false);
+      assert.equal(matchesBlockedTopics("what is ISO 9001?", null), false);
+    });
+
+    it("checkFastPath refuses company-blocked topics and ignores missing config", () => {
+      const companyName = Object.keys(runtimeConfig.COMPANIES)[0] || "Popularcert";
+      const prev = runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS;
+      try {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = "gambling";
+        const result = checkFastPath("best online gambling sites?", companyName);
+        assert.ok(result);
+        assert.ok(result.toLowerCase().includes("not able to find"));
+        // Unknown company: falls back to built-in patterns without throwing
+        assert.ok(isBusinessQuery("what is ISO 9001?", "nonexistent-company"));
+      } finally {
+        runtimeConfig.COMPANIES[companyName].BLOCKED_TOPICS = prev;
+      }
     });
   });
 

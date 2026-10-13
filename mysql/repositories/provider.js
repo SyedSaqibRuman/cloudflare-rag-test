@@ -3,7 +3,7 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
 
 // ------------------------------------------------------------------
 export const ProviderRepository = {
@@ -12,7 +12,8 @@ export const ProviderRepository = {
     const [rows] = await pool.query(
       `SELECT id, provider_key, provider_name, primary_service_category,
               website_url, documentation_url, logo_url, default_api_base_url,
-              auth_type, auth_header_name, api_key_format_regex, is_active
+              auth_type, auth_header_name, api_key_format_regex, is_active,
+              round_robin_enabled
          FROM providers
         WHERE is_active = TRUE
         ORDER BY provider_name`
@@ -20,12 +21,27 @@ export const ProviderRepository = {
     return rows.map(mapRow);
   },
 
+  async findById(id) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, provider_key, provider_name, primary_service_category,
+              website_url, documentation_url, logo_url, default_api_base_url,
+              auth_type, auth_header_name, api_key_format_regex, is_active,
+              round_robin_enabled
+         FROM providers
+        WHERE id = ?`,
+      [id]
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  },
+
   async findByKey(providerKey) {
     const pool = await getPool();
     const [rows] = await pool.query(
       `SELECT id, provider_key, provider_name, primary_service_category,
               website_url, documentation_url, logo_url, default_api_base_url,
-              auth_type, auth_header_name, api_key_format_regex, is_active
+              auth_type, auth_header_name, api_key_format_regex, is_active,
+              round_robin_enabled
          FROM providers
         WHERE provider_key = ?`,
       [providerKey]
@@ -94,6 +110,7 @@ export const ProviderRepository = {
       documentationUrl: "documentation_url",
       defaultApiBaseUrl: "default_api_base_url",
       isActive: "is_active",
+      roundRobinEnabled: "round_robin_enabled",
     };
     const sets = [];
     const args = [];
@@ -109,47 +126,53 @@ export const ProviderRepository = {
     return result.affectedRows > 0;
   },
 
-  async capabilities(providerId) {
+  // Bulk variants for the registry loader (refreshRegistry) — one query for
+  // ALL providers instead of a per-provider N+1. Rows carry provider_id for
+  // in-memory grouping; these are the ONLY entry points for capabilities /
+  // auth forms / resource templates (the old single-provider methods were
+  // removed — every consumer goes through the cached registry).
+  async capabilitiesByProviderIds(providerIds) {
+    if (!providerIds.length) return [];
     const pool = await getPool();
     const [rows] = await pool.query(
-      `SELECT capability_key, is_supported, config
+      `SELECT provider_id, capability_key, is_supported, config
          FROM provider_capabilities
-        WHERE provider_id = ? AND is_active = TRUE`,
-      [providerId]
+        WHERE provider_id IN (?) AND is_active = TRUE`,
+      [providerIds]
     );
     return rows.map(mapRow);
   },
 
-  /** Auth-form fields (v_provider_auth_form equivalent), ordered for UI. */
-  async authForm(providerId) {
+  async authFormsByProviderIds(providerIds) {
+    if (!providerIds.length) return [];
     const pool = await getPool();
     const [rows] = await pool.query(
-      `SELECT field_name, field_label, field_type, field_placeholder,
+      `SELECT provider_id, field_name, field_label, field_type, field_placeholder,
               field_help_text, field_default_value, is_required,
               validation_regex, validation_min_length, validation_max_length,
               is_encrypted, encryption_storage_path, display_order,
               field_group, field_width, select_options, show_when
          FROM provider_auth_schemas
-        WHERE provider_id = ? AND is_active = TRUE
-        ORDER BY field_group, display_order, field_name`,
-      [providerId]
+        WHERE provider_id IN (?) AND is_active = TRUE
+        ORDER BY provider_id, field_group, display_order, field_name`,
+      [providerIds]
     );
     return rows.map(mapRow);
   },
 
-  /** Resource-provisioning templates (v_provider_resource_templates equivalent). */
-  async resourceTemplates(providerId) {
+  async resourceTemplatesByProviderIds(providerIds) {
+    if (!providerIds.length) return [];
     const pool = await getPool();
     const [rows] = await pool.query(
-      `SELECT resource_type, display_name, description, icon_name,
+      `SELECT provider_id, resource_type, display_name, description, icon_name,
               display_color, config_schema, is_required, is_default_enabled,
               max_per_credential, provision_endpoint_key, provision_method,
               provision_payload_schema, health_check_endpoint_key,
               health_check_interval_seconds, display_order
          FROM provider_resource_types
-        WHERE provider_id = ? AND is_active = TRUE
-        ORDER BY display_order, resource_type`,
-      [providerId]
+        WHERE provider_id IN (?) AND is_active = TRUE
+        ORDER BY provider_id, display_order, resource_type`,
+      [providerIds]
     );
     return rows.map(mapRow);
   },

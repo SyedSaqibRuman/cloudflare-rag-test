@@ -1,53 +1,223 @@
 import fetch from "node-fetch";
-import { retry, sleep } from "../utils/helpers.js";
+import { retry, sleep, AbortError } from "../utils/helpers.js";
+import { logToFile } from "../utils/logger.js";
 import { getConfig } from "../config/index.js";
+import { ExternalServiceError, ValidationError } from "../shared/errors.js";
 
 const PER_PAGE = 100;
 const DELAY_MS = 300;
 
+// --------------------------
+// 🔹 WordPress REST API Source Fetcher
+// Supports three ingestion scopes:
+//   all      → paginate through all pages/posts
+//   selected → fetch only specific WP items by type + id
+//   limit    → paginate up to a maximum number of API pages
+// --------------------------
 
+/**
+ * Fetch a single page of WP items (posts or pages) by pagination.
+ *
+ * Failure contract: source failures THROW (ExternalServiceError). A run that
+ * cannot see the source must never be laundered into a "successful"
+ * 0-document ingest — before this, an HTML-instead-of-JSON REST response
+ * (origin/WAF hijack, e.g. maxicert.com 2026-09-28) made every fetch fail,
+ * the error got swallowed here, and the run completed "successfully" with
+ * 0 docs, a fresh lastSyncAt, and status "active".
+ * @param {string} type - "posts" or "pages"
+ * @param {number} page - 1-indexed API page number
+ * @param {string} companyName
+ * @returns {Promise<Array|null>} items, or null when the listing is exhausted
+ */
 async function fetchWP(type, page, companyName) {
-  try {
-    const baseUrl = getConfig(companyName).BASE_URL;
-    return await retry(async () => {
-      const url = `${baseUrl}/wp-json/wp/v2/${type}?per_page=${PER_PAGE}&page=${page}`;
-      console.log(url);
+  const baseUrl = getConfig(companyName).BASE_URL;
+  const url = `${baseUrl}/wp-json/wp/v2/${type}?per_page=${PER_PAGE}&page=${page}`;
 
+  try {
+    return await retry(async () => {
       console.log(`Fetching ${type} page ${page}...`);
 
       const res = await fetch(url, {
         headers: { "User-Agent": "RAG-Ingestion-Bot" },
       });
 
-      // Fix #8: use X-WP-TotalPages header for reliable pagination termination
       const totalPages = parseInt(res.headers.get("X-WP-TotalPages") || "1", 10);
 
       if (!res.ok) {
-        // Still handle 400 gracefully as a fallback
         if (res.status === 400) return null;
         throw new Error(`HTTP ${res.status}`);
       }
 
-      const data = await res.json();
+      const text = await res.text();
+      const first = text.trimStart()[0];
+      if (first !== "{" && first !== "[") {
+        // HTML masquerading as JSON (origin/WAF hijack, login wall, cache
+        // layer): res.ok is true and the Content-Type header may even say
+        // application/json, so the body shape is the only trustworthy signal.
+        throw new ExternalServiceError(
+          `WordPress REST API at ${baseUrl} returned HTML instead of JSON (HTTP ${res.status}) — the site's origin/WAF is intercepting /wp-json requests. Fix the site's server config (security plugin, WAF or cache rule) so the REST API responds.`,
+          "wordpress"
+        );
+      }
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (err) {
+        throw new ExternalServiceError(
+          `WordPress REST API at ${baseUrl} returned invalid JSON for ${type} page ${page}: ${err.message}`,
+          "wordpress"
+        );
+      }
 
       await sleep(DELAY_MS);
 
-      // Signal end of pages clearly
       if (page >= totalPages) return data.length > 0 ? data : null;
-
       return data;
     });
   } catch (err) {
-    console.error("❌ Final failure:", err.message);
-    return null;
+    if (err instanceof AbortError) throw err;
+    if (err instanceof ExternalServiceError) throw err;
+    const wrapped = new ExternalServiceError(
+      `WordPress REST API fetch failed for ${type} page ${page} at ${baseUrl}: ${err.message}`,
+      "wordpress"
+    );
+    wrapped.cause = err;
+    console.error("❌", wrapped.message);
+    logToFile("error.log", `❌ ${wrapped.message}`);
+    throw wrapped;
   }
 }
 
+/**
+ * Fetch specific WP items by type + IDs (for "selected" scope).
+ * Uses the include[] parameter to batch-fetch up to 100 IDs per request.
+ * @param {string} type - "posts" or "pages"
+ * @param {number[]} ids - WP item IDs to fetch
+ * @param {string} companyName
+ * @returns {Promise<Array>}
+ */
+async function fetchWPByIds(type, ids, companyName) {
+  if (!ids || ids.length === 0) return [];
+  try {
+    const baseUrl = getConfig(companyName).BASE_URL;
+    const results = [];
 
+    // WP REST API allows up to 100 IDs per include[] query
+    const batches = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      batches.push(ids.slice(i, i + 100));
+    }
+
+    for (const batch of batches) {
+      const idParams = batch.map((id) => `include[]=${id}`).join("&");
+      const url = `${baseUrl}/wp-json/wp/v2/${type}?per_page=${PER_PAGE}&${idParams}`;
+
+      const res = await fetch(url, {
+        headers: { "User-Agent": "RAG-Ingestion-Bot" },
+      });
+
+      if (!res.ok) {
+        console.error(`❌ Failed to fetch ${type} by IDs: HTTP ${res.status}`);
+        logToFile("error.log", `❌ WordPress REST API fetch failed for ${type} include[] batch (HTTP ${res.status}) at ${baseUrl}`);
+        continue;
+      }
+
+      const data = await res.json();
+      results.push(...data);
+      await sleep(DELAY_MS);
+    }
+
+    return results;
+  } catch (err) {
+    console.error("❌ Failed to fetch by IDs:", err.message);
+    return [];
+  }
+}
+
+// --------------------------
+// 🔹 Public API
+// --------------------------
+
+/**
+ * Fetch a page of WP pages.
+ * @param {number} page
+ * @param {string} companyName
+ */
 export async function fetchPage(page, companyName) {
   return fetchWP("pages", page, companyName);
 }
 
+/**
+ * Fetch a page of WP posts.
+ * @param {number} page
+ * @param {string} companyName
+ */
 export async function fetchPost(page, companyName) {
   return fetchWP("posts", page, companyName);
+}
+
+/**
+ * Fetch specific WP items by type and IDs.
+ * @param {string} type - "pages" or "posts"
+ * @param {number[]} ids - WP item IDs
+ * @param {string} companyName
+ * @throws {ValidationError} when companyName is unknown (no BASE_URL)
+ */
+export async function fetchWpByIds(type, ids, companyName) {
+  // getConfig THROWS Company-not-found for unknown tenants — treat that the
+  // same as a configured company with no BASE_URL (both are "cannot fetch").
+  let baseUrl = null;
+  try {
+    baseUrl = getConfig(companyName)?.BASE_URL || null;
+  } catch {
+    baseUrl = null;
+  }
+  if (!baseUrl) {
+    throw new ValidationError(
+      `Cannot fetch source items: company '${companyName || "(none)"}' has no BASE_URL configured.`,
+      "WP_BASE_URL_NOT_CONFIGURED"
+    );
+  }
+  return fetchWPByIds(type, ids, companyName);
+}
+
+/**
+ * List all available WP pages and posts (lightweight: id, title, url, type, modified).
+ * Paginates through the WP REST API and returns a flat list.
+ * @param {string} companyName
+ * @param {Object} [opts]
+ * @param {string[]} [opts.contentTypes] - ["page","post"] default both
+ * @param {number} [opts.maxPages] - max API pages per type (safety limit)
+ * @returns {Promise<Array<{id:number, title:string, url:string, type:string, modified:string}>>}
+ */
+export async function listAllSourcePages(companyName, opts = {}) {
+  const contentTypes = opts.contentTypes || ["pages", "posts"];
+  const maxPages = opts.maxPages || 50;
+  const results = [];
+
+  for (const ct of contentTypes) {
+    const wpType = ct === "page" || ct === "pages" ? "pages" : "posts";
+    const label = wpType === "pages" ? "page" : "post";
+
+    for (let pg = 1; pg <= maxPages; pg++) {
+      const items = await fetchWP(wpType, pg, companyName);
+      if (!items || items.length === 0) break;
+
+      for (const item of items) {
+        results.push({
+          id: item.id,
+          title: item.title?.rendered || item.slug || `#${item.id}`,
+          url: item.link || item.guid?.rendered || "",
+          type: label,
+          modified: item.modified || item.date || "",
+        });
+      }
+
+      // fetchWP returns null when we've hit the last page
+      if (items.length < PER_PAGE) break;
+    }
+  }
+
+  return results;
 }

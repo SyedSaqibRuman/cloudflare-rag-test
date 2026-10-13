@@ -35,10 +35,19 @@ export async function resetPrompt(companyName) {
   const n = companyName?.trim();
   if (!n || !runtimeConfig.COMPANIES[n]) return { error: `Company '${n || "(missing)"}' not found.` };
 
+  // Resetting the template also restores the default variable set, otherwise the
+  // shipped template's placeholders would resolve against whatever variables the
+  // operator had defined (or none, leaving raw {{braces}} in the prompt). One
+  // save writes both keys.
   runtimeConfig.COMPANIES[n].SYSTEM_PROMPT = DEFAULT_COMPANY.SYSTEM_PROMPT;
+  runtimeConfig.COMPANIES[n].PROMPT_VARIABLES = structuredClone(DEFAULT_COMPANY.PROMPT_VARIABLES);
   await saveConfig({ COMPANIES: { [n]: runtimeConfig.COMPANIES[n] } });
   const config = runtimeConfig.COMPANIES[n];
-  return { template: config.SYSTEM_PROMPT, resolved: resolvePromptVariables(config.SYSTEM_PROMPT, config) };
+  return {
+    template: config.SYSTEM_PROMPT,
+    variables: config.PROMPT_VARIABLES,
+    resolved: resolvePromptVariables(config.SYSTEM_PROMPT, config),
+  };
 }
 
 /**
@@ -63,8 +72,18 @@ export async function resetCompanyConfig(companyName) {
 export async function resetConfig() {
   const companyName = DEFAULT_COMPANY.COMPANY_NAME;
 
+  // Collect per-company failures instead of swallowing them — a DB that
+  // refuses deletion must be reported, not silently kept around.
+  const failed = [];
   for (const name of Object.keys(runtimeConfig.COMPANIES)) {
-    await deleteCompanyDb(name).catch(() => {});
+    try {
+      await deleteCompanyDb(name);
+    } catch (err) {
+      failed.push({ name, error: err.message });
+    }
+  }
+  if (failed.length) {
+    console.warn(`⚠️  ${failed.length} company DB(s) could not be deleted during reset:`, failed);
   }
   clearAllCompanyDbs();
 

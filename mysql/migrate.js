@@ -92,7 +92,7 @@ export async function pendingMigrations(pool) {
  */
 function stripPartitionClauses(sql) {
   return sql.replace(
-    /  PARTITION BY RANGE\s*\(.*?\)\s*\(.*?p_future VALUES LESS THAN MAXVALUE\s*\);/gs,
+    / {2}PARTITION BY RANGE\s*\(.*?\)\s*\(.*?p_future VALUES LESS THAN MAXVALUE\s*\);/gs,
     ";"
   );
 }
@@ -137,8 +137,18 @@ export async function migrate() {
       const sql = isMariaDB ? stripPartitionClauses(body) : body;
       const statements = parseStatements(sql);
       try {
-        for (const statement of statements) {
-          await conn.query(statement);
+        for (let i = 0; i < statements.length; i++) {
+          try {
+            await conn.query(statements[i]);
+          } catch (err) {
+            // MySQL DDL is non-transactional: a mid-file failure leaves
+            // earlier statements applied with NO schema_migrations row. Point
+            // the operator at the exact statement so recovery (manual
+            // cleanup or idempotent re-run) doesn't require archaeology.
+            console.error(`❌ Migration ${file} failed at statement ${i + 1}/${statements.length}: ${err.message}`);
+            console.error(`   Statement: ${statements[i].slice(0, 300)}${statements[i].length > 300 ? " …" : ""}`);
+            throw err;
+          }
         }
         await conn.query(
           "INSERT INTO schema_migrations (version, checksum) VALUES (?, ?)",
@@ -146,7 +156,7 @@ export async function migrate() {
         );
         applied.push(file);
       } catch (err) {
-        console.error(`❌ Migration ${file} failed: ${err.message}`);
+        console.error(`❌ Migration ${file} failed after ${applied.length ? "partial application" : "no statements applied"} — fix the statement above, then re-run (earlier DDL may need manual cleanup).`);
         throw err;
       }
     }
@@ -159,18 +169,23 @@ export async function migrate() {
 
 async function main() {
   const pool = await getPool();
-  if (process.argv.includes("--dry-run")) {
-    const pending = await pendingMigrations(pool);
-    if (pending.length === 0) {
-      console.log("✅ No pending migrations.");
-    } else {
-      console.log(`Pending (${pending.length}):`);
-      for (const { file } of pending) console.log(`  ${file}`);
+  try {
+    if (process.argv.includes("--dry-run")) {
+      const pending = await pendingMigrations(pool);
+      if (pending.length === 0) {
+        console.log("✅ No pending migrations.");
+      } else {
+        console.log(`Pending (${pending.length}):`);
+        for (const { file } of pending) console.log(`  ${file}`);
+      }
+      return;
     }
-    return;
+    await migrate();
+  } finally {
+    // Always close the pool — the dry-run path used to leak the pooled
+    // socket, which kept the process alive until idleTimeout reaped it.
+    await pool.end();
   }
-  await migrate();
-  await pool.end();
 }
 
 // Run directly: node mysql/migrate.js

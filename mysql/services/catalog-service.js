@@ -38,7 +38,7 @@ function isDate(value) {
 }
 
 /** YYYY-MM-DD for the day before a valid YYYY-MM-DD date string. */
-function previousDay(dateStr) {
+export function previousDay(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d - 1));
   return date.toISOString().slice(0, 10);

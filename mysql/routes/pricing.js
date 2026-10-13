@@ -6,6 +6,8 @@ import express from "express";
 import { AuditRepository } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
 import { wrap } from "./helpers.js";
+import { parsePagination, paginate } from "./pagination.js";
+import { actorFromReq } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -16,7 +18,11 @@ router.get(
   wrap(async (req, res) => {
     const { modelId, provider } = req.query;
     const pricing = await Registry.listPricingByModel(Number(modelId) || null, provider || null);
-    return res.json({ success: true, pricing });
+    const pagination = parsePagination(req);
+    const extraQuery = {};
+    if (modelId) extraQuery.modelId = modelId;
+    if (provider) extraQuery.provider = provider;
+    return paginate(res, pricing, pagination, "pricing", "/gateway/pricing", extraQuery);
   })
 );
 
@@ -28,8 +34,7 @@ router.post(
     const result = await Registry.savePricing(req.body || {});
     const model = await Registry.getModelById(Number(req.body?.providerModelId));
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "pricing.created",
       entityType: "pricing",
       entityId: result.id,
@@ -57,8 +62,7 @@ router.put(
     }
     await Registry.updatePricing(Number(req.params.id), req.body || {});
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "pricing.updated",
       entityType: "pricing",
       entityId: Number(req.params.id),
@@ -90,8 +94,7 @@ router.delete(
     }
     await Registry.removePricing(Number(req.params.id));
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "pricing.deleted",
       entityType: "pricing",
       entityId: Number(req.params.id),

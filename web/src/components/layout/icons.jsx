@@ -124,6 +124,62 @@ export function IconBot() {
   );
 }
 
+export function IconUpload() {
+  return (
+    <svg {...base}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" x2="12" y1="3" y2="15" />
+    </svg>
+  );
+}
+
+export function IconChatbot() {
+  return (
+    <svg {...base}>
+      <rect x="3" y="3" width="18" height="14" rx="2" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+      <circle cx="9" cy="10" r="1" fill="currentColor" />
+      <circle cx="15" cy="10" r="1" fill="currentColor" />
+      <path d="M9 13h6" />
+    </svg>
+  );
+}
+
+export function IconFile() {
+  return (
+    <svg {...base}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M16 13H8" />
+      <path d="M16 17H8" />
+      <path d="M10 9H8" />
+    </svg>
+  );
+}
+
+export function IconChart() {
+  return (
+    <svg {...base}>
+      <path d="M3 3v18h18" />
+      <path d="m19 9-5 5-4-4-3 3" />
+    </svg>
+  );
+}
+
+export function IconWorkflow() {
+  return (
+    <svg {...base}>
+      <rect x="3" y="3" width="6" height="6" rx="1" />
+      <rect x="15" y="3" width="6" height="6" rx="1" />
+      <rect x="9" y="15" width="6" height="6" rx="1" />
+      <path d="M9 6h6" />
+      <path d="M12 12v3" />
+    </svg>
+  );
+}
+
 // Name → component map used by the sidebar to resolve NAV icon keys.
 export const NAV_ICONS = {
   dashboard: IconDashboard,
@@ -136,4 +192,9 @@ export const NAV_ICONS = {
   book: IconBook,
   key: IconKey,
   bot: IconBot,
+  upload: IconUpload,
+  chatbot: IconChatbot,
+  chart: IconChart,
+  workflow: IconWorkflow,
+  file: IconFile,
 };

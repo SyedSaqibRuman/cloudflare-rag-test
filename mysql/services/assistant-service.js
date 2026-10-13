@@ -6,7 +6,6 @@
 // router can map them to 4xx.
 // --------------------------
 import {
-  CompanyRepository,
   CredentialRepository,
   ModelRepository,
   ResourceRepository,
@@ -17,15 +16,39 @@ import {
 
 export const ASSISTANT_KEY_RE = /^[a-z0-9-]+$/;
 
-export class HttpError extends Error {
+// Backward-compatible HttpError — extends AppError so the error handler
+// middleware recognizes it and the test suite's `instanceof HttpError` checks pass.
+import { AppError } from "../../shared/errors.js";
+import { inspectBlockedPatterns } from "../../shared/blocked-patterns.js";
+
+export class HttpError extends AppError {
   constructor(status, message) {
-    super(message);
-    this.status = status;
+    super(message, status);
   }
 }
 
 function isPosInt(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
+}
+
+/** Normalize a blocked-topics string: trim each line, drop empties, or null. */
+function normalizeBlockedTopics(raw) {
+  if (raw == null) return null;
+  const lines = String(raw)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines.join("\n") : null;
+}
+
+/** Normalize a blocked-patterns string the same way (one pattern per line). */
+function normalizeBlockedPatterns(raw) {
+  if (raw == null) return null;
+  const lines = String(raw)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines.join("\n") : null;
 }
 
 /**
@@ -73,6 +96,53 @@ export function validateAssistantInput(input = {}) {
     errors.systemPrompt = "systemPrompt must be at most 65535 characters.";
   }
 
+  // Guardrails (mirror company-level config/validation.js limits). Empty/null
+  // means "inherit company default / built-in guardrail".
+  if (input.guardrailPrompt !== undefined && input.guardrailPrompt !== null && input.guardrailPrompt.length > 8000) {
+    errors.guardrailPrompt = "guardrailPrompt must be at most 8000 characters.";
+  }
+  if (input.blockedTopics !== undefined && input.blockedTopics !== null) {
+    const lines = String(input.blockedTopics).split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length > 100) {
+      errors.blockedTopics = "blockedTopics supports at most 100 topics (one per line).";
+    } else if (String(input.blockedTopics).length > 8000) {
+      errors.blockedTopics = "blockedTopics must be at most 8000 characters.";
+    }
+  }
+  if (input.blockedPatterns !== undefined && input.blockedPatterns !== null) {
+    const raw = String(input.blockedPatterns);
+    const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length > 100) {
+      errors.blockedPatterns = "blockedPatterns supports at most 100 patterns (one per line).";
+    } else if (raw.length > 8000) {
+      errors.blockedPatterns = "blockedPatterns must be at most 8000 characters.";
+    } else {
+      // Every line must compile — literal substrings always do; /regex/ lines
+      // are checked here so a bad pattern fails at save time, not ask time.
+      const inspect = inspectBlockedPatterns(raw);
+      if (inspect.firstInvalid) {
+        errors.blockedPatterns = `blockedPatterns contains an invalid pattern: ${inspect.firstInvalid.slice(0, 60)}`;
+      }
+    }
+  }
+
+  if (input.variables !== undefined && input.variables !== null) {
+    if (!Array.isArray(input.variables)) {
+      errors.variables = "variables must be an array of {key, value} objects.";
+    } else {
+      for (const v of input.variables) {
+        if (!v?.key || !String(v.key).trim()) {
+          errors.variables = "Each variable must have a non-empty key.";
+          break;
+        }
+        if (typeof v.value !== "string") {
+          errors.variables = "Each variable value must be a string.";
+          break;
+        }
+      }
+    }
+  }
+
   if (input.temperature !== undefined && input.temperature !== null) {
     const t = Number(input.temperature);
     if (!Number.isFinite(t) || t < 0 || t > 2) {
@@ -97,6 +167,10 @@ export function validateAssistantInput(input = {}) {
       credentialId: Number(input.credentialId),
       modelId: input.modelId ? Number(input.modelId) : null,
       systemPrompt: input.systemPrompt?.trim() || null,
+      guardrailPrompt: input.guardrailPrompt?.trim() || null,
+      blockedTopics: normalizeBlockedTopics(input.blockedTopics),
+      blockedPatterns: normalizeBlockedPatterns(input.blockedPatterns),
+      variables: input.variables == null ? [] : Array.isArray(input.variables) ? input.variables.map((v) => ({ key: String(v.key).trim(), value: String(v.value) })) : [],
       temperature: input.temperature === undefined || input.temperature === null ? 0.7 : Number(input.temperature),
       maxTokens: input.maxTokens === undefined || input.maxTokens === null ? 4096 : Number(input.maxTokens),
       enableFunctionCalling: input.enableFunctionCalling !== false,
@@ -245,6 +319,9 @@ export async function updateAssistant(company, assistantKey, input, actor = {}) 
     credentialId: existing.credential_id,
     modelId: existing.model_id,
     systemPrompt: existing.system_prompt,
+    guardrailPrompt: existing.guardrail_prompt,
+    blockedTopics: existing.blocked_topics,
+    blockedPatterns: existing.blocked_patterns,
     temperature: Number(existing.temperature),
     maxTokens: existing.max_tokens,
     enableFunctionCalling: Boolean(existing.enable_function_calling),

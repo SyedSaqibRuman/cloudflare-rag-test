@@ -27,6 +27,7 @@ const {
   CredentialRepository,
   ResourceRepository,
   AuditRepository,
+  KbRepository,
 } = await import("../repositories.js");
 const Registry = await import("../services/provider-registry.js");
 const gatewayRouter = (await import("../gateway-router.js")).default;
@@ -70,11 +71,13 @@ function stub(obj, method, impl) {
 async function seedRegistry({ provider = PROVIDER, templates = [VECTOR_TEMPLATE] } = {}) {
   const restores = [
     stub(ProviderRepository, "list", async () => [provider]),
-    stub(ProviderRepository, "capabilities", async () => []),
-    stub(ProviderRepository, "authForm", async () => []),
-    stub(ProviderRepository, "resourceTemplates", async () => templates),
-    stub(ModelRepository, "listByProvider", async () => []),
-    stub(EndpointRepository, "list", async () => []),
+    stub(ProviderRepository, "capabilitiesByProviderIds", async () => []),
+    stub(ProviderRepository, "authFormsByProviderIds", async () => []),
+    stub(ProviderRepository, "resourceTemplatesByProviderIds", async () =>
+      templates.map((r) => ({ ...r, provider_id: provider.id }))
+    ),
+    stub(ModelRepository, "listByProviderIds", async () => []),
+    stub(EndpointRepository, "listByProviderIds", async () => []),
   ];
   Registry.invalidateRegistry();
   await Registry.refreshRegistry();
@@ -101,6 +104,11 @@ function stubHappy() {
     stub(AuditRepository, "log", async (entry) => {
       auditLog.push(entry);
     }),
+    // create-time KB auto-bind reads the fresh row + company KBs; return
+    // shapes that make the service no-op (unresolvable row) without touching
+    // the lazy MySQL pool.
+    stub(ResourceRepository, "findById", async (_id) => null),
+    stub(KbRepository, "listByCompany", async () => []),
   ];
   return { restores, auditLog };
 }
@@ -563,6 +571,8 @@ test("DELETE resource soft-deletes and audits resource.deleted", async () => {
     company_id: 2,
     resource_key: "docs-index",
   }));
+  // The delete guard (assertResourceNotKbBound) must see NO binding KBs.
+  const restoreKbs = stub(KbRepository, "listByResource", async () => []);
   const restoreRemove = stub(ResourceRepository, "remove", async (id) => {
     removedId = id;
     return true;
@@ -580,6 +590,7 @@ test("DELETE resource soft-deletes and audits resource.deleted", async () => {
     assert.deepEqual(auditEntry.afterState, { resource_key: "docs-index" });
   } finally {
     restoreFind();
+    restoreKbs();
     restoreRemove();
     restoreAudit();
     server.close();

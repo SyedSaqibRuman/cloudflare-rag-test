@@ -13,9 +13,15 @@ const sse = (description) => ({
     "text/event-stream": {
       schema: { type: "string" },
       examples: {
-        tokens: {
-          value: 'data: {"token":"__START_RESPONSE__"}\n\ndata: {"token":"hello"}\n\ndata: [DONE]\n\n',
+        start: {
+          value:
+            'data: {"__start":true,"sources":[{"title":"ISO 9001 Guide","score":0.92}],"matches":[{"id":"chunk-1","score":0.92}],"graph":{"cypher":"MATCH (c) RETURN c","context":"3 related standards"}}\n\n',
         },
+        token: { value: 'data: {"token":"Certification"}\n\n' },
+        possibleQuestions: {
+          value: 'data: {"possibleQuestions":["What are the ISO 9001 requirements?","How long does certification take?"]}\n\n',
+        },
+        done: { value: "data: [DONE]\n\n" },
         error: { value: 'data: {"error":"Something went wrong"}\n\n' },
       },
     },
@@ -88,7 +94,7 @@ const ChatMessage = {
 };
 
 const SSE_WIRE_NOTES =
-  "SSE wire protocol: each token is `data: {\"token\":\"...\"}\\n\\n`; the first real token is preceded by the sentinel `data: {\"token\":\"__START_RESPONSE__\"}\\n\\n` (clears the frontend's Thinking state); errors are `data: {\"error\":\"...\"}\\n\\n`; the stream ends with `data: [DONE]\\n\\n`.";
+  "SSE wire protocol: tokens arrive as `data: {\"token\":\"...\"}\\n\\n`; a structured metadata frame `data: {\"__start\":true,\"sources\":[...],\"matches\":[...],\"graph\":{...}}\\n\\n` follows them once the pipeline finishes; follow-up suggestions arrive as `data: {\"possibleQuestions\":[...]}\\n\\n`; errors are `data: {\"error\":\"...\"}\\n\\n`; the stream ends with `data: [DONE]\\n\\n`. NOTE the ordering: on a RAG answer the `__start` frame arrives AFTER the tokens, so clients must not rely on it to clear a loading placeholder. On the fast path (greetings/identity/contact) no `__start` frame is sent - a legacy `data: {\"token\":\"__START_RESPONSE__\"}` sentinel is emitted instead and must be filtered out. Full guide: docs/api/chat-integration.md.";
 
 const openapi = {
   openapi: "3.0.3",
@@ -99,7 +105,7 @@ const openapi = {
       "",
       "- **Company selector**: most admin endpoints take `x-company-name` (header) or `?company=` (query). `/ask` and `/ask-stream` always require the header.",
       "- **Ask API key**: optional per-company key gating only `POST /ask` and `POST /ask-stream`.",
-      "- **Admin auth**: `POST /auth/login` issues an HMAC token (`x-auth-token` header). Enforced on `/cloudflare/*` **only when** `ADMIN_USERNAME`/`ADMIN_PASSWORD` are set in `.env`; otherwise those routes are open (as documented in AGENTS.md).",
+      "- **Admin auth**: `POST /auth/login` issues an HMAC token (`x-auth-token` header). Two mutually exclusive backends: **Clerk** (`CLERK_SECRET_KEY` set — credentials verified against Clerk's Backend API, no silent fallback) or legacy env credentials (`ADMIN_USERNAME`/`ADMIN_PASSWORD`). Enforced on `/cloudflare/*` **only when** one of the backends is configured; otherwise those routes are open (as documented in AGENTS.md).",
       "- **Rate limits**: global 100/min, AI tier 20/min on `/ask` endpoints, login brute-force guard 10/min. Admin routes are **not** rate-limited - authenticated admin sessions bypass the global baseline.",
       "",
       "Full pipeline and architecture notes: `docs/architecture.md`, `docs/AI_API_REFERENCE.md`.",
@@ -140,9 +146,9 @@ const openapi = {
     "/test": {
       post: {
         tags: ["System"],
-        summary: "LLM stream smoke test",
+        summary: "LLM stream smoke test (admin only)",
         description:
-          "Streams raw tokens from a fixed Cloudflare AI model using app-level env credentials (CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN), not the per-company seam. Framed as `event: ...`/`data: ...` lines; errors surface as an `event: error` line.",
+          "ADMIN-GATED (requireAdmin + AI-tier rate limit). Streams raw tokens from a fixed Cloudflare AI model using the first configured company's credentials. Framed as `event: ...`/`data: ...` lines; errors surface as an `event: error` line.",
         requestBody: {
           required: false,
           content: {
@@ -167,7 +173,8 @@ const openapi = {
         summary: "Ask the RAG assistant (JSON)",
         description: [
           "Answers a question using the company's RAG pipeline: intent fast-path, followup rewrite, cache, vector + keyword retrieval, rerank, R2 context, LLM.",
-          "Returns `cached: true` for cached answers. Sources carry `{ title, score }`.",
+          "Returns `cached: true` for cached answers. Sources carry `{ title, score }`. Matches carry the full retrieval result set. Graph context is included when GraphRAG is enabled.",
+          "`possibleQuestions` contains 3-5 suggested follow-up questions generated from the answer.",
         ].join("\n"),
         parameters: [companyHeader, askApiKeyHeader],
         requestBody: {
@@ -224,12 +231,27 @@ const openapi = {
         },
       },
     },
+    "/ask/reset": {
+      post: {
+        tags: ["Ask"],
+        summary: "Reset a company's conversation cache",
+        description:
+          "Purges the in-memory answer cache for the company so the next question runs the full RAG pipeline again (no cached answers). Gated like /ask: x-company-name + the per-company API key when set. Returns how many cached entries were cleared.",
+        parameters: [companyHeader, askApiKeyHeader],
+        responses: {
+          200: RESP.ok(okBody({ cleared: { type: "integer", description: "Number of cached answers purged for this company." } })),
+          400: RESP.bad(),
+          401: RESP.unauthorized(),
+          500: RESP.server(),
+        },
+      },
+    },
     "/auth/login": {
       post: {
         tags: ["Admin Auth"],
         summary: "Admin login",
         description:
-          "Returns an HMAC-signed session token (send it as `x-auth-token`). Returns 503 when admin credentials are not configured in .env. Brute-force limited to 10 attempts/min.",
+          "Returns an HMAC-signed session token (send it as `x-auth-token`). Two mutually exclusive backends: Clerk (`CLERK_SECRET_KEY` set — credentials are verified against Clerk's Backend API; Clerk outage → 503) or legacy env credentials (`ADMIN_USERNAME`/`ADMIN_PASSWORD` — 503 when unset). Brute-force limited to 10 attempts/min.",
         requestBody: {
           required: true,
           content: {
@@ -258,9 +280,9 @@ const openapi = {
       get: {
         tags: ["Admin Auth"],
         summary: "Session check",
-        description: "Reports whether a valid admin session exists. When admin auth is disabled it returns `{ authenticated: true, bypass: true }` so the portal stays open.",
+        description: "Reports whether a valid admin session exists. When admin auth is disabled it returns `{ authenticated: true, bypass: true }` so the portal stays open. When authenticated, `provider` reports which backend validated the session (`clerk` or `env`).",
         responses: {
-          200: RESP.ok(okBody({ authenticated: { type: "boolean" }, username: { type: "string" }, bypass: { type: "boolean" } })),
+          200: RESP.ok(okBody({ authenticated: { type: "boolean" }, username: { type: "string" }, bypass: { type: "boolean" }, provider: { type: "string", enum: ["clerk", "env"], description: "Which login backend issued the session; omitted when auth is disabled." } })),
           401: RESP.unauthorized(),
         },
       },
@@ -549,8 +571,25 @@ const openapi = {
       post: {
         tags: ["Config"],
         summary: "Reset runtime config to env defaults",
+        description:
+          "DESTRUCTIVE: deletes every company database and resets all config to defaults. Requires an explicit confirmation body: { \"confirm\": \"reset-all-companies\" } — any other body is rejected with 400.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["confirm"],
+                properties: {
+                  confirm: { type: "string", enum: ["reset-all-companies"] },
+                },
+              },
+            },
+          },
+        },
         responses: {
           200: RESP.ok(okBody({ message: { type: "string" }, config: { $ref: "#/components/schemas/CompanyConfig" } })),
+          400: RESP.bad(),
           500: RESP.server(),
         },
       },
@@ -559,7 +598,8 @@ const openapi = {
       get: {
         tags: ["Config"],
         summary: "Get a company's system prompt",
-        description: "Returns the raw template, the {{VARIABLE}}-resolved version, and the available variable values.",
+        description:
+          "Returns the raw template, the {{VARIABLE}}-resolved version, the merged custom-variable map, each tier separately, and any placeholders left unresolved. There are no built-in variables: {{PLACEHOLDER}} resolves only from PROMPT_VARIABLES (company) or the selected assistant's variables, assistant winning. Unmatched placeholders stay literal.",
         parameters: companyHeaderOrQuery,
         responses: {
           200: RESP.ok(okBody({ prompt: { $ref: "#/components/schemas/PromptBody" } })),
@@ -570,12 +610,25 @@ const openapi = {
       put: {
         tags: ["Config"],
         summary: "Update a company's system prompt",
+        description:
+          "Updates the template and, when `variables` is supplied, replaces the company's PROMPT_VARIABLES in the same write. Omit `variables` to keep the current set.",
         parameters: companyHeaderOrQuery,
         requestBody: {
           required: true,
           content: {
             "application/json": {
-              schema: { type: "object", required: ["template"], properties: { template: { type: "string", example: "You are {{CONSULTANT_NAME}} at {{COMPANY_NAME}}..." } } },
+              schema: {
+                type: "object",
+                required: ["template"],
+                properties: {
+                  template: { type: "string", example: "You are {{CONSULTANT_NAME}} at {{COMPANY_NAME}}..." },
+                  variables: {
+                    type: "array",
+                    description: "Custom {{VARIABLE}} pairs. Omit to keep the existing set.",
+                    items: { $ref: "#/components/schemas/PromptVariable" },
+                  },
+                },
+              },
             },
           },
         },
@@ -720,6 +773,61 @@ const openapi = {
         },
       },
     },
+    "/cloudflare/job/pause": {
+      post: {
+        tags: ["Scheduler"],
+        summary: "Pause a running standalone job (or a cron tick's run)",
+        description:
+          "Marks the job suspended and aborts the handler at the next loop boundary. The suspended entry stays resumable. For ingest jobs the KB row is flipped out of 'indexing' best-effort. Cron tick runs ARE standalone jobs (the scheduler routes ticks through the runner), so pausing aborts the in-flight run and checkpoints it — the schedule itself keeps ticking, and the next tick continues from the checkpoint (or POST /job/resume starts it immediately).",
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  jobId: { type: "string" },
+                  companyName: { type: "string" },
+                  kbKey: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({ message: { type: "string" } })),
+          400: RESP.bad(),
+        },
+      },
+    },
+    "/cloudflare/job/resume": {
+      post: {
+        tags: ["Scheduler"],
+        summary: "Resume a paused standalone job",
+        description:
+          "Starts a fresh run for a paused (suspended) job. Completed work is skipped by the ingestion registry, so the run continues from where it paused. For a paused cron tick run this works too — though the schedule's next tick would also replace the suspension on its own.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["jobId"],
+                properties: {
+                  jobId: { type: "string" },
+                  companyName: { type: "string" },
+                  kbKey: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({ message: { type: "string" } })),
+          400: RESP.bad(),
+        },
+      },
+    },
     "/cloudflare/jobs/running": {
       get: {
         tags: ["Scheduler"],
@@ -733,7 +841,7 @@ const openapi = {
       post: {
         tags: ["Scheduler"],
         summary: "Schedule a job on a cron expression",
-        description: "Registers a node-cron schedule for a job, keyed by jobId + companyName. Overlapping ticks are skipped.",
+        description: "Registers a node-cron schedule for a job, keyed by jobId + companyName (+ kbKey for KB-scoped schedules). Overlapping ticks are skipped. A kbKey schedules the KB-driven ingest (the KB's saved source config) and is verified at schedule time — unknown company/KB pairs are rejected with 400.",
         requestBody: {
           required: true,
           content: {
@@ -745,6 +853,7 @@ const openapi = {
                   jobId: { type: "string", enum: ["testing", "ingest"] },
                   schedule: { type: "string", example: "0 3 * * *" },
                   companyName: { type: "string" },
+                  kbKey: { type: "string", description: "Scope the schedule to one knowledge base (requires companyName; ingest job)" },
                 },
               },
             },
@@ -770,6 +879,7 @@ const openapi = {
                 properties: {
                   jobId: { type: "string" },
                   companyName: { type: "string" },
+                  kbKey: { type: "string", description: "Stop only the KB-scoped schedule for this knowledge base" },
                 },
               },
             },
@@ -988,6 +1098,101 @@ const openapi = {
         },
       },
     },
+    "/gateway/providers/{key}/test": {
+      parameters: [{ name: "key", in: "path", required: true, schema: { type: "string" } }],
+      post: {
+        tags: ["Gateway"],
+        summary: "Test a catalog provider",
+        description:
+          "Tests a provider right after adding it to the catalog — same contract as the company-scoped connections/test. With body.fields the values are format-validated against the provider's auth schema, then run through the live probe (hand-written or schema-driven). Without a probe, the default API base URL is probed for reachability (any HTTP response = live). Read-only; audits provider.test. Returns mode = format | probe | connectivity | none.",
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  fields: {
+                    type: "object",
+                    description: "Optional unsaved credential values to validate + probe, e.g. { api_key: \"sk-...\" }.",
+                    additionalProperties: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({
+            status: { type: "string", enum: ["success", "failed"] },
+            mode: { type: "string", enum: ["format", "probe", "connectivity", "none"] },
+            error: { type: "string", nullable: true },
+            latencyMs: { type: "number", nullable: true },
+            checkedAt: { type: "string", format: "date-time" },
+            warning: { type: "string" },
+          })),
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Provider not found." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/credentials/test-batch": {
+      post: {
+        tags: ["Gateway"],
+        summary: "Batch-test a company's connections (9Router 'Test All')",
+        description:
+          "Runs the same decrypt → auth-schema validation → live-probe pipeline as the per-credential verify endpoint over every ACTIVE credential of a company, filtered by the Providers page section (group: custom | oauth | apikey) or a single provider (providerKey). Each result is recorded + audited like a single verify. Returns a summary + per-credential results (valid, latencyMs, error, diagnosis: AUTH | 429 | 5XX | NET | RUNTIME | ERR) for the results modal.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["companyKey"],
+                properties: {
+                  companyKey: { type: "string", description: "The gateway company whose credentials to test." },
+                  group: { type: "string", enum: ["custom", "oauth", "apikey"], description: "Section id from the Providers page. Mutually exclusive with providerKey." },
+                  providerKey: { type: "string", description: "Test just this provider's credentials instead of a whole section." },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({
+            mode: { type: "string", description: "providerKey passed → 'provider', else the group id (or 'all')." },
+            summary: {
+              type: "object",
+              properties: {
+                total: { type: "integer" },
+                passed: { type: "integer" },
+                failed: { type: "integer" },
+              },
+            },
+            results: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  credentialId: { type: "integer" },
+                  credentialName: { type: "string" },
+                  providerKey: { type: "string" },
+                  valid: { type: "boolean" },
+                  latencyMs: { type: "number", nullable: true },
+                  error: { type: "string", nullable: true },
+                  diagnosis: { type: "string", nullable: true, description: "9Router-style tag: AUTH | 429 | 5XX | NET | RUNTIME | ERR, or the literal HTTP code (e.g. 400, 500, 502) extracted from the provider error message." },
+                },
+              },
+            },
+          })),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company not found." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
     "/gateway/providers/{key}/models/{id}": {
       parameters: [
         { name: "key", in: "path", required: true, schema: { type: "string" } },
@@ -1188,7 +1393,7 @@ const openapi = {
         tags: ["Gateway"],
         summary: "Knowledge base create options",
         description:
-          "Bundles the company's vector_index + object_bucket resources and the catalog embedding models in one round trip for the create modal (D14). Requires x-company-name.",
+          "Bundles the company's vector_index + object_bucket + graph_database resources and the catalog embedding models in one round trip for the create modal (D14). Also drives the Config page's Vector Index / Storage / Graph DB selectors (resources come from every provider, plus live Cloudflare account rows). Requires x-company-name.",
         responses: {
           200: RESP.ok(okBody({ options: { type: "object" } })),
           400: { $ref: "#/components/responses/BadRequest" },
@@ -1245,6 +1450,28 @@ const openapi = {
           400: { $ref: "#/components/responses/BadRequest" },
           401: { $ref: "#/components/responses/Unauthorized" },
           409: { description: "KB key already exists, or the company KB limit is reached." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/kbs/health": {
+      get: {
+        tags: ["Gateway"],
+        summary: "KB stale-index health report",
+        description:
+          "Flags KBs whose last successful ingest predates their bound Vectorize index's created_on — proof the index was deleted and recreated after the data was written, so every vector from that ingest is gone while the registry still lists the documents as processed. Only KBs bound to a Cloudflare-family resource row are checked (the same non-CF denylist as the ask path's retrieval routing; legacy config VECTOR_INDEX bindings included); KBs bound to other providers are reported uncheckable with the provider named. A failed live index-list call degrades every CF-bound KB to uncheckable — the check never guesses, so a KB is only ever flagged with proof.",
+        responses: {
+          200: RESP.ok(
+            okBody({
+              checked: { type: "boolean", description: "True when at least one CF-bound KB was evaluated against a live index list." },
+              indexCount: { type: "integer", description: "Live Vectorize indexes seen (0 when the list was unavailable)." },
+              healthy: { type: "array", items: { $ref: "#/components/schemas/KbIndexHealth" } },
+              flagged: { type: "array", items: { $ref: "#/components/schemas/KbIndexHealth" } },
+              uncheckable: { type: "array", items: { $ref: "#/components/schemas/KbIndexHealth" } },
+            })
+          ),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
           503: { description: "MySQL not configured." },
         },
       },
@@ -1345,7 +1572,7 @@ const openapi = {
         tags: ["Gateway"],
         summary: "Provision a provider resource",
         description:
-          "Creates a provider_resources row under a company credential (Phase D: company → credential → resource). The resource type must be one the provider's catalog advertises (provider_resource_types); the credential must belong to the company AND the provider; max_per_credential from the template is enforced (409). Audits resource.created.",
+          "Creates a provider_resources row under a company credential. The resource type must be one the provider's catalog advertises (provider_resource_types); the credential must belong to the company AND the provider; max_per_credential from the template is enforced (409). Audits resource.created.",
         parameters: [{ name: "key", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
@@ -1360,6 +1587,74 @@ const openapi = {
           400: { $ref: "#/components/responses/BadRequest" },
           401: { $ref: "#/components/responses/Unauthorized" },
           409: { description: "Resource key already exists, or the credential is at max_per_credential for this type." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/companies/{key}/cloudflare/resources/{type}": {
+      parameters: [{ name: "key", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        tags: ["Gateway"],
+        summary: "List live Cloudflare resources",
+        description:
+          "Lists the account's ACTUAL Cloudflare infrastructure (Vectorize indexes, R2 buckets, D1 databases, KV namespaces) through the company's saved Cloudflare connection — unlike /resources (registry rows), this is a live read from the Cloudflare REST API. type ∈ vector_index | object_bucket | sql_database | kv_namespace. Rows are normalized to { id, name, … } for the portal tables.",
+        parameters: [{ name: "type", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          200: RESP.ok(okBody({ companyKey: { type: "string" }, credentialKey: { type: "string" }, type: { type: "string" }, resources: { type: "array", items: { type: "object" } } })),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company not found, or it has no active Cloudflare connection." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+      post: {
+        tags: ["Gateway"],
+        summary: "Create a live Cloudflare resource",
+        description:
+          "Creates real infrastructure on the Cloudflare account (Vectorize index, R2 bucket, D1 database, KV namespace) via the company's Cloudflare connection. Body: { name, providerKey?, config? } — config carries type-specific options (dimensions/metric for vector_index, locationHint for object_bucket/sql_database). Duplicate names are refused (409). Audits cloudflare_resource.created.",
+        parameters: [{ name: "type", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  providerKey: { type: "string" },
+                  config: { type: "object", description: "e.g. { dimensions: 768, metric: \"cosine\" } or { locationHint: \"WEUR\" }" },
+                },
+                required: ["name"],
+              },
+            },
+          },
+        },
+        responses: {
+          201: RESP.ok(okBody({ message: { type: "string" }, resource: { type: "object" } }), "Created."),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company not found, or it has no active Cloudflare connection." },
+          409: { description: "A resource with that name already exists on the account." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/companies/{key}/cloudflare/resources/{type}/{id}": {
+      delete: {
+        tags: ["Gateway"],
+        summary: "Delete a live Cloudflare resource",
+        description:
+          "Deletes the infrastructure from the Cloudflare account (Vectorize index / R2 bucket by name, D1 database / KV namespace by uuid). Irreversible — mirrors a dashboard delete. Audits cloudflare_resource.deleted.",
+        parameters: [
+          { name: "key", in: "path", required: true, schema: { type: "string" } },
+          { name: "type", in: "path", required: true, schema: { type: "string" } },
+          { name: "id", in: "path", required: true, schema: { type: "string" }, description: "Resource name (vector/bucket) or uuid (d1/kv)." },
+        ],
+        responses: {
+          200: RESP.ok(okBody({ message: { type: "string" } })),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company not found, or it has no active Cloudflare connection." },
           503: { description: "MySQL not configured." },
         },
       },
@@ -1409,6 +1704,95 @@ const openapi = {
           200: RESP.ok(okBody({ message: { type: "string" } })),
           401: { $ref: "#/components/responses/Unauthorized" },
           404: { description: "Resource not found." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/companies/{key}/execute/chat": {
+      post: {
+        tags: ["Gateway"],
+        summary: "Execute a chat completion through a company credential",
+        description:
+          "Calls the provider's chat API with the credential's decrypted fields (9Router executor equivalent). The credential is resolved by credentialId OR providerKey (+ optional credentialKey/environmentKey); model defaults to the provider's first catalog chat model. Responses are normalized to an OpenAI-style shape; provider failures surface the upstream error message (502). Audits provider.execute.chat.",
+        parameters: [{ name: "key", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  credentialId: { type: "integer" },
+                  providerKey: { type: "string" },
+                  credentialKey: { type: "string" },
+                  environmentKey: { type: "string" },
+                  model: { type: "string" },
+                  messages: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: { role: { type: "string" }, content: { type: "string" } },
+                    },
+                  },
+                  options: { type: "object" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({
+            providerKey: { type: "string" },
+            model: { type: "string" },
+            content: { type: "string" },
+            role: { type: "string" },
+            usage: { type: "object" },
+            latencyMs: { type: "number" },
+          })),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company, credential, or provider not found." },
+          502: { description: "The provider returned an error — the upstream message is surfaced." },
+          503: { description: "MySQL not configured." },
+        },
+      },
+    },
+    "/gateway/companies/{key}/execute/embeddings": {
+      post: {
+        tags: ["Gateway"],
+        summary: "Execute an embeddings request through a company credential",
+        description:
+          "Calls the provider's embeddings API with the credential's decrypted fields. model defaults to the provider's first catalog embedding model. Returns the vector arrays. Audits provider.execute.embeddings.",
+        parameters: [{ name: "key", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  credentialId: { type: "integer" },
+                  providerKey: { type: "string" },
+                  credentialKey: { type: "string" },
+                  environmentKey: { type: "string" },
+                  model: { type: "string" },
+                  texts: { type: "array", items: { type: "string" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: RESP.ok(okBody({
+            providerKey: { type: "string" },
+            model: { type: "string" },
+            embeddings: { type: "array", items: { type: "array", items: { type: "number" } } },
+            latencyMs: { type: "number" },
+          })),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          404: { description: "Company, credential, or provider not found." },
+          502: { description: "The provider returned an error — the upstream message is surfaced." },
           503: { description: "MySQL not configured." },
         },
       },
@@ -1542,6 +1926,41 @@ const openapi = {
             properties: { title: { type: "string" }, score: { type: "number" } },
           },
         },
+        matches: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              score: { type: "number" },
+              metadata: {
+                type: "object",
+                properties: {
+                  title: { type: "string" },
+                  url: { type: "string" },
+                  type: { type: "string" },
+                  slug: { type: "string" },
+                  chunkIndex: { type: "integer" },
+                },
+              },
+            },
+          },
+          description: "Full retrieval match set after reranking.",
+        },
+        graph: {
+          type: "object",
+          nullable: true,
+          properties: {
+            cypher: { type: "string", description: "The Cypher query executed." },
+            context: { type: "string", description: "Formatted graph context injected into the prompt." },
+          },
+          description: "Present when GraphRAG is enabled and returns results.",
+        },
+        possibleQuestions: {
+          type: "array",
+          items: { type: "string" },
+          description: "3-5 suggested follow-up questions generated from the answer.",
+        },
         cached: { type: "boolean", description: "Present when the answer came from the in-memory cache." },
         error: { type: "string", description: "Present when the pipeline failed (fallback message)." },
       }),
@@ -1554,13 +1973,13 @@ const openapi = {
         type: "object",
         additionalProperties: true,
         description:
-          "Flat key/value patch over COMPANY_KEYS: GENERAL (BASE_URL, CONTACT_US_URL, LOCATIONS_URL, SERVICES_URL, CONSULTANT_NAME, COMPANY_NAME), MODELS (EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, LLM_MODEL, SMALL_LLM, RERANKING_MODEL), STORAGE (VECTOR_INDEX, R2_BUCKET_NAME), CREDENTIALS (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_TOKEN_VALUE, R2_JURISDICTION_END_POINT).",
+          "Flat key/value patch over COMPANY_KEYS: GENERAL (BASE_URL, CONTACT_US_URL, LOCATIONS_URL, SERVICES_URL, CONSULTANT_NAME, COMPANY_NAME), MODELS (EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, LLM_MODEL, SMALL_LLM, RERANKING_MODEL, AI_PROVIDER), STORAGE (VECTOR_INDEX, R2_BUCKET_NAME), ASSISTANT (ASSISTANT_KEY — the selected gateway assistant drives the chatbot's persona), GUARDRAIL (GUARDRAIL_PROMPT — custom instructions appended to the system message, BLOCKED_TOPICS — newline-separated topics refused before any AI call, BLOCKED_PATTERNS — newline-separated patterns (literal phrase or /regex/ per line) that, when set, replace the built-in pre-retrieval vetoes), CREDENTIALS (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_TOKEN_VALUE, R2_JURISDICTION_END_POINT, NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE).",
       },
       CompanyConfig: {
         type: "object",
         additionalProperties: true,
         description:
-          "Grouped config: { GENERAL, MODELS, STORAGE, CREDENTIALS, AUTH: { API_KEY_ENABLED } }. Key lists match ConfigPatch; credentials are stored per-company and never seeded from env.",
+          "Grouped config: { GENERAL, MODELS, STORAGE, ASSISTANT, CREDENTIALS, AUTH: { API_KEY_ENABLED } }. Key lists match ConfigPatch; credentials are stored per-company and never seeded from env.",
       },
       PromptBody: {
         type: "object",
@@ -1570,8 +1989,39 @@ const openapi = {
           variables: {
             type: "object",
             additionalProperties: true,
-            description: "{{VARIABLE}} → value map.",
+            description:
+              "Merged CUSTOM variable map (company PROMPT_VARIABLES + the selected assistant's variables, assistant wins). There are no built-in variables.",
           },
+          companyVariables: {
+            type: "array",
+            items: { $ref: "#/components/schemas/PromptVariable" },
+            description: "The company's PROMPT_VARIABLES tier.",
+          },
+          assistantVariables: {
+            type: "array",
+            items: { $ref: "#/components/schemas/PromptVariable" },
+            description: "The selected assistant's own variables.",
+          },
+          missing: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Placeholders the template uses that no tier defines. These stay literal in `resolved` rather than being blanked.",
+          },
+        },
+      },
+      PromptVariable: {
+        type: "object",
+        required: ["key"],
+        properties: {
+          key: {
+            type: "string",
+            pattern: "^[A-Za-z][A-Za-z0-9_]*$",
+            maxLength: 64,
+            description: "Uppercase identifier; matching is case-insensitive.",
+            example: "BRAND_NAME",
+          },
+          value: { type: "string", maxLength: 2000 },
         },
       },
       Preset: {
@@ -1642,10 +2092,39 @@ const openapi = {
           kbKey: { type: "string" },
           status: { type: "string", enum: ["active", "indexing", "error", "archived"] },
           inProgress: { type: "boolean" },
+          paused: { type: "boolean", description: "True while the ingest job is suspended (pause/resume)." },
+          pausedAt: { type: "string", format: "date-time", nullable: true, description: "When the job was paused; null otherwise." },
           lastSyncAt: { type: "string", format: "date-time", description: "Row updated_at (last status flip)." },
           documentCount: { type: "integer" },
-          vectorCount: { type: "integer", nullable: true, description: "Best-effort; null when Vectorize is unreachable." },
+          vectorCount: { type: "integer", nullable: true, description: "Best-effort count via the KB's bound vector adapter (Qdrant/Pinecone/Weaviate/OpenAI) or Cloudflare Vectorize for legacy KBs; null when the provider is unreachable." },
           lastError: { type: "string", nullable: true },
+          lastIngestion: {
+            type: "object",
+            nullable: true,
+            description: "Summary of the most recent ingestion run. Checkpointed onto the KB row while the run is in flight (~10s throttle) and flushed on abort/error — an interrupted run reports the partial docs/chunks it produced, not null. Null only when no run has done any work yet.",
+            properties: {
+              at: { type: "string", format: "date-time" },
+              durationMs: { type: "integer" },
+              documentsProcessed: { type: "integer" },
+              documentsSkipped: { type: "integer", description: "Unchanged docs skipped by the ingestion registry (they were already indexed)." },
+              chunksCreated: { type: "integer", description: "Chunks created by the last run (partial for interrupted runs) — 0 when all docs were skipped; not a cumulative total." },
+              mode: { type: "string", description: "Run scope: all, kb, or a document slug." },
+            },
+          },
+        },
+      },
+      KbIndexHealth: {
+        type: "object",
+        properties: {
+          kbKey: { type: "string" },
+          kbName: { type: "string" },
+          vectorIndexName: { type: "string", nullable: true, description: "Bound vector index name (vector_external_id or the company's config VECTOR_INDEX fallback)." },
+          indexCreatedOn: { type: "string", format: "date-time", nullable: true, description: "Live index created_on (RFC3339); null when unknown." },
+          lastIngestionAt: { type: "string", format: "date-time", nullable: true, description: "Last completed ingest (UTC); null when the KB never ingested." },
+          staleIndex: { type: "boolean", description: "True only with proof: last ingest predates the index creation." },
+          indexMissing: { type: "boolean", description: "True when the bound name is absent from a non-empty live index list." },
+          checkable: { type: "boolean", description: "False when the KB could not be evaluated (never ingested, no created_on, or non-CF store)." },
+          reason: { type: "string", description: "User-facing explanation; for flagged KBs it names the likely document loss and the re-ingest remedy." },
         },
       },
       ProviderResourceInput: {
@@ -1710,6 +2189,21 @@ const openapi = {
           primaryKbId: { type: "integer", description: "Primary knowledge base; must belong to the company." },
           kbIds: { type: "array", items: { type: "integer" }, description: "Knowledge bases the assistant can retrieve from; each must belong to the company." },
           systemPrompt: { type: "string" },
+          guardrailPrompt: { type: "string", nullable: true, description: "Custom guardrail instructions appended to the system message. When set, REPLACES the built-in topic guardrail (incl. prompt-injection defense) — include your own defenses." },
+          blockedTopics: { type: "string", nullable: true, description: "Newline-separated topic keywords; any case-insensitive substring match in the question vetoes the ask before any AI call. Always applied on top of blockedPatterns." },
+          blockedPatterns: { type: "string", nullable: true, description: "Newline-separated blocked patterns, one per line: a literal phrase (case-insensitive) or a /delimited/ regex (only i/u flags accepted; i assumed). Checked pre-retrieval in the intent fast-path. When set, FULLY replaces the company BLOCKED_PATTERNS config and the built-in pattern set (no merging). Max 100 lines / 8000 chars. The anchored test-string gate (test/ping/dummy/...) stays active regardless." },
+          variables: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                key: { type: "string", description: "Variable name used in {{KEY}} syntax." },
+                value: { type: "string", description: "Value injected into the prompt." },
+              },
+              required: ["key", "value"],
+            },
+            description: "Custom prompt variables injected into the system prompt at runtime.",
+          },
           temperature: { type: "number", default: 0.7, minimum: 0, maximum: 2 },
           maxTokens: { type: "integer", default: 4096 },
           enableFunctionCalling: { type: "boolean", default: true },
@@ -1731,6 +2225,20 @@ const openapi = {
           credential_id: { type: "integer" },
           model_id: { type: "integer", nullable: true },
           system_prompt: { type: "string" },
+          guardrail_prompt: { type: "string", nullable: true, description: "Custom guardrail; replaces the built-in topic guardrail when set." },
+          blocked_topics: { type: "string", nullable: true, description: "Newline-separated topic keywords refused pre-retrieval (substring match)." },
+          blocked_patterns: { type: "string", nullable: true, description: "Newline-separated literal-or-/regex/ patterns; when set, replaces company + built-in blocked-pattern tiers." },
+          assistant_variables: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                key: { type: "string" },
+                value: { type: "string" },
+              },
+            },
+            description: "Custom prompt variables (JSON array of {key, value}).",
+          },
           temperature: { type: "number" },
           max_tokens: { type: "integer" },
           enable_function_calling: { type: "boolean" },

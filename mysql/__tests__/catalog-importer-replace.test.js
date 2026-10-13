@@ -56,7 +56,7 @@ const FAKE_GET_POOL = async () => ({ getConnection: async () => currentConn });
 function stubUpserts(t, repo, { spyDeletes = false } = {}) {
   const log = [];
   const stub = (name, ret) => {
-    t.mock.method(repo, name, async (...args) => {
+    t.mock.method(repo, name, async () => {
       log.push(name);
       return ret;
     });
@@ -230,7 +230,7 @@ test("a failing delete rolls the whole transaction back", async (t) => {
   assert.equal(conn.calls.released, 1, "connection released even on error");
 });
 
-test("invalid definitions are rejected with 400 before any DB work", async (t) => {
+test("invalid definitions are rejected with 400 before any DB work", async () => {
   const conn = makeFakeConn();
   currentConn = conn;
 

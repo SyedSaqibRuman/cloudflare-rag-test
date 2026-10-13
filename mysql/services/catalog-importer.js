@@ -357,8 +357,8 @@ export async function importProviderDefinition(def, opts = {}) {
   const pool = await (opts.getPool || getPool)();
   const conn = await pool.getConnection();
   const counts = { authFields: 0, endpoints: 0, capabilities: 0, resources: 0, models: 0, pricing: 0 };
-  let providerId = null;
-  let created = false;
+  let providerId;
+  let created;
   try {
     await conn.beginTransaction();
 

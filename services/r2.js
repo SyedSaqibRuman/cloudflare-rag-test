@@ -28,13 +28,17 @@ async function streamToString(stream) {
 // 🔹 Bucket ops use the company's creds when provided, else env-level fallback
 
 /**
- * Read a JSON object from the company's R2 bucket and parse it.
+ * Read a JSON object from an R2 bucket and parse it.
  * Returns null when the key is missing, the object is absent, or the body
  * cannot be parsed — callers treat null as "no chunk".
+ * @param {string} key object key
+ * @param {string} companyName tenant (S3 client creds)
+ * @param {string} [bucketName] explicit bucket — KB-bound callers pass the KB's
+ *   storage_external_id; defaults to the company config bucket (legacy path).
  */
-export async function getChunk(key, companyName) {
+export async function getChunk(key, companyName, bucketName = getR2Bucket(companyName)) {
   if (!key) return null;
-  const bucket = getR2Bucket(companyName);
+  const bucket = bucketName;
   if (!bucket) return null;
   try {
     const res = await getS3Client(companyName).send(
@@ -98,6 +102,38 @@ export async function uploadObject(key, data, companyName, bucketName = getR2Buc
   }
 }
 
+
+/**
+ * List object keys under a prefix in the company's R2 bucket (paginated,
+ * capped at 1000 keys). Used by the ingested-document preview to discover a
+ * document's chunk-N.json files. Returns [] on any failure — preview is
+ * best-effort and must never break the KB page.
+ */
+export async function listObjectKeys(prefix, companyName, bucketName = getR2Bucket(companyName)) {
+  if (!prefix || !bucketName) return [];
+  try {
+    const keys = [];
+    let continuationToken;
+    do {
+      const res = await getS3Client(companyName).send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+          MaxKeys: 1000,
+        })
+      );
+      for (const obj of res.Contents || []) {
+        if (obj?.Key) keys.push(obj.Key);
+      }
+      continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (continuationToken && keys.length < 1000);
+    return keys;
+  } catch (error) {
+    logToFile("error.log", `List objects error (${prefix}): ${error.message}`);
+    return [];
+  }
+}
 
 export async function listBuckets(companyName) {
   try {

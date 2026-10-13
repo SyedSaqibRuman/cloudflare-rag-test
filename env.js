@@ -12,6 +12,12 @@ export const env = Object.freeze({
   // Config store backend: "mysql" (default for new deploys) or "sqlite"
   CONFIG_STORE: process.env.CONFIG_STORE || "sqlite",
 
+  // Reverse-proxy hops in front of the server, or comma-separated proxy IPs.
+  // Undefined means "do not trust X-Forwarded-For" (secure default) — see
+  // parseTrustProxy() in app.js. app.js reads it through this object, so it
+  // MUST be exported here or the setting is silently ignored.
+  TRUST_PROXY: process.env.TRUST_PROXY,
+
   // Admin login (opt-in: routes stay open until both are set)
   ADMIN_USERNAME: process.env.ADMIN_USERNAME,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
@@ -24,4 +30,6 @@ export const env = Object.freeze({
   MYSQL_USER: process.env.MYSQL_USER,
   MYSQL_PASSWORD: process.env.MYSQL_PASSWORD,
   MYSQL_DATABASE: process.env.MYSQL_DATABASE,
+  // "true" enables TLS for remote hosts that require it (Hostinger et al.)
+  MYSQL_SSL: process.env.MYSQL_SSL,
 })

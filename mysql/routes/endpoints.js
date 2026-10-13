@@ -6,6 +6,8 @@ import express from "express";
 import { AuditRepository } from "../repositories.js";
 import * as Registry from "../services/provider-registry.js";
 import { wrap } from "./helpers.js";
+import { parsePagination, paginate } from "./pagination.js";
+import { actorFromReq } from "./shared-helpers.js";
 
 const router = express.Router();
 
@@ -16,7 +18,8 @@ router.get(
   wrap(async (req, res) => {
     const { provider } = req.query;
     const endpoints = await Registry.listEndpoints(provider || null);
-    return res.json({ success: true, endpoints });
+    const pagination = parsePagination(req);
+    return paginate(res, endpoints, pagination, "endpoints", "/gateway/endpoints", provider ? { provider } : {});
   })
 );
 
@@ -29,8 +32,7 @@ router.post(
     const result = await Registry.saveEndpoint(req.body || {});
     const provider = await Registry.getProvider(req.body?.providerKey);
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "endpoint.created",
       entityType: "endpoint",
       entityId: result.id,
@@ -56,8 +58,7 @@ router.put(
     }
     await Registry.updateEndpoint(Number(req.params.id), req.body || {});
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "endpoint.updated",
       entityType: "endpoint",
       entityId: Number(req.params.id),
@@ -91,8 +92,7 @@ router.delete(
     }
     await Registry.removeEndpoint(Number(req.params.id));
     await AuditRepository.log({
-      actorType: "admin",
-      actorId: req.auth?.user || null,
+      ...actorFromReq(req),
       action: "endpoint.deleted",
       entityType: "endpoint",
       entityId: Number(req.params.id),

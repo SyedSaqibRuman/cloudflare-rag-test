@@ -3,7 +3,7 @@
 A Retrieval-Augmented Generation (RAG) API powered by Cloudflare AI, Vectorize, and R2. Provides intelligent question-answering for PopularCert's certification services using semantic vector search, hybrid ranking, and LLM response generation.
 
 ---
-freebuff --continue 2026-08-12T05-16-47.513Z
+freebuff --continue 2026-08-14T05-46-09.890Z
 ## Quick Start
 
 ```bash
@@ -31,6 +31,8 @@ For UI development with hot reload, run `cd web && npm run dev` and the Vite dev
 | Document | Description |
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, environment variables, tech stack, project structure |
+| [Company Setup Guide](docs/company-setup-guide.md) | End-to-end tenant onboarding: company → credentials → resources → KB → ingest → assistant → /ask |
+| [Setup → Chat Walkthrough](docs/SETUP-TO-CHAT.md) | Full click-by-click flow: fresh clone → Cloudflare setup → company/credentials → KB → ingestion → chat in the UI |
 | [Architecture](docs/architecture.md) | System overview, RAG pipeline, CORS, rate limiting, logging |
 | [API: Ask](docs/api/ask.md) | Health check, `POST /ask` (JSON response) |
 | [API: Streaming](docs/api/streaming.md) | `POST /ask-stream` (SSE), `POST /test` |

@@ -1,13 +1,42 @@
 // Admin authentication for the admin portal and /cloudflare/* routes.
-// Credentials come from .env (ADMIN_USERNAME / ADMIN_PASSWORD).
-// If they are unset, admin auth is disabled and every route stays open
+// Credentials come either from Clerk's Backend API (CLERK_SECRET_KEY set —
+// see auth-clerk.js) or from .env (ADMIN_USERNAME / ADMIN_PASSWORD). If
+// neither is configured, admin auth is disabled and every route stays open
 // (backwards compatible with the pre-login behavior).
 import crypto from "node:crypto";
 import { env } from "./env.js";
 
-export const AUTH_ENABLED = Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD);
+export const AUTH_ENABLED =
+  Boolean(process.env.CLERK_SECRET_KEY) || Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD);
 
-const SECRET = env.ADMIN_SECRET || env.ADMIN_PASSWORD || "insecure-dev-only-secret";
+// Dangerous default — make it visible at boot. With neither backend configured
+// every admin route is open (backwards-compatible dev behavior).
+if (!AUTH_ENABLED && env.NODE_ENV !== "test") {
+  console.warn(
+    "⚠️  Admin auth is DISABLED — set CLERK_SECRET_KEY (Clerk login) or ADMIN_USERNAME/ADMIN_PASSWORD (.env login) in .env. All admin routes are currently open."
+  );
+}
+
+// Dynamic twin of AUTH_ENABLED for callers that must react to config set after
+// import time (tests). At runtime both always agree.
+export function authConfigured() {
+  return (
+    Boolean(process.env.CLERK_SECRET_KEY) ||
+    Boolean(process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD)
+  );
+}
+
+// HMAC secret for signing session tokens. It must be an explicit ADMIN_SECRET —
+// falling back to the admin password (or a known constant) would let anyone who
+// reads the repo forge valid tokens. When unset, an ephemeral random secret is
+// generated per boot: auth keeps working within a process lifetime, but tokens
+// never survive a restart (and are unforgeable).
+const SECRET = env.ADMIN_SECRET || crypto.randomBytes(32).toString("hex");
+if (AUTH_ENABLED && !env.ADMIN_SECRET) {
+  console.warn(
+    "⚠️  ADMIN_SECRET is not set — using an ephemeral random secret. Admin sessions will be invalidated on every server restart. Set ADMIN_SECRET in .env (generate with: openssl rand -hex 32)."
+  );
+}
 const TTL_SECONDS = Math.max(1, parseInt(env.ADMIN_TOKEN_TTL_HOURS || "12", 10)) * 3600;
 
 export const TOKEN_TTL_SECONDS = TTL_SECONDS;
@@ -19,8 +48,10 @@ function safeEqual(a, b) {
 }
 
 export function checkCredentials(username, password) {
-  if (!AUTH_ENABLED) return false;
-  return safeEqual(username, env.ADMIN_USERNAME) && safeEqual(password, env.ADMIN_PASSWORD);
+  // Read at call time (like isClerkConfigured in auth-clerk.js) so tests can
+  // toggle legacy credentials via process.env after import.
+  if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) return false;
+  return safeEqual(username, process.env.ADMIN_USERNAME) && safeEqual(password, process.env.ADMIN_PASSWORD);
 }
 
 export function signToken(username) {
@@ -39,7 +70,11 @@ export function verifyToken(token) {
   if (!safeEqual(sig, expected)) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (!data?.u || !data?.exp || data.exp < Math.floor(Date.now() / 1000)) return null;
+    // `u` must be a string — every real login mints `u` as the username/email.
+    // An object here means a hand-crafted or legacy token; reject it so the
+    // portal re-logs-in instead of rendering `{sub,…}` as the display name
+    // (a non-string `u` once crashed the sidebar's `charAt(0)`).
+    if (typeof data?.u !== "string" || !data.u || !data?.exp || data.exp < Math.floor(Date.now() / 1000)) return null;
     return data;
   } catch {
     return null;

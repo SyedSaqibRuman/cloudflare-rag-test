@@ -6,6 +6,7 @@ export {
   URL_KEYS,
   STRING_KEYS,
   PROMPT_KEYS,
+  PROMPT_VARIABLE_KEYS,
   RESOURCE_KEYS,
   ALLOWED_MODELS,
   EMBEDDING_DIMENSIONS,
@@ -21,7 +22,7 @@ export { runtimeConfig, saveConfig, getCompanyConfig, initConfig } from "./store
 export { validateConfigKey, validateCompanyName } from "./validation.js";
 
 // Prompt resolution
-export { resolvePromptVariables } from "./prompts.js";
+export { resolvePromptVariables, getPromptVariableMap } from "./prompts.js";
 
 // Company CRUD
 export {

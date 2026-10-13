@@ -567,6 +567,7 @@ CREATE TABLE IF NOT EXISTS assistants (
     credential_model_access_id BIGINT UNSIGNED DEFAULT NULL,
     
     system_prompt TEXT,
+    assistant_variables JSON,
     temperature DECIMAL(3,2) DEFAULT 0.7,
     max_tokens INT UNSIGNED DEFAULT 4096,
     enable_function_calling BOOLEAN DEFAULT TRUE,

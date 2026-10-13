@@ -1,23 +1,31 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Card, Button, Input, Badge, Empty, Spinner, Modal, Toast } from "../components/ui";
+import { Card, Button, Input, Badge, Empty, Spinner, Modal } from "../components/ui";
 import { useCompanies } from "../context";
-import { shorten, companyStatus } from "../util";
+import { companyStatus } from "../util";
 import { useHeaderActions } from "../components/Layout";
+import { useToast } from "../hooks";
 
 export default function Companies({ navigate }) {
   const { companies, refresh, select, company } = useCompanies();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
+  const [createError, setCreateError] = useState(null);
   const [form, setForm] = useState({ name: "", baseUrl: "" });
   const [busy, setBusy] = useState(false);
 
-  const notify = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
+  const openCreate = () => {
+    setForm({ name: "", baseUrl: "" });
+    setCreateError(null);
+    setCreateOpen(true);
   };
+
+  // Mirror of the server rule (config/validation.js): lowercase letters,
+  // numbers, and hyphens, 2–63 chars.
+  const name = form.name.trim();
+  const slugOk = /^[a-z0-9-]+$/.test(name) && name.length >= 2 && name.length <= 63;
 
   const load = async () => {
     setLoading(true);
@@ -32,21 +40,22 @@ export default function Companies({ navigate }) {
   };
 
   const create = async () => {
-    if (!form.name.trim()) return;
+    if (!slugOk) return;
     setBusy(true);
-    setError(null);
+    setCreateError(null);
     try {
       const config = form.baseUrl.trim() ? { BASE_URL: form.baseUrl.trim() } : undefined;
       await api("/cloudflare/companies", {
         method: "POST",
-        body: { name: form.name.trim(), config },
+        body: { name, config },
+        toast: false, // page notify()s its own phrasing
       });
       setCreateOpen(false);
       setForm({ name: "", baseUrl: "" });
       await refresh();
-      notify(`Company '${form.name.trim()}' created.`);
+      notify(`Company '${name}' created.`);
     } catch (e) {
-      setError(e.message);
+      setCreateError(e.message);
     } finally {
       setBusy(false);
     }
@@ -56,7 +65,7 @@ export default function Companies({ navigate }) {
     if (!window.confirm(`Delete company '${name}'? This cannot be undone.`)) return;
     setError(null);
     try {
-      await api(`/cloudflare/companies/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await api(`/cloudflare/companies/${encodeURIComponent(name)}`, { method: "DELETE", toast: false });
       if (company === name) select("");
       await refresh();
       notify(`Company '${name}' deleted.`);
@@ -69,7 +78,7 @@ export default function Companies({ navigate }) {
     if (!window.confirm(`Reset company '${name}' to defaults?`)) return;
     setError(null);
     try {
-      await api(`/cloudflare/companies/${encodeURIComponent(name)}/reset`, { method: "POST" });
+      await api(`/cloudflare/companies/${encodeURIComponent(name)}/reset`, { method: "POST", toast: false });
       notify(`Company '${name}' reset to defaults.`);
     } catch (e) {
       setError(e.message);
@@ -81,7 +90,7 @@ export default function Companies({ navigate }) {
       <Button variant="secondary" onClick={load} disabled={loading}>
         {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
       </Button>
-      <Button onClick={() => setCreateOpen(true)}>New Company</Button>
+      <Button onClick={openCreate} className="whitespace-nowrap">New Company</Button>
     </div>
   );
 
@@ -99,13 +108,12 @@ export default function Companies({ navigate }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-slate-500">
-                  <th className="pb-3 font-medium">Company</th>
-                  <th className="pb-3 font-medium">Status</th>
-                  <th className="pb-3 font-medium">Assistant</th>
-                  <th className="pb-3 font-medium">Source</th>
-                  <th className="pb-3 font-medium">Vector Index</th>
-                  <th className="pb-3 font-medium">R2 Bucket</th>
-                  <th className="pb-3 font-medium text-right">Actions</th>
+                  <th className="pb-3 font-medium whitespace-nowrap">Company</th>
+                  <th className="pb-3 font-medium whitespace-nowrap">Status</th>
+                  <th className="pb-3 font-medium whitespace-nowrap min-w-[6rem]">Assistant</th>
+                  <th className="pb-3 font-medium whitespace-nowrap max-w-[14rem]">Vector Index</th>
+                  <th className="pb-3 font-medium whitespace-nowrap max-w-[14rem]">R2 Bucket</th>
+                  <th className="pb-3 font-medium text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -141,13 +149,12 @@ export default function Companies({ navigate }) {
                       </div>
                     </td>
                     <td className="py-3"><Badge tone={st.tone}>{st.label}</Badge></td>
-                    <td className="py-3">{c.CONSULTANT_NAME || "—"}</td>
-                    <td className="py-3">{shorten(c.BASE_URL, 32)}</td>
+                    <td className="py-3">{c.assistantName || c.CONSULTANT_NAME || "—"}</td>
                     <td className="py-3">
-                      {c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-600">—</span>}
+                      {c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-500">—</span>}
                     </td>
                     <td className="py-3">
-                      {c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-600">—</span>}
+                      {c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-500">—</span>}
                     </td>
                     <td className="py-3">
                       <div className="flex items-center justify-end gap-1">
@@ -180,21 +187,28 @@ export default function Companies({ navigate }) {
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={create} disabled={!form.name.trim() || busy}>
+            <Button onClick={create} disabled={!slugOk || busy} title={slugOk ? undefined : "Lowercase letters, numbers, and hyphens, 2–63 characters"}>
               {busy ? <Spinner className="h-3.5 w-3.5" /> : "Create"}
             </Button>
           </>
         }
       >
         <div className="space-y-4">
+          {createError && (
+            <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+              {createError}
+            </div>
+          )}
           <Input
             label="Company slug"
             placeholder="acme-cert"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             error={
-              form.name && !/^[a-z0-9-]+$/.test(form.name)
-                ? "Lowercase letters, numbers, and hyphens only."
+              form.name && (!slugOk)
+                ? !/^[a-z0-9-]+$/.test(form.name)
+                  ? "Lowercase letters, numbers, and hyphens only."
+                  : "Between 2 and 63 characters."
                 : undefined
             }
           />
@@ -207,7 +221,7 @@ export default function Companies({ navigate }) {
         </div>
       </Modal>
 
-      <Toast message={toast} />
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

@@ -27,6 +27,7 @@ const {
   AuditRepository,
 } = await import("../repositories.js");
 const Registry = await import("../services/provider-registry.js");
+const { _usePoolForTests, closePool } = await import("../pool.js");
 const gatewayRouter = (await import("../gateway-router.js")).default;
 
 const PROVIDER = { id: 1, provider_key: "openai", provider_name: "OpenAI" };
@@ -54,11 +55,11 @@ function stub(obj, method, impl) {
 async function seedRegistry({ provider = PROVIDER } = {}) {
   const restores = [
     stub(ProviderRepository, "list", async () => [provider]),
-    stub(ProviderRepository, "capabilities", async () => []),
-    stub(ProviderRepository, "authForm", async () => []),
-    stub(ProviderRepository, "resourceTemplates", async () => []),
-    stub(ModelRepository, "listByProvider", async () => []),
-    stub(EndpointRepository, "list", async () => []),
+    stub(ProviderRepository, "capabilitiesByProviderIds", async () => []),
+    stub(ProviderRepository, "authFormsByProviderIds", async () => []),
+    stub(ProviderRepository, "resourceTemplatesByProviderIds", async () => []),
+    stub(ModelRepository, "listByProviderIds", async () => []),
+    stub(EndpointRepository, "listByProviderIds", async () => []),
   ];
   Registry.invalidateRegistry();
   await Registry.refreshRegistry();
@@ -79,6 +80,8 @@ async function stubHappy() {
       calls.upsertArgs = { providerId, m };
       return 42;
     }),
+    // The route closes any open-ended price row before inserting (D3 invariant).
+    stub(PricingRepository, "closeCurrent", async () => {}),
     stub(PricingRepository, "create", async (modelId, input) => {
       calls.pricingArgs.push({ modelId, input });
       return 7;
@@ -126,11 +129,11 @@ async function req(server, method, urlPath, body) {
 test("POST model returns 404 for an unknown provider", async () => {
   const restores = [
     stub(ProviderRepository, "list", async () => []),
-    stub(ProviderRepository, "capabilities", async () => []),
-    stub(ProviderRepository, "authForm", async () => []),
-    stub(ProviderRepository, "resourceTemplates", async () => []),
-    stub(ModelRepository, "listByProvider", async () => []),
-    stub(EndpointRepository, "list", async () => []),
+    stub(ProviderRepository, "capabilitiesByProviderIds", async () => []),
+    stub(ProviderRepository, "authFormsByProviderIds", async () => []),
+    stub(ProviderRepository, "resourceTemplatesByProviderIds", async () => []),
+    stub(ModelRepository, "listByProviderIds", async () => []),
+    stub(EndpointRepository, "listByProviderIds", async () => []),
   ];
   Registry.invalidateRegistry();
   await Registry.refreshRegistry();
@@ -245,6 +248,7 @@ test("POST model upserts the model row, invalidates the registry, and audits", a
       supportsVision: false,
       maxContextWindow: 128000,
       maxOutputTokens: null,
+      thinkingMode: "auto",
     });
     assert.equal(calls.pricingArgs.length, 0);
     assert.equal(auditLog.length, 1);
@@ -264,6 +268,18 @@ test("POST model upserts the model row, invalidates the registry, and audits", a
 
 test("POST model adds pricing rows when provided", async () => {
   const { restores, calls } = await stubHappy();
+  // The route wraps the close+insert batch in one transaction via getPool().
+  // ESM namespaces are frozen, so inject a fake pool through the test seam
+  // and assert the transaction lifecycle actually runs.
+  const tx = { begin: 0, commit: 0, rollback: 0 };
+  const fakeConn = {
+    beginTransaction: async () => { tx.begin += 1; },
+    commit: async () => { tx.commit += 1; },
+    rollback: async () => { tx.rollback += 1; },
+    release: () => {},
+    end: async () => {},
+  };
+  _usePoolForTests({ getConnection: async () => fakeConn, end: async () => {} });
   const server = await listen(makeApp());
   try {
     const { res, json } = await req(server, "POST", "/gateway/providers/openai/models", {
@@ -279,9 +295,14 @@ test("POST model adds pricing rows when provided", async () => {
     // effectiveFrom defaults to today (YYYY-MM-DD).
     assert.match(calls.pricingArgs[0].input.effectiveFrom, /^\d{4}-\d{2}-\d{2}$/);
     assert.equal(calls.pricingArgs[0].input.priceCurrency, "USD");
+    // One open/commit cycle — no rollback on the happy path.
+    assert.equal(tx.begin, 1);
+    assert.equal(tx.commit, 1);
+    assert.equal(tx.rollback, 0);
   } finally {
     restores.forEach((r) => r());
     server.close();
+    await closePool(); // clears the injected fake pool
   }
 });
 
@@ -459,6 +480,7 @@ test("PUT model merges a partial update, keeps the key, and audits", async () =>
       supportsVision: false,
       maxContextWindow: 200000,
       maxOutputTokens: 4096,
+      thinkingMode: "auto",
     });
     assert.equal(auditLog.length, 1);
     assert.equal(auditLog[0].action, "provider.model.updated");

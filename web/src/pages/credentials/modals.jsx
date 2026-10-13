@@ -3,7 +3,7 @@
 // slice of page state + callbacks; all data loading and handlers stay in
 // page.jsx. Extracted so the page file is just the stateful shell + cards.
 // --------------------------
-import { Button, Empty, Input, Modal, Select, Spinner } from "../../components/ui";
+import { Button, Empty, Input, Modal, Select, Spinner, Toggle, ArrowRightIcon } from "../../components/ui";
 import { AuthFields, ResourceConfigFields } from "./fields";
 
 // -------- Add / edit credential --------
@@ -18,6 +18,9 @@ export function CredentialModal({
   keyTouched,
   formError,
   saving,
+  checkResult,
+  checkBusy,
+  onCheck,
   onClose,
   onProvider,
   onName,
@@ -27,11 +30,22 @@ export function CredentialModal({
   setDefault,
   onSave,
 }) {
+  // Soft-fail: the connection works but the provider reported a caveat (e.g.
+  // quota exhausted) — show it in amber instead of green.
+  const checkWarn = checkResult?.status === "success" && checkResult.warning;
+  const checkTone = checkWarn
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+    : checkResult?.status === "success"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+      : "border-rose-500/40 bg-rose-500/10 text-rose-300";
   return (
     <Modal
       open={open}
       title={editTarget ? "Edit credential" : "Add credential"}
       onClose={onClose}
+      // Max height = screen, min height = content (long auth forms scroll
+      // inside the modal instead of overflowing the viewport).
+      maxScreen
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
@@ -78,7 +92,7 @@ export function CredentialModal({
               ? "Credential key is immutable."
               : keyTouched
                 ? "Manual value — type in the name field to re-sync it."
-                : "Auto-generated from the name (lowercase, spaces → _)."}
+                : <>Auto-generated from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> _).</>}
           </p>
         </div>
         {environments?.length > 0 && (
@@ -96,15 +110,47 @@ export function CredentialModal({
           </p>
         )}
         <AuthFields schema={authForm} values={fieldValues} onChange={setField} />
-        <label className="flex items-center gap-2 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={form.isDefault}
-            onChange={(e) => setDefault(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
-          />
-          Default credential for this provider
-        </label>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Button variant="secondary" onClick={onCheck} disabled={checkBusy || !form.providerKey}>
+              {checkBusy ? (
+                <>
+                  <Spinner className="h-3.5 w-3.5" /> Checking…
+                </>
+              ) : (
+                "Check Connection"
+              )}
+            </Button>
+            {!editTarget && (
+              <span className="text-[11px] text-slate-500">Validates your credentials against the provider before saving.</span>
+            )}
+          </div>
+          {checkResult && (
+            <div
+              role={checkWarn ? "status" : checkResult.status === "success" ? "status" : "alert"}
+              className={`mt-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${checkTone}`}
+            >
+              <span aria-hidden="true">{checkResult.status === "success" ? "✓" : "✕"}</span>
+              <span>
+                {checkResult.status === "success"
+                  ? `Connection successful${checkResult.latencyMs != null ? ` in ${checkResult.latencyMs}ms` : ""}.`
+                  : `Connection failed${checkResult.error ? `: ${checkResult.error}` : "."}`}{" "}
+                {checkResult.status === "success" && !editTarget
+                  ? "You can now save the credential."
+                  : checkResult.status === "success"
+                    ? "Changes keep the stored values for blank fields."
+                    : "Check your credentials and try again."}
+                {checkWarn && (
+                  <span className="mt-1 block">⚠️ {checkResult.warning}</span>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+          <span>Default credential for this provider</span>
+          <Toggle checked={form.isDefault} onChange={setDefault} title="Toggle default credential" />
+        </div>
       </div>
     </Modal>
   );
@@ -176,7 +222,7 @@ export function ModelsModal({
           providerModels.map((m) => {
             const on = grants[m.id] ? grants[m.id].is_enabled : false;
             return (
-              <label
+              <div
                 key={m.id}
                 className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5"
               >
@@ -187,14 +233,13 @@ export function ModelsModal({
                     {m.max_context_window ? ` · ${Math.round(m.max_context_window / 1000)}k ctx` : ""}
                   </span>
                 </span>
-                <input
-                  type="checkbox"
+                <Toggle
                   checked={on}
                   disabled={modelsLoading}
-                  onChange={(e) => onToggle(m, e.target.checked)}
-                  className="h-4 w-4 shrink-0 rounded border-slate-600 bg-slate-950 accent-indigo-500"
+                  onChange={(v) => onToggle(m, v)}
+                  title={on ? "Revoke model access" : "Grant model access"}
                 />
-              </label>
+              </div>
             );
           })
         )}
@@ -312,7 +357,7 @@ export function ResourceModal({
             <p className="mt-1.5 text-[11px] text-slate-500">
               {resKeyTouched
                 ? "Manual key — type in the name field to re-sync it."
-                : "Key auto-generates from the name (lowercase, spaces → -)."}
+                : <>Key auto-generates from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> -).</>}
             </p>
           )}
         </div>

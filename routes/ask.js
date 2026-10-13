@@ -2,9 +2,12 @@ import express from "express";
 import crypto from "node:crypto";
 import rateLimit from "express-rate-limit";
 import { askQuestion, askQuestionStream } from "../query/index.js";
+import { generateStarterQuestions } from "../query/suggestions.js";
 import { createStreamTransport } from "../query/stream-contract.js";
+import { clearCompanyCache } from "../query/cache.js";
 import { getCompanyConfig } from "../config/index.js";
 import { companyFromRequest, companyOriginCheck } from "../utils/request-context.js";
+import { markCompanyChat } from "../utils/setup-progress.js";
 
 // --------------------------
 // ASK ROUTES (POST /ask, POST /ask-stream)
@@ -16,9 +19,10 @@ import { companyFromRequest, companyOriginCheck } from "../utils/request-context
 
 // Strict limit for AI-powered endpoints: lower than the global baseline
 // because each call costs a Cloudflare Workers AI request.
-const aiLimiter = rateLimit({
+// Exported so other AI-costing routes (/test) can share the same tier.
+export const aiLimiter = rateLimit({
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: true,
   validate: { trustProxy: false },
   windowMs: 60 * 1000,
   max: 20,
@@ -77,8 +81,12 @@ export function requireAskApiKey(req, res, next) {
 // POST /ask (JSON response)
 // --------------------------
 export async function askJsonHandler(pipeline, req, res) {
+  // Abort the (paid) AI call when the client disconnects mid-request —
+  // mirrors the stream path's abort handling.
+  const abortController = new AbortController();
+  req.on("close", () => abortController.abort());
   try {
-    const { question, history = [] } = req.body;
+    const { question, history = [], assistantKey } = req.body;
 
     if (!question?.trim()) {
       return res.status(400).json({ success: false, error: "Question is required" });
@@ -88,9 +96,22 @@ export async function askJsonHandler(pipeline, req, res) {
       return res.status(400).json({ success: false, error: "History must be an array" });
     }
 
-    const result = await pipeline.askQuestion(question, history, req.companyName);
+    // `assistantKey` is REQUEST-SCOPED: it is threaded into the pipeline as an
+    // override and never written to the company's stored config. Writing it to
+    // runtimeConfig was a persist-first DB write on an unauthenticated path —
+    // an injected key survived the request (the old restore was a no-op when the
+    // company had no prior key) and concurrent requests raced each other.
+    const result = await pipeline.askQuestion(question, history, req.companyName, {
+      signal: abortController.signal,
+      assistantKey: assistantKey || null,
+    });
+
+    // Client gone before the answer landed — nothing to write to.
+    if (abortController.signal.aborted || res.destroyed) return;
+    markCompanyChat(req.companyName); // completed a chat turn — setup checkpoint
     return res.json({ success: true, ...result });
   } catch (err) {
+    if (abortController.signal.aborted) return;
     console.error("❌ /ask Error:", err);
     return res.status(500).json({ success: false, error: "Internal Server Error" });
   }
@@ -102,7 +123,7 @@ export async function askJsonHandler(pipeline, req, res) {
 export async function askStreamHandler(pipeline, req, res) {
   let transport = null;
   try {
-    const { question, history = [] } = req.body;
+    const { question, history = [], assistantKey } = req.body;
 
     // --------------------------
     // 🔹 VALIDATION
@@ -140,18 +161,24 @@ export async function askStreamHandler(pipeline, req, res) {
       console.log("ℹ️ SSE connection closed");
     });
 
-    // --------------------------
-    // 🔹 EXECUTE STREAM
-    // --------------------------
-    await pipeline.askQuestionStream(question, history, transport, req.companyName);
+    // `assistantKey` is REQUEST-SCOPED — see askJsonHandler. It is passed into the
+    // pipeline rather than persisted to the company's config store.
+    await pipeline.askQuestionStream(question, history, transport, req.companyName, {
+      assistantKey: assistantKey || null,
+    });
 
     // --------------------------
     // 🔹 FINISH STREAM
     // --------------------------
+    // The pipeline already calls transport.finish() on the success path
+    // (which sends [DONE] and marks the transport closed). The HTTP response
+    // must still be ended — res.end() is unconditional — otherwise the
+    // connection hangs open after the answer completes.
     if (!transport.isClosed()) {
       transport.finish();
-      res.end();
     }
+    markCompanyChat(req.companyName); // completed a chat turn — setup checkpoint
+    res.end();
   } catch (err) {
     console.error("❌ Stream API Error:", err.message);
 
@@ -174,11 +201,41 @@ export async function askStreamHandler(pipeline, req, res) {
 }
 
 // --------------------------
+// GET /ask/suggestions — per-company starter questions for the Test AI empty
+// state. Runs the same company + per-company API-key gates as /ask and sits
+// behind the AI limiter (each call costs one small-LLM request). Best-effort:
+// an empty index or missing credentials returns { questions: [] }.
+// --------------------------
+export async function askSuggestionsHandler(req, res) {
+  try {
+    const questions = await generateStarterQuestions(req.companyName);
+    return res.json({ success: true, questions });
+  } catch (err) {
+    console.error("❌ /ask/suggestions Error:", err);
+    return res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+}
+
+// --------------------------
+// POST /ask/reset — conversation reset for one company
+// Clears the in-memory answer cache for this company so the next question
+// re-runs the full RAG pipeline (no cached answers, no stale context). Gated
+// by the same company + per-company API-key middleware as /ask. Not behind the
+// AI limiter: it's a cheap in-memory purge, not an AI call.
+// --------------------------
+export function resetCacheHandler(req, res) {
+  const removed = clearCompanyCache(req.companyName);
+  return res.json({ success: true, cleared: removed });
+}
+
+// --------------------------
 // ROUTER
 // --------------------------
 export function createAskRouter({ pipeline = { askQuestion, askQuestionStream } } = {}) {
   const router = express.Router();
   router.post("/ask", requireCompany, requireAskApiKey, aiLimiter, (req, res) => askJsonHandler(pipeline, req, res));
   router.post("/ask-stream", requireCompany, requireAskApiKey, aiLimiter, (req, res) => askStreamHandler(pipeline, req, res));
+  router.get("/ask/suggestions", requireCompany, requireAskApiKey, aiLimiter, askSuggestionsHandler);
+  router.post("/ask/reset", requireCompany, requireAskApiKey, resetCacheHandler);
   return router;
 }

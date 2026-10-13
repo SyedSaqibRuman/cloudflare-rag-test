@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, Badge, StatCard, Empty, Spinner, Button } from "../components/ui";
+import { Card, Badge, StatCard, Empty, Button, SkeletonCard, InfoTip } from "../components/ui";
+import { getTermTooltip } from "../components/glossary";
 import { useCompanies } from "../context";
 import { formatDate, shorten, companyStatus, cx } from "../util";
+import OnboardingWizard, { useOnboarding } from "../components/OnboardingWizard";
+import NextStepPrompt from "../components/NextStepPrompt";
 
 function Dot({ tone = "green" }) {
   const colors = {
@@ -14,8 +17,11 @@ function Dot({ tone = "green" }) {
 }
 
 export default function Dashboard({ navigate }) {
-  const { company } = useCompanies();
-  const [companies, setCompanies] = useState([]);
+  // Company list comes from CompanyProvider (single source of truth, shared
+  // with the sidebar) — refreshed here every poll instead of fetched twice.
+  const { company, companies, refresh } = useCompanies();
+  const { show: showOnboarding, dismiss: dismissOnboarding } = useOnboarding();
+  const [nextStep, setNextStep] = useState(null);
   const [indexes, setIndexes] = useState([]);
   const [buckets, setBuckets] = useState([]);
   const [status, setStatus] = useState(null);
@@ -25,16 +31,15 @@ export default function Dashboard({ navigate }) {
   const load = async () => {
     setError(null);
     try {
-      const [c, i, b, s] = await Promise.all([
-        api("/cloudflare/companies"),
+      const [i, b, s] = await Promise.all([
         company ? api("/cloudflare/indexes", { company }) : Promise.resolve({ indexes: [] }),
         company ? api("/cloudflare/buckets", { company }) : Promise.resolve({ buckets: [] }),
         api("/cloudflare/status"),
       ]);
-      setCompanies(c.companies || []);
       setIndexes(i.indexes || []);
       setBuckets(b.buckets || []);
       setStatus(s);
+      await refresh(); // updates the shared company list (never rejects)
     } catch (e) {
       setError(e.message);
     } finally {
@@ -46,6 +51,7 @@ export default function Dashboard({ navigate }) {
     load();
     const id = setInterval(load, 15000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poll on company change; load is stable
   }, [company]);
 
   const running = status?.standalone || [];
@@ -55,18 +61,24 @@ export default function Dashboard({ navigate }) {
   const needSetup = companies.filter((c) => companyStatus(c).label !== "Healthy").length;
 
   const services = [
-    { name: "Cloudflare", ok: anyCreds, detail: anyCreds ? "Credentials configured" : "No credentials yet" },
-    { name: "Workers AI", ok: anyCreds, detail: anyCreds ? "Healthy" : "Needs credentials" },
-    { name: "Vectorize", ok: indexes.length > 0, detail: indexes.length > 0 ? `${indexes.length} index${indexes.length === 1 ? "" : "es"}` : "No index in workspace" },
-    { name: "R2 Storage", ok: buckets.length > 0, detail: buckets.length > 0 ? `${buckets.length} bucket${buckets.length === 1 ? "" : "s"}` : "No bucket in workspace" },
+    { name: "AI Service", tip: getTermTooltip("provider"), ok: anyCreds, detail: anyCreds ? "Connected" : "Not connected yet" },
+    { name: "Search Index", tip: getTermTooltip("vector-index"), ok: indexes.length > 0, detail: indexes.length > 0 ? `${indexes.length} index${indexes.length === 1 ? "" : "es"}` : "Not set up" },
+    { name: "Document Storage", tip: getTermTooltip("object-storage"), ok: buckets.length > 0, detail: buckets.length > 0 ? `${buckets.length} bucket${buckets.length === 1 ? "" : "s"}` : "Not set up" },
+    { name: "AI Jobs", tip: getTermTooltip("workflow"), ok: totalJobs > 0, detail: totalJobs > 0 ? `${totalJobs} running` : "No active jobs" },
   ];
 
   const actions = [
-    { label: "New Company", desc: "Register a tenant", onClick: () => navigate("companies"), icon: <PlusIcon /> },
-    { label: "Create Vector Index", desc: "Provision a Vectorize index", onClick: () => navigate("cloudflare"), icon: <LayersIcon /> },
-    { label: "Run Ingestion", desc: "Sync content from the source", onClick: () => navigate("scheduler"), icon: <PlayIcon /> },
-    { label: "Open Ask Console", desc: "Test the assistant live", onClick: () => navigate("ask"), icon: <ChatIcon /> },
+    { label: "Add Knowledge", desc: "Create a knowledge base from your content", onClick: () => navigate("ingestion"), icon: <BookIcon /> },
+    { label: "Create Assistant", desc: "Set up an AI assistant with your knowledge", onClick: () => navigate("assistants"), icon: <BotIcon /> },
+    { label: "Test AI", desc: "Ask questions and see answers live", onClick: () => navigate("ask"), icon: <ChatIcon /> },
   ];
+
+  // Listen for next-step events from other pages
+  useEffect(() => {
+    const handler = (e) => setNextStep(e.detail?.context || null);
+    window.addEventListener("next-step", handler);
+    return () => window.removeEventListener("next-step", handler);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -74,6 +86,16 @@ export default function Dashboard({ navigate }) {
         <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
           {error}
         </div>
+      )}
+
+      {/* Onboarding wizard — shown for first-time users */}
+      {showOnboarding && !loading && companies.length > 0 && (
+        <OnboardingWizard navigate={navigate} onDismiss={dismissOnboarding} />
+      )}
+
+      {/* Next-step prompt — shown after completing actions */}
+      {nextStep && (
+        <NextStepPrompt context={nextStep} navigate={navigate} />
       )}
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -155,6 +177,7 @@ export default function Dashboard({ navigate }) {
                 <span className="flex items-center gap-2.5 text-sm font-medium text-slate-200">
                   <Dot tone={s.ok ? "green" : "amber"} />
                   {s.name}
+                  {s.tip && <InfoTip content={s.tip} />}
                 </span>
                 <span className={cx("text-xs", s.ok ? "text-emerald-400" : "text-amber-400")}>{s.detail}</span>
               </div>
@@ -187,8 +210,8 @@ export default function Dashboard({ navigate }) {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Card
-          title="Companies"
-          subtitle="Tenants registered on the platform"
+          title="Your Workspaces"
+          subtitle="Company environments and their status"
         >
           {companies.length === 0 ? (
             <Empty message="No companies registered yet." />
@@ -199,8 +222,8 @@ export default function Dashboard({ navigate }) {
                   <tr className="text-left text-xs text-slate-500">
                     <th className="pb-2 font-medium">Company</th>
                     <th className="pb-2 font-medium">Status</th>
-                    <th className="pb-2 font-medium">Vector Index</th>
-                    <th className="pb-2 font-medium">R2 Bucket</th>
+                    <th className="pb-2 font-medium">Vector Index <InfoTip content={getTermTooltip("vector-index")} /></th>
+                    <th className="pb-2 font-medium">R2 Bucket <InfoTip content={getTermTooltip("r2-bucket")} /></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
@@ -224,14 +247,14 @@ export default function Dashboard({ navigate }) {
                             <div className="min-w-0">
                               <p className="font-medium text-slate-100 leading-tight">{c.COMPANY_NAME || c.name}</p>
                               <p className="text-xs text-slate-500 truncate">
-                                {c.CONSULTANT_NAME ? `${c.CONSULTANT_NAME} · ` : ""}{shorten(c.BASE_URL, 24)}
+                                {c.assistantName || c.CONSULTANT_NAME ? `${c.assistantName || c.CONSULTANT_NAME} · ` : ""}{shorten(c.BASE_URL, 24)}
                               </p>
                             </div>
                           </div>
                         </td>
                         <td className="py-2.5"><Badge tone={st.tone}>{st.label}</Badge></td>
-                        <td className="py-2.5">{c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-600">—</span>}</td>
-                        <td className="py-2.5">{c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-600">—</span>}</td>
+                        <td className="py-2.5">{c.VECTOR_INDEX ? <Badge tone="cyan">{c.VECTOR_INDEX}</Badge> : <span className="text-slate-500">—</span>}</td>
+                        <td className="py-2.5">{c.R2_BUCKET_NAME ? <Badge tone="amber">{c.R2_BUCKET_NAME}</Badge> : <span className="text-slate-500">—</span>}</td>
                       </tr>
                     );
                   })}
@@ -243,7 +266,7 @@ export default function Dashboard({ navigate }) {
 
         <Card title="Active Jobs" subtitle="Standalone and scheduled tasks">
           {loading ? (
-            <div className="flex items-center justify-center py-10"><Spinner /></div>
+            <SkeletonCard rows={2} />
           ) : totalJobs === 0 ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-800 text-slate-400">
@@ -288,32 +311,6 @@ export default function Dashboard({ navigate }) {
   );
 }
 
-function PlusIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-
-function LayersIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="m12 2 8.5 4.5L12 11 3.5 6.5 12 2z" />
-      <path d="m3.5 12 8.5 4.5L20.5 12" />
-      <path d="m3.5 17.5 8.5 4.5 8.5-4.5" />
-    </svg>
-  );
-}
-
-function PlayIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="6 3 20 12 6 21 6 3" />
-    </svg>
-  );
-}
-
 function ChatIcon() {
   return (
     <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -321,3 +318,26 @@ function ChatIcon() {
     </svg>
   );
 }
+
+function BookIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </svg>
+  );
+}
+
+function BotIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="10" rx="2" />
+      <circle cx="12" cy="5" r="2" />
+      <path d="M12 7v4" />
+      <line x1="8" y1="16" x2="8" y2="16" />
+      <line x1="16" y1="16" x2="16" y2="16" />
+    </svg>
+  );
+}
+
+

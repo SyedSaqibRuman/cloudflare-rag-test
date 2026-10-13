@@ -3,7 +3,8 @@
 // Extracted verbatim from the former mysql/repositories.js monolith.
 // --------------------------
 import { getPool } from "../pool.js";
-import { json, mapRow } from "./helpers.js";
+import { mapRow } from "./helpers.js";
+import { KB_DEFAULT_SOURCE_TYPE } from "../../shared/catalog-enums.js";
 
 // ------------------------------------------------------------------
 const KB_SELECT = `SELECT k.*,
@@ -49,6 +50,76 @@ export const KbRepository = {
     return rows[0] ? mapRow(rows[0]) : null;
   },
 
+  /**
+   * Live (non-deleted) KBs of any company that bind the given provider_resource
+   * id as their vector / graph / storage resource. Powers the delete guard in
+   * mysql/routes/shared-helpers.js (assertResourceNotKbBound): a resource that
+   * a KB still points at must not be deletable — a stale pointer makes ingest
+   * fail with "Vector store is not configured".
+   * @param {number|string} resourceId
+   * @returns {Promise<Array<{ id: number, kb_key: string, kb_name: string, company_id: number }>>}
+   */
+  async listByResource(resourceId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT id, kb_key, kb_name, company_id,
+              vector_resource_id, graph_resource_id, storage_resource_id
+         FROM knowledge_bases
+        WHERE deleted_at IS NULL
+          AND (vector_resource_id = ? OR graph_resource_id = ? OR storage_resource_id = ?)
+        ORDER BY kb_key`,
+      [resourceId, resourceId, resourceId]
+    );
+    return rows.map(mapRow);
+  },
+
+  /**
+   * Live KBs (any company) whose bound VECTOR resource's external id equals
+   * `externalId` (e.g. a Vectorize index name). Cloudflare index lists carry
+   * no stable id, so the legacy index routes match KB bindings through the
+   * gateway resource rows instead (2026-09-30 index-guard).
+   * @param {string} externalId
+   * @returns {Promise<Array<{ id, kb_key, kb_name, company_id }>>}
+   */
+  async listByVectorExternalId(externalId) {
+    const pool = await getPool();
+    const [rows] = await pool.query(
+      `SELECT kb.id, kb.kb_key, kb.kb_name, kb.company_id
+         FROM knowledge_bases kb
+         JOIN provider_resources pr ON pr.id = kb.vector_resource_id
+        WHERE kb.deleted_at IS NULL
+          AND pr.external_resource_id = ?
+        ORDER BY kb.kb_key`,
+      [externalId]
+    );
+    return rows;
+  },
+
+  /**
+   * Null out every KB binding (vector/graph/storage_resource_id) that points
+   * at the given provider_resource id, across live KBs of all companies. Used
+   * by destructive paths that cannot be blocked — the force provider delete
+   * purge — so no KB is left with a dangling resource pointer (which makes
+   * ingest fail with "Resource #N not found"). Returns the number of KB rows
+   * that had a binding cleared.
+   * @param {number|string} resourceId
+   * @returns {Promise<number>}
+   */
+  async clearResourceBinding(resourceId) {
+    const pool = await getPool();
+    const [result] = await pool.query(
+      `UPDATE knowledge_bases
+          SET vector_resource_id  = IF(vector_resource_id  = ?, NULL, vector_resource_id),
+              graph_resource_id   = IF(graph_resource_id   = ?, NULL, graph_resource_id),
+              storage_resource_id = IF(storage_resource_id = ?, NULL, storage_resource_id),
+              updated_at = NOW()
+        WHERE deleted_at IS NULL
+          AND (vector_resource_id = ? OR graph_resource_id = ? OR storage_resource_id = ?)`,
+      [resourceId, resourceId, resourceId, resourceId, resourceId, resourceId]
+    );
+    return result.affectedRows || 0;
+  },
+
   async create(companyId, input) {
     const pool = await getPool();
     const [result] = await pool.query(
@@ -57,8 +128,10 @@ export const KbRepository = {
           vector_resource_id, graph_resource_id, storage_resource_id,
           embedding_model_id, embedding_model_provider,
           chunk_size, chunk_overlap, retrieval_top_k, retrieval_score_threshold,
-          enable_graph_rag, enable_hybrid_search, status, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          enable_graph_rag, enable_hybrid_search, source_type, status, is_active,
+          graph_extract_max_chunks, graph_extract_concurrency,
+          webhook_url, webhook_secret, webhook_events, source_config)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         companyId,
         input.kbKey,
@@ -75,8 +148,15 @@ export const KbRepository = {
         input.retrievalScoreThreshold ?? 0.7,
         input.enableGraphRag ?? false,
         input.enableHybridSearch ?? true,
+        input.sourceType ?? KB_DEFAULT_SOURCE_TYPE,
         input.status ?? "active",
         input.isActive ?? true,
+        input.graphExtractMaxChunks ?? null,
+        input.graphExtractConcurrency ?? null,
+        input.webhookUrl ?? null,
+        input.webhookSecret ?? null,
+        input.webhookEvents ?? null,
+        input.sourceConfig ? JSON.stringify(input.sourceConfig) : null,
       ]
     );
     return Number(result.insertId);
@@ -97,7 +177,14 @@ export const KbRepository = {
       retrievalTopK: "retrieval_top_k",
       retrievalScoreThreshold: "retrieval_score_threshold",
       enableGraphRag: "enable_graph_rag",
+      graphExtractMaxChunks: "graph_extract_max_chunks",
+      graphExtractConcurrency: "graph_extract_concurrency",
       enableHybridSearch: "enable_hybrid_search",
+      sourceType: "source_type",
+      sourceConfig: "source_config",
+      webhookUrl: "webhook_url",
+      webhookSecret: "webhook_secret",
+      webhookEvents: "webhook_events",
       status: "status",
       isActive: "is_active",
     };
@@ -106,7 +193,8 @@ export const KbRepository = {
     for (const [key, column] of Object.entries(columnByKey)) {
       if (input[key] !== undefined) {
         sets.push(`\`${column}\` = ?`);
-        args.push(input[key]);
+        // source_config is a JSON column — must be stringified
+        args.push(key === "sourceConfig" && input[key] != null ? JSON.stringify(input[key]) : input[key]);
       }
     }
     if (sets.length === 0) return;
@@ -126,6 +214,141 @@ export const KbRepository = {
   async setStatus(kbId, status) {
     const pool = await getPool();
     await pool.query(`UPDATE knowledge_bases SET status = ? WHERE id = ?`, [status, kbId]);
+  },
+
+  /** Flip a KB out of "indexing" (e.g. to "active") when a run stops or pauses
+      — abort deliberately leaves the row untouched (D12), so callers recover
+      it best-effort. */
+  async clearIndexingStatus(kbId) {
+    const pool = await getPool();
+    await pool.query(`UPDATE knowledge_bases SET status = 'active' WHERE id = ? AND status = 'indexing'`, [kbId]);
+  },
+
+  /** Persist ingestion statistics from the last completed run. */
+  /** Update source_config (JSON blob for URL/file sources). */
+  async setSourceConfig(kbId, config) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET source_config = ? WHERE id = ?`,
+      [config ? JSON.stringify(config) : null, kbId]
+    );
+  },
+
+  async setIngestionStats(kbId, stats) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET
+         last_ingestion_at = NOW(),
+         last_ingestion_duration_ms = ?,
+         last_ingestion_documents_processed = ?,
+         last_ingestion_documents_skipped = ?,
+         last_ingestion_chunks_created = ?,
+         last_ingestion_mode = ?,
+         last_ingestion_embedding_fallbacks = ?,
+         last_ingestion_embedding_error = ?,
+         last_error = NULL
+       WHERE id = ?`,
+      [
+        stats.durationMs ?? null,
+        stats.documentsProcessed ?? null,
+        stats.documentsSkipped ?? null,
+        stats.chunksCreated ?? null,
+        stats.mode ?? null,
+        stats.embeddingFallbacks ?? null,
+        stats.embeddingAdapterError ?? null,
+        kbId,
+      ]
+    );
+  },
+
+  /** Record an ingestion error on the KB row. */
+  async setIngestionError(kbId, errorMessage) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET last_error = ? WHERE id = ?`,
+      [errorMessage, kbId]
+    );
+  },
+
+  // ------------------------------------------------------------------
+  // 🔹 Custom Q&A — direct answers that override the RAG pipeline
+  // ------------------------------------------------------------------
+
+  /** Get all custom Q&A pairs for a KB. */
+  async getCustomQa(kbId) {
+    const pool = await getPool();
+    const [[row]] = await pool.query(
+      `SELECT custom_qa FROM knowledge_bases WHERE id = ?`,
+      [kbId]
+    );
+    if (!row?.custom_qa) return [];
+    try {
+      const parsed = typeof row.custom_qa === "string" ? JSON.parse(row.custom_qa) : row.custom_qa;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+
+  /** Replace all custom Q&A pairs for a KB. */
+  async setCustomQa(kbId, entries) {
+    const pool = await getPool();
+    await pool.query(
+      `UPDATE knowledge_bases SET custom_qa = ? WHERE id = ?`,
+      [JSON.stringify(entries), kbId]
+    );
+  },
+
+  /** Add a single Q&A pair to a KB. Returns the new entry with id. */
+  async addCustomQaEntry(kbId, entry) {
+    const existing = await this.getCustomQa(kbId);
+    const newEntry = {
+      id: `qa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      question: entry.question,
+      answer: entry.answer,
+      enabled: entry.enabled !== false,
+      tags: entry.tags || [],
+      created_at: new Date().toISOString(),
+    };
+    existing.push(newEntry);
+    await this.setCustomQa(kbId, existing);
+    return newEntry;
+  },
+
+  /** Update a single Q&A pair by id. */
+  async updateCustomQaEntry(kbId, entryId, updates) {
+    const existing = await this.getCustomQa(kbId);
+    const idx = existing.findIndex((e) => e.id === entryId);
+    if (idx === -1) return null;
+    existing[idx] = { ...existing[idx], ...updates, id: entryId, updated_at: new Date().toISOString() };
+    await this.setCustomQa(kbId, existing);
+    return existing[idx];
+  },
+
+  /** Delete a single Q&A pair by id. */
+  async deleteCustomQaEntry(kbId, entryId) {
+    const existing = await this.getCustomQa(kbId);
+    const filtered = existing.filter((e) => e.id !== entryId);
+    if (filtered.length === existing.length) return false;
+    await this.setCustomQa(kbId, filtered);
+    return true;
+  },
+
+  /** Find the first matching custom Q&A entry for a question (case-insensitive contains). */
+  async matchCustomQa(kbId, question) {
+    const entries = await this.getCustomQa(kbId);
+    const q = question.toLowerCase().trim();
+    // First: exact match
+    for (const entry of entries) {
+      if (entry.enabled && entry.question.toLowerCase().trim() === q) return entry;
+    }
+    // Second: contains match (question contains the custom question, or vice versa)
+    for (const entry of entries) {
+      if (!entry.enabled) continue;
+      const cq = entry.question.toLowerCase().trim();
+      if (q.includes(cq) || cq.includes(q)) return entry;
+    }
+    return null;
   },
 };
 

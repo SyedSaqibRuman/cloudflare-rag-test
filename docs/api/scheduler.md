@@ -143,6 +143,11 @@ curl -X POST http://localhost:3000/cloudflare/cron/start \
 curl -X POST http://localhost:3000/cloudflare/cron/start \
   -H "Content-Type: application/json" \
   -d '{"jobId": "ingest", "schedule": "0 2 * * *", "companyName": "popularcert"}'
+
+# KB-driven ingest — each tick runs the KB's saved source config
+curl -X POST http://localhost:3000/cloudflare/cron/start \
+  -H "Content-Type: application/json" \
+  -d '{"jobId": "ingest", "schedule": "0 2 * * *", "companyName": "maxicert", "kbKey": "max-test-kb"}'
 ```
 
 **Request Body:**
@@ -150,7 +155,8 @@ curl -X POST http://localhost:3000/cloudflare/cron/start \
 {
   "jobId": "ingest",
   "schedule": "0 2 * * *",
-  "companyName": "popularcert"
+  "companyName": "maxicert",
+  "kbKey": "max-test-kb"
 }
 ```
 
@@ -159,6 +165,7 @@ curl -X POST http://localhost:3000/cloudflare/cron/start \
 | `jobId` | string | Yes | Job to schedule (`ingest` or `testing`) |
 | `schedule` | string | Yes | Cron expression (e.g., `0 2 * * *` for daily at 2 AM) |
 | `companyName` | string | No | Company to run the job for |
+| `kbKey` | string | No | Scope the schedule to one knowledge base (requires `companyName`). Each tick runs the KB-driven ingest with the KB's saved source config instead of the legacy company-wide path. The KB binding is verified at schedule time — an unknown company/KB pair is rejected with 400. |
 
 **Response (200):**
 ```json
@@ -186,15 +193,25 @@ Stops a specific scheduled cron, or the first scheduled one if no params given.
 curl -X POST http://localhost:3000/cloudflare/cron/stop \
   -H "Content-Type: application/json" \
   -d '{"jobId": "ingest", "companyName": "popularcert"}'
+
+# Stop only the KB-scoped schedule (leaves the legacy company schedule running)
+curl -X POST http://localhost:3000/cloudflare/cron/stop \
+  -H "Content-Type: application/json" \
+  -d '{"jobId": "ingest", "companyName": "maxicert", "kbKey": "max-test-kb"}'
 ```
 
 **Request Body:**
 ```json
 {
   "jobId": "ingest",
-  "companyName": "popularcert"
+  "companyName": "popularcert",
+  "kbKey": null
 }
 ```
+
+> `kbKey` is optional — omit it to stop the legacy company-wide schedule;
+> pass it to stop the KB-scoped one. They are separate schedules and can run
+> concurrently.
 
 **Response (200):**
 ```json

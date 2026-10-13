@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      // Mirrors resolve.alias in vite.config.js. Browser-only modules use
+      // #shared/*; node --test graph files keep relative imports instead.
+      "#shared/*": ["../shared/*"]
+    }
+  },
+  "include": ["src", "../shared"]
+}

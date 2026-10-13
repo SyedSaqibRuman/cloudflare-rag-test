@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { CREDENTIAL_KEYS } from "./schema.js";
 import { getCompanyConfig } from "./store.js";
+import { NotFoundError } from "../shared/errors.js";
 
 export { CREDENTIAL_KEYS };
 
@@ -15,7 +16,7 @@ export function resolveCreds(companyName) {
   const config = getCompanyConfig(companyName);
 
   if (!config) {
-    throw new Error(`Company '${companyName}' not found`);
+    throw new NotFoundError(`Company '${companyName}' not found`, "COMPANY_NOT_FOUND");
   }
 
   const resolved = {};

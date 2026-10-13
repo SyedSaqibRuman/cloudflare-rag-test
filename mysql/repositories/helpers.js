@@ -8,7 +8,6 @@
 // JSON columns come back as strings from mysql2; the `json()` helper parses
 // them so callers get plain objects.
 // --------------------------
-import { getPool } from "../pool.js";
 
 export function json(value) {
   if (value === null || value === undefined) return value;
@@ -26,7 +25,7 @@ export function mapRow(row) {
   if (!row) return row;
   const out = { ...row };
   for (const [k, v] of Object.entries(out)) {
-    if (k.includes("config") || k.includes("json") || k.endsWith("_schema") || k === "tools" || k === "kb_ids") {
+    if (k.includes("config") || k.includes("json") || k === "webhook_events" || k.endsWith("_schema") || k === "tools" || k === "kb_ids") {
       out[k] = json(v);
     }
   }

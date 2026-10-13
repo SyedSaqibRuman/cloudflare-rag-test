@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   listGatewayCompanies,
-  getGatewayCompany,
   listCredentials,
   listProviderModels,
   listKbs,
@@ -9,11 +8,19 @@ import {
   createAssistant,
   updateAssistant,
   deleteAssistant,
+  testAssistant,
+  duplicateAssistant,
+  api,
 } from "../api";
-import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, Toast, IconButton } from "../components/ui";
+import { Card, Button, Input, Select, TextArea, Badge, Empty, Spinner, Modal, IconButton, Toggle, ArrowRightIcon, InfoTip } from "../components/ui";
+import { Pagination } from "../components/ui/pagination";
+import { triggerNextStep } from "../components/NextStepPrompt";
+import { getTermTooltip } from "../components/glossary";
 import { useCompanies } from "../context";
+import { resolvePromptTemplate } from "#shared/prompt-variables.js";
 import { timeAgo } from "../util";
 import { useHeaderActions } from "../components/Layout";
+import { useToast, usePagination } from "../hooks";
 
 // -------- helpers -----------------------------------------------------------
 
@@ -50,60 +57,108 @@ function IconTrash() {
   );
 }
 
+/**
+ * Client-side prompt preview. Resolves {{KEY}} from the assistant's OWN
+ * variables merged over the company's PROMPT_VARIABLES tier (assistant wins) —
+ * the same merge the server applies. There are no built-in variables: company
+ * config fields (COMPANY_NAME, the URLs, …) are NOT injected, so an undefined
+ * placeholder stays literal and is visibly flagged to the operator.
+ */
+export function renderPromptPreview(template, variables, companyVariables = []) {
+  if (!template) return "(no system prompt)";
+  const merged = new Map();
+  for (const v of [...(companyVariables || []), ...(variables || [])]) {
+    const key = String(v?.key || "").trim().toUpperCase();
+    if (key) merged.set(key, v?.value ?? "");
+  }
+  return resolvePromptTemplate(template, Object.fromEntries(merged));
+}
+
 // -------- page --------------------------------------------------------------
 
 export default function Assistants() {
   const { company } = useCompanies();
   const [companies, setCompanies] = useState([]);
   const [companyKey, setCompanyKey] = useState("");
-  const [detail, setDetail] = useState(null);
   const [assistants, setAssistants] = useState([]);
+  const [pagination, setPagination] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+  const { notify } = useToast();
+  const { page, perPage, setPage, setPerPage, paginationParams } = usePagination();
 
   // Modal state
   const [modal, setModal] = useState(null); // null | { assistant }
   const [creds, setCreds] = useState([]);
   const [kbs, setKbs] = useState([]);
   const [models, setModels] = useState([]);
+  // Chat-model availability per configured provider (provider_key → count).
+  // Loaded when the modal opens so the Credential select can hide providers
+  // that can't power a chat (storage/vector/graph credentials) — the model
+  // dropdown behind them would always be empty and the binding dead.
+  const [chatModelCounts, setChatModelCounts] = useState({});
   const [form, setForm] = useState({
     assistantKey: "",
     assistantName: "",
     credentialId: "",
     modelId: "",
     primaryKbId: "",
+    kbIds: [],
     systemPrompt: "",
+    guardrailPrompt: "",
+    blockedTopics: "",
+    blockedPatterns: "",
+    variables: [],
     temperature: "0.7",
     maxTokens: "4096",
     enableFunctionCalling: true,
     enableStreaming: true,
     isPublic: false,
   });
+  // Test in Console state
+  const [testOpen, setTestOpen] = useState(false);
+  const [testAssistantKey, setTestAssistantKey] = useState(null);
+  const [testQuestion, setTestQuestion] = useState("");
+  const [testAnswer, setTestAnswer] = useState(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [testError, setTestError] = useState(null);
+  // Duplicate state
+  const [duplicateTarget, setDuplicateTarget] = useState(null);
+  const [dupKey, setDupKey] = useState("");
+  const [dupBusy, setDupBusy] = useState(false);
+  const [editingVarIndex, setEditingVarIndex] = useState(null);
+  // The selected credential's provider key — drives the "no models registered"
+  // hint under the Model select (declared after `form` to avoid TDZ).
+  const credProvider = creds.find((c) => String(c.id) === String(form.credentialId))?.provider_key || null;
+  // Model options come ONLY from the selected credential's provider (that's
+  // whose API key runs the model at ask time) — catalog-wide values would be
+  // arbitrary: unbound to any key this company actually configured. Chat
+  // models only — an assistant needs a chat completion, not an embedding.
+  const chatModels = models.filter((m) => m.category === "chat");
+  // Credentials whose provider can serve chat — storage (R2/S3), vector DBs
+  // (Qdrant/Pinecone) etc. have zero chat models and would only produce a
+  // dead assistant binding. Hidden from the select instead.
+  const chatCreds = creds.filter((c) => (chatModelCounts[c.provider_key] ?? 1) > 0);
   const [keyTouched, setKeyTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busy, setBusy] = useState(false);
-
-  const notify = (msg, tone = "green") => {
-    setToast({ msg, tone });
-    setTimeout(() => setToast(null), 3000);
-  };
+  const [modalTab, setModalTab] = useState("general"); // "general" | "prompt"
+  const [companyVariables, setCompanyVariables] = useState([]);
 
   const load = async (key) => {
     if (!key) {
       setAssistants([]);
-      setDetail(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const [d, list] = await Promise.all([getGatewayCompany(key), listAssistants(key)]);
-      setDetail(d);
-      setAssistants(list);
+      const result = await listAssistants(key, paginationParams);
+      setAssistants(result.items);
+      setPagination(result.pagination);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -116,7 +171,8 @@ export default function Assistants() {
     (async () => {
       setError(null);
       try {
-        const cs = await listGatewayCompanies();
+        const csResult = await listGatewayCompanies();
+        const cs = csResult.items ?? csResult;
         setCompanies(cs);
         const preferred = company && cs.some((c) => c.company_key === company) ? company : cs[0]?.company_key;
         setCompanyKey(preferred || "");
@@ -136,19 +192,54 @@ export default function Assistants() {
 
   useEffect(() => {
     load(companyKey);
+    // Intentionally keyed on companyKey only — switching assistant reloads;
+    // a changed `load` identity should not retrigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyKey]);
+
+  const closeModal = () => {
+    setModal(null);
+    setEditingVarIndex(null);
+  };
 
   const openModal = async (assistant) => {
     setFormError(null);
     setKeyTouched(false);
     setModels([]);
+    setModalTab("general");
     setModal({ assistant: assistant || null });
     if (!companyKey) return;
     try {
-      const [c, k] = await Promise.all([listCredentials(companyKey), listKbs(companyKey)]);
+      const [c, k, configData] = await Promise.all([
+        listCredentials(companyKey),
+        listKbs(companyKey),
+        api(`/cloudflare/config?company=${encodeURIComponent(companyKey)}`),
+      ]);
       setCreds(c);
-      setKbs(k);
+      // Probe each configured provider's catalog once — providers with ≥1 chat
+      // model are chat-capable and stay in the Credential select; the rest
+      // (storage/vector/graph) are hidden here rather than listed with an
+      // always-empty Model dropdown behind them. Failures count as 0.
+      const counts = {};
+      await Promise.all(
+        [...new Set(c.map((x) => x.provider_key).filter(Boolean))].map(async (pk) => {
+          try {
+            const ms = await listProviderModels(pk);
+            counts[pk] = ms.filter((m) => m.category === "chat").length;
+          } catch {
+            counts[pk] = 0;
+          }
+        })
+      );
+      setChatModelCounts(counts);
+      // listKbs resolves to { items, pagination } — unwrap the array.
+      setKbs(Array.isArray(k) ? k : (k?.items ?? []));
+      // SYSTEM_PROMPT + PROMPT_VARIABLES live in their own PROMPT section. (This
+      // used to read config.GENERAL.SYSTEM_PROMPT, which was always undefined
+      // because PROMPT_KEYS were in no CONFIG_SECTIONS group — new assistants
+      // silently started with an empty system prompt.)
+      const companySystemPrompt = configData?.config?.PROMPT?.SYSTEM_PROMPT || "";
+      setCompanyVariables(configData?.config?.PROMPT?.PROMPT_VARIABLES || []);
       if (assistant) {
         setForm({
           assistantKey: assistant.assistant_key,
@@ -156,7 +247,12 @@ export default function Assistants() {
           credentialId: String(assistant.credential_id || ""),
           modelId: assistant.model_id ? String(assistant.model_id) : "",
           primaryKbId: assistant.primary_kb_id ? String(assistant.primary_kb_id) : "",
+          kbIds: assistant.kb_ids || [],
           systemPrompt: assistant.system_prompt || "",
+          guardrailPrompt: assistant.guardrail_prompt || "",
+          blockedTopics: assistant.blocked_topics || "",
+          blockedPatterns: assistant.blocked_patterns || "",
+          variables: assistant.assistant_variables?.length ? assistant.assistant_variables : [],
           temperature: String(assistant.temperature ?? 0.7),
           maxTokens: String(assistant.max_tokens ?? 4096),
           enableFunctionCalling: !!assistant.enable_function_calling,
@@ -173,7 +269,12 @@ export default function Assistants() {
           credentialId: "",
           modelId: "",
           primaryKbId: "",
-          systemPrompt: "",
+          kbIds: [],
+          systemPrompt: companySystemPrompt,
+          guardrailPrompt: "",
+          blockedTopics: "",
+          blockedPatterns: "",
+          variables: [],
           temperature: "0.7",
           maxTokens: "4096",
           enableFunctionCalling: true,
@@ -198,12 +299,12 @@ export default function Assistants() {
       }
     }
   };
-
   const onName = (v) => {
     setForm((f) => ({
       ...f,
       assistantName: v,
-      assistantKey: keyTouched ? f.assistantKey : slugify(v),
+      // Don't touch the key in edit mode — it's the immutable route identity.
+      assistantKey: modal?.assistant ? f.assistantKey : (keyTouched ? f.assistantKey : slugify(v)),
     }));
   };
 
@@ -220,7 +321,12 @@ export default function Assistants() {
         credentialId: Number(form.credentialId),
         modelId: form.modelId ? Number(form.modelId) : null,
         primaryKbId: form.primaryKbId ? Number(form.primaryKbId) : null,
+        kbIds: form.kbIds.length ? form.kbIds : null,
         systemPrompt: form.systemPrompt.trim() || null,
+        guardrailPrompt: form.guardrailPrompt.trim() || null,
+        blockedTopics: form.blockedTopics.trim() || null,
+        blockedPatterns: form.blockedPatterns.trim() || null,
+        variables: form.variables.filter((v) => v.key.trim()),
         temperature: Number(form.temperature),
         maxTokens: Number(form.maxTokens),
         enableFunctionCalling: form.enableFunctionCalling,
@@ -228,11 +334,12 @@ export default function Assistants() {
         isPublic: form.isPublic,
       };
       if (modal?.assistant) {
-        await updateAssistant(form.assistantKey.trim(), body, companyKey);
+        await updateAssistant(form.assistantKey.trim(), body, companyKey, { toast: false });
         notify(`Assistant '${form.assistantKey.trim()}' updated.`);
       } else {
-        await createAssistant(body, companyKey);
+        await createAssistant(body, companyKey, { toast: false });
         notify(`Assistant '${form.assistantKey.trim()}' created.`);
+        triggerNextStep("assistant-created");
       }
       setModal(null);
       await load(companyKey);
@@ -248,7 +355,7 @@ export default function Assistants() {
     setBusy(true);
     setError(null);
     try {
-      await deleteAssistant(deleteTarget.assistant_key, companyKey);
+      await deleteAssistant(deleteTarget.assistant_key, companyKey, { toast: false });
       setDeleteTarget(null);
       notify(`Assistant '${deleteTarget.assistant_key}' deleted.`);
       await load(companyKey);
@@ -259,12 +366,51 @@ export default function Assistants() {
     }
   };
 
+  const openTest = (assistant) => {
+    setTestAssistantKey(assistant.assistant_key);
+    setTestQuestion("");
+    setTestAnswer(null);
+    setTestError(null);
+    setTestOpen(true);
+  };
+
+  const runTest = async () => {
+    if (!testQuestion.trim()) return;
+    setTestBusy(true);
+    setTestAnswer(null);
+    setTestError(null);
+    try {
+      const result = await testAssistant(testAssistantKey, testQuestion.trim(), companyKey);
+      setTestAnswer(result);
+    } catch (e) {
+      setTestError(e.message);
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  const runDuplicate = async () => {
+    if (!dupKey.trim()) return;
+    setDupBusy(true);
+    try {
+      await duplicateAssistant(duplicateTarget.assistant_key, dupKey.trim(), companyKey, null, { toast: false });
+      notify(`Duplicated as '${dupKey.trim()}'.`);
+      setDuplicateTarget(null);
+      setDupKey("");
+      await load(companyKey);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDupBusy(false);
+    }
+  };
+
   useHeaderActions(
     <div className="flex items-center justify-end gap-2">
       <Button variant="secondary" onClick={() => load(companyKey)} disabled={loading || !companyKey}>
         {loading ? <Spinner className="h-3.5 w-3.5" /> : "Refresh"}
       </Button>
-      <Button onClick={() => openModal(null)} disabled={!companyKey}>
+      <Button onClick={() => openModal(null)} disabled={!companyKey || !companies.length} className="whitespace-nowrap">
         <IconPlus /> New Assistant
       </Button>
     </div>
@@ -289,7 +435,17 @@ export default function Assistants() {
 
       <Card
         title={`Assistants${companyKey ? ` — ${companyKey}` : ""}`}
-        subtitle={`${assistants.length} assistant${assistants.length === 1 ? "" : "s"} — a persona bound to a credential, a model, and optional knowledge bases (Phase F)`}
+        subtitle={`${pagination?.total ?? assistants.length} assistant${(pagination?.total ?? assistants.length) === 1 ? "" : "s"} — a persona bound to a credential, a model, and optional knowledge bases`}
+        footer={pagination && pagination.total > perPage && (
+          <Pagination
+            page={page}
+            perPage={perPage}
+            total={pagination.total}
+            onPageChange={setPage}
+            onPerPageChange={setPerPage}
+            loading={loading}
+          />
+        )}
       >
         {assistants.length === 0 ? (
           <Empty message="No assistants yet. Create one — pick a credential, a model from its provider, and optional knowledge bases." />
@@ -299,10 +455,10 @@ export default function Assistants() {
               <thead>
                 <tr className="text-left text-xs text-slate-500">
                   <th className="pb-3 font-medium">Assistant</th>
-                  <th className="pb-3 font-medium">Credential</th>
-                  <th className="pb-3 font-medium">Model</th>
-                  <th className="pb-3 font-medium">KB</th>
-                  <th className="pb-3 font-medium">Streaming</th>
+                  <th className="pb-3 font-medium">Credential <InfoTip content={getTermTooltip("api-key")} /></th>
+                  <th className="pb-3 font-medium">Model <InfoTip content={getTermTooltip("model")} /></th>
+                  <th className="pb-3 font-medium">KB <InfoTip content={getTermTooltip("knowledge-base")} /></th>
+                  <th className="pb-3 font-medium">Streaming <InfoTip content={getTermTooltip("streaming")} /></th>
                   <th className="pb-3 font-medium">Updated</th>
                   <th className="pb-3 font-medium text-right">Actions</th>
                 </tr>
@@ -324,6 +480,12 @@ export default function Assistants() {
                     <td className="py-3 text-xs text-slate-500">{timeAgo(a.updated_at)}</td>
                     <td className="py-3">
                       <div className="flex items-center justify-end gap-1">
+                        <IconButton title="Test in console" className="hover:text-emerald-300" onClick={() => openTest(a)}>
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                        </IconButton>
+                        <IconButton title="Duplicate assistant" className="hover:text-amber-300" onClick={() => { setDuplicateTarget(a); setDupKey(`${a.assistant_key}-copy`); }}>
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                        </IconButton>
                         <IconButton title="Edit assistant" onClick={() => openModal(a)}><IconPencil /></IconButton>
                         <IconButton title="Delete assistant" className="hover:text-rose-300" onClick={() => setDeleteTarget(a)}><IconTrash /></IconButton>
                       </div>
@@ -340,11 +502,11 @@ export default function Assistants() {
       <Modal
         open={modal !== null}
         title={modal?.assistant ? `Edit assistant — ${modal.assistant.assistant_key}` : "New assistant"}
-        onClose={() => setModal(null)}
+        onClose={closeModal}
         wide
         footer={
           <>
-            <Button variant="secondary" onClick={() => setModal(null)}>Cancel</Button>
+            <Button variant="secondary" onClick={closeModal}>Cancel</Button>
             <Button onClick={save} disabled={saving}>
               {saving ? <Spinner className="h-3.5 w-3.5" /> : modal?.assistant ? "Save changes" : "Create assistant"}
             </Button>
@@ -355,115 +517,351 @@ export default function Assistants() {
           {formError && (
             <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{formError}</div>
           )}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input
-              label="Assistant name *"
-              value={form.assistantName}
-              onChange={(e) => onName(e.target.value)}
-              placeholder="e.g. Sarah the Certification Coach"
-              autoFocus
-            />
-            <div>
-              <Input
-                label="Assistant key *"
-                value={form.assistantKey}
-                disabled={!!modal?.assistant}
-                onChange={(e) => {
-                  setKeyTouched(true);
-                  setForm((f) => ({ ...f, assistantKey: e.target.value }));
-                }}
-                placeholder="auto-generated from the name"
+
+          {/* ---- Tabs ---- */}
+          <div className="flex border-b border-slate-800">
+            {["general", "prompt"].map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setModalTab(tab)}
+                className={`-mb-px px-4 py-2 text-sm font-medium transition-colors ${
+                  modalTab === tab
+                    ? "border-b-2 border-indigo-500 text-indigo-300"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}
+              >
+                {tab === "general" ? "General" : "Prompt"}
+              </button>
+            ))}
+          </div>
+
+          {/* ---- General tab ---- */}
+          {modalTab === "general" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Input
+                  label="Assistant name *"
+                  value={form.assistantName}
+                  onChange={(e) => onName(e.target.value)}
+                  placeholder="e.g. Sarah the Certification Coach"
+                  autoFocus
+                />
+                <div>
+                  <Input
+                    label="Assistant key *"
+                    value={form.assistantKey}
+                    disabled={!!modal?.assistant}
+                    onChange={(e) => {
+                      setKeyTouched(true);
+                      setForm((f) => ({ ...f, assistantKey: e.target.value }));
+                    }}
+                    placeholder="auto-generated from the name"
+                  />
+                  {!modal?.assistant && (
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      {keyTouched
+                        ? "Manual value — type in the name field to re-sync it."
+                        : <>Auto-generated from the name (lowercase, spaces <ArrowRightIcon className="inline h-3 w-3" /> -).</>}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <Select
+                label="Credential * (supplies the API key at runtime)"
+                options={[
+                  { value: "", label: "— select a credential —" },
+                  ...chatCreds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
+                ]}
+                value={form.credentialId}
+                onChange={(e) => onCredential(e.target.value)}
               />
-              {!modal?.assistant && (
-                <p className="mt-1.5 text-[11px] text-slate-500">
-                  {keyTouched
-                    ? "Manual value — type in the name field to re-sync it."
-                    : "Auto-generated from the name (lowercase, spaces → -)."}
+              {creds.length > chatCreds.length && (
+                <p className="text-xs text-slate-500 -mt-2">
+                  {creds.length - chatCreds.length} non-chat credential{creds.length - chatCreds.length === 1 ? "" : "s"} (storage / vector DB) hidden — assistants need a chat provider.
                 </p>
               )}
+              <div>
+                <Select
+                  label="Model (from the credential's provider)"
+                options={[
+                  { value: "", label: "— provider default —" },
+                  ...chatModels.map((m) => ({ value: String(m.id), label: `${m.model_name}` })),
+                ]}
+                  value={form.modelId}
+                  onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
+                />
+                {form.credentialId && chatModels.length === 0 && (
+                  <p className="mt-1.5 text-xs text-amber-500">
+                    No chat models registered for this credential's provider — the assistant will use the company default.
+                    {credProvider && (
+                      <>
+                        {" "}Add chat models on the <button type="button" className="underline hover:no-underline" onClick={() => { location.hash = `#catalog/${credProvider}`; }}>provider detail page</button>, or pick a credential whose provider has models.
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
+              <Select
+                label="Primary knowledge base"
+                options={[
+                  { value: "", label: "— none —" },
+                  ...kbs.map((k) => ({ value: String(k.id), label: k.kb_name })),
+                ]}
+                value={form.primaryKbId}
+                onChange={(e) => setForm((f) => ({ ...f, primaryKbId: e.target.value }))}
+              />
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">Additional knowledge bases</p>
+                <div className="flex flex-wrap gap-2">
+                  {kbs.map((k) => {
+                    const selected = form.kbIds.includes(k.id);
+                    return (
+                      <button
+                        key={k.id}
+                        type="button"
+                        onClick={() => {
+                          setForm((f) => ({
+                            ...f,
+                            kbIds: selected ? f.kbIds.filter((id) => id !== k.id) : [...f.kbIds, k.id],
+                          }));
+                        }}
+                        className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                          selected
+                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-300"
+                            : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500"
+                        }`}
+                      >
+                        {k.kb_name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">Toggle KBs this assistant can search beyond the primary.</p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <Input
+                    label="Temperature"
+                    type="number"
+                    step="0.1"
+                    min={0}
+                    max={2}
+                    value={form.temperature}
+                    onChange={(e) => setForm((f) => ({ ...f, temperature: e.target.value }))}
+                  />
+                  <p className="mt-1.5 text-[11px] text-slate-500">Lower = focused and deterministic. Higher = more creative and varied.</p>
+                </div>
+                <div>
+                  <Input
+                    label="Max tokens"
+                    type="number"
+                    min={1}
+                    value={form.maxTokens}
+                    onChange={(e) => setForm((f) => ({ ...f, maxTokens: e.target.value }))}
+                  />
+                  <p className="mt-1.5 text-[11px] text-slate-500">Hard cap on the response length. One token ≈ 0.75 words.</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-slate-300">
+                <span className="flex items-center gap-2">
+                  Enable streaming
+                  <Toggle
+                    checked={form.enableStreaming}
+                    onChange={(v) => setForm((f) => ({ ...f, enableStreaming: v }))}
+                    title="Toggle streaming"
+                  />
+                </span>
+                <span className="flex items-center gap-2">
+                  Function calling
+                  <Toggle
+                    checked={form.enableFunctionCalling}
+                    onChange={(v) => setForm((f) => ({ ...f, enableFunctionCalling: v }))}
+                    title="Toggle function calling"
+                  />
+                </span>
+                <span className="flex items-center gap-2">
+                  Public
+                  <Toggle
+                    checked={form.isPublic}
+                    onChange={(v) => setForm((f) => ({ ...f, isPublic: v }))}
+                    title="Toggle public access"
+                  />
+                </span>
+              </div>
             </div>
-          </div>
-          <Select
-            label="Credential * (supplies the API key at runtime)"
-            options={[
-              { value: "", label: "— select a credential —" },
-              ...creds.map((c) => ({ value: String(c.id), label: `${c.credential_name} (${c.provider_name})` })),
-            ]}
-            value={form.credentialId}
-            onChange={(e) => onCredential(e.target.value)}
-          />
-          <Select
-            label="Model (from the credential's provider)"
-            options={[
-              { value: "", label: "— provider default —" },
-              ...models.map((m) => ({ value: String(m.id), label: `${m.model_name} · ${m.category}` })),
-            ]}
-            value={form.modelId}
-            onChange={(e) => setForm((f) => ({ ...f, modelId: e.target.value }))}
-          />
-          <Select
-            label="Primary knowledge base"
-            options={[
-              { value: "", label: "— none —" },
-              ...kbs.map((k) => ({ value: String(k.id), label: k.kb_name })),
-            ]}
-            value={form.primaryKbId}
-            onChange={(e) => setForm((f) => ({ ...f, primaryKbId: e.target.value }))}
-          />
-          <TextArea
-            label="System prompt"
-            rows={4}
-            value={form.systemPrompt}
-            onChange={(e) => setForm((f) => ({ ...f, systemPrompt: e.target.value }))}
-            placeholder="You are a helpful certification coach…"
-          />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input
-              label="Temperature"
-              type="number"
-              step="0.1"
-              min={0}
-              max={2}
-              value={form.temperature}
-              onChange={(e) => setForm((f) => ({ ...f, temperature: e.target.value }))}
-            />
-            <Input
-              label="Max tokens"
-              type="number"
-              min={1}
-              value={form.maxTokens}
-              onChange={(e) => setForm((f) => ({ ...f, maxTokens: e.target.value }))}
-            />
-          </div>
-          <label className="flex items-center gap-5 text-sm text-slate-300">
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.enableStreaming}
-                onChange={(e) => setForm((f) => ({ ...f, enableStreaming: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
+          )}
+
+          {/* ---- Prompt tab ---- */}
+          {modalTab === "prompt" && (
+            <div className="space-y-4">
+              <TextArea
+                label="System prompt"
+                rows={6}
+                value={form.systemPrompt}
+                onChange={(e) => setForm((f) => ({ ...f, systemPrompt: e.target.value }))}
+                placeholder="You are a helpful certification coach…"
               />
-              Enable streaming
-            </span>
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.enableFunctionCalling}
-                onChange={(e) => setForm((f) => ({ ...f, enableFunctionCalling: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
-              />
-              Function calling
-            </span>
-            <span className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.isPublic}
-                onChange={(e) => setForm((f) => ({ ...f, isPublic: e.target.checked }))}
-                className="h-4 w-4 rounded border-slate-600 bg-slate-950 accent-indigo-500"
-              />
-              Public
-            </span>
-          </label>
+              <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+                <p className="mb-3 text-xs font-medium text-slate-300">Guardrails <span className="font-normal text-slate-500">— topic restrictions applied to every answer, on top of the company defaults</span></p>
+                <div className="space-y-4">
+                  <TextArea
+                    label="Custom guardrail instructions"
+                    rows={4}
+                    value={form.guardrailPrompt}
+                    onChange={(e) => setForm((f) => ({ ...f, guardrailPrompt: e.target.value }))}
+                    placeholder={'Optional instructions appended to the system prompt — e.g. "Never discuss pricing specifics; always direct users to the contact form." Leave empty to use the company/built-in guardrail.'}
+                  />
+                  <TextArea
+                    label="Blocked topics (one per line)"
+                    rows={3}
+                    value={form.blockedTopics}
+                    onChange={(e) => setForm((f) => ({ ...f, blockedTopics: e.target.value }))}
+                    placeholder={"crypto\ninvestments\ngambling"}
+                  />
+                  <TextArea
+                    label="Blocked patterns — replaces the built-ins (one per line)"
+                    rows={4}
+                    value={form.blockedPatterns}
+                    onChange={(e) => setForm((f) => ({ ...f, blockedPatterns: e.target.value }))}
+                    placeholder={"crypto\n/write.*haiku/i\n\\binvestment\\b"}
+                  />
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    Questions containing any blocked topic are refused before retrieval or an AI call, and blocked topics stay
+                    out of the suggested follow-up questions. Matching is case-insensitive ("crypto" also blocks "cryptocurrency").
+                    Blocked patterns swap out the whole built-in off-topic set (poems/jokes/movies/code/recipes) for this
+                    assistant — each line is a literal phrase or a /regex/. Leave empty to inherit the company-level patterns
+                    (Config → Security) or the built-ins; leave both empty to fall back to the company-level guardrails.
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-slate-300">Company variables</p>
+                {companyVariables.length === 0 ? (
+                  <p className="text-[11px] text-slate-500">
+                    This company defines no custom variables. Add them on Config → Prompt → Default
+                    System Prompt, or define your own below.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {companyVariables.map((v) => {
+                      const key = String(v.key || "").trim().toUpperCase();
+                      const shadowed = form.variables.some(
+                        (x) => String(x.key || "").trim().toUpperCase() === key
+                      );
+                      return (
+                        <span
+                          key={key}
+                          title={`${v.value || "empty"}${shadowed ? " — overridden below" : ""}`}
+                          onClick={() => { navigator.clipboard?.writeText(`{{${key}}}`); notify(`Copied {{${key}}}`, "green"); }}
+                          className={`cursor-pointer rounded-md border px-2 py-1 font-mono text-[11px] transition-colors ${
+                            shadowed
+                              ? "border-amber-700 bg-slate-900 text-amber-300 line-through"
+                              : "border-slate-700 bg-slate-900 text-slate-300 hover:border-indigo-500 hover:text-indigo-200"
+                          }`}
+                        >{`{{${key}}}`}</span>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-500">
+                  There are no built-in variables — company config fields are NOT injected into
+                  prompts. Click to copy a placeholder, then paste it into the system prompt above.
+                  Struck-through names are overridden by a variable below.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-slate-300">Custom Variables</p>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingVarIndex(null); setForm((f) => ({ ...f, variables: [...f.variables, { key: "", value: "" }] })); }}
+                    className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                  >
+                    + Add variable
+                  </button>
+                </div>
+                {form.variables.length === 0 && (
+                  <p className="text-[11px] text-slate-500">No variables. Use {'{{KEY}}'} in the system prompt and add key-value pairs here to inject values at runtime.</p>
+                )}
+                <div className="space-y-1.5">
+                  {form.variables.map((v, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      {editingVarIndex === i ? (
+                        <>
+                          <Input
+                            value={v.key}
+                            onChange={(e) => setForm((f) => ({ ...f, variables: f.variables.map((x, j) => j === i ? { ...x, key: e.target.value } : x) }))}
+                            placeholder="KEY"
+                            className="flex-1 py-1.5 text-xs"
+                          />
+                          <span className="text-slate-500">=</span>
+                          <Input
+                            value={v.value}
+                            onChange={(e) => setForm((f) => ({ ...f, variables: f.variables.map((x, j) => j === i ? { ...x, value: e.target.value } : x) }))}
+                            placeholder="value"
+                            className="flex-1 py-1.5 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setEditingVarIndex(null)}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-emerald-300 transition-colors hover:border-emerald-500 hover:text-emerald-200"
+                            title="Save"
+                          >
+                            ✓
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => { navigator.clipboard?.writeText(`{{${v.key}}}`); notify(`Copied {{${v.key}}}`, "green"); }}
+                            className="flex items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                            title={`Copy {{${v.key}}}`}
+                          >
+                            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                          </button>
+                          <div className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-left text-xs text-slate-300">
+                            <span className="font-medium text-slate-200">{v.key || "KEY"}</span>
+                            <span className="text-slate-500"> = </span>
+                            <span className="text-slate-400">{v.value || "(empty)"}</span>
+                            <span className="ml-2 font-mono text-indigo-400">{`{{${v.key}}}`}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setEditingVarIndex(i)}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 transition-colors hover:border-indigo-500 hover:text-indigo-200"
+                            title="Edit variable"
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setForm((f) => ({ ...f, variables: f.variables.filter((_, j) => j !== i) }))}
+                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-rose-300 transition-colors hover:border-rose-500 hover:text-rose-200"
+                            title="Remove variable"
+                          >
+                            ×
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Prompt preview */}
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-slate-300">Prompt preview</p>
+                <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">
+                  {renderPromptPreview(form.systemPrompt, form.variables, companyVariables)}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </Modal>
 
@@ -488,7 +886,79 @@ export default function Assistants() {
         </p>
       </Modal>
 
-      <Toast message={toast?.msg} tone={toast?.tone} />
+      {/* Test in Console */}
+      <Modal
+        open={testOpen}
+        title={`Test assistant — ${testAssistantKey || ""}`}
+        onClose={() => setTestOpen(false)}
+        wide
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setTestOpen(false)}>Close</Button>
+            <Button onClick={runTest} disabled={testBusy || !testQuestion.trim()}>
+              {testBusy ? <Spinner className="h-3.5 w-3.5" /> : "Run test"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {testError && (
+            <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{testError}</div>
+          )}
+          <Input
+            label="Ask a question"
+            value={testQuestion}
+            onChange={(e) => setTestQuestion(e.target.value)}
+            placeholder="e.g. What is ISO 9001?"
+            onKeyDown={(e) => { if (e.key === "Enter" && !testBusy) runTest(); }}
+            autoFocus
+          />
+          {testAnswer && (
+            <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+              <p className="mb-2 text-xs font-medium text-slate-400">Answer</p>
+              <div className="whitespace-pre-wrap text-sm text-slate-200">{testAnswer.answer}</div>
+              {testAnswer.sources?.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {testAnswer.sources.map((s, i) => (
+                    <Badge key={i} tone="cyan">{s.title || `Source ${i + 1}`}</Badge>
+                  ))}
+                </div>
+              )}
+              {testAnswer.cached && <p className="mt-2 text-[11px] text-slate-500">(cached response)</p>}
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* Duplicate assistant */}
+      <Modal
+        open={duplicateTarget !== null}
+        title="Duplicate assistant"
+        onClose={() => setDuplicateTarget(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setDuplicateTarget(null)}>Cancel</Button>
+            <Button onClick={runDuplicate} disabled={dupBusy || !dupKey.trim()}>
+              {dupBusy ? <Spinner className="h-3.5 w-3.5" /> : "Duplicate"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-slate-300">
+            Clone <span className="font-mono text-indigo-300">{duplicateTarget?.assistant_key}</span> with a new key:
+          </p>
+          <Input
+            label="New key *"
+            value={dupKey}
+            onChange={(e) => setDupKey(e.target.value)}
+            placeholder="e.g. sales-bot-v2"
+            autoFocus
+          />
+        </div>
+      </Modal>
+
+      {/* toast rendering: global <ToastViewport /> in App.jsx */}
     </div>
   );
 }

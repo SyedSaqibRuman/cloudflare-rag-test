@@ -2,10 +2,13 @@ import {
   COMPANY_KEYS,
   CREDENTIAL_KEYS,
   EMBEDDING_DIMENSIONS,
+  PROMPT_VARIABLE_KEYS,
   getDefaultCompanyConfig,
 } from "./schema.js";
 import { runtimeConfig, saveConfig, getCompanyConfig, deleteCompanyDb } from "./store.js";
 import { validateConfigKey, validateCompanyName } from "./validation.js";
+import { normalizePromptVariables } from "../shared/prompt-variables.js";
+import { NotFoundError } from "../shared/errors.js";
 
 /**
  * Get a snapshot of a company's config.
@@ -13,7 +16,7 @@ import { validateConfigKey, validateCompanyName } from "./validation.js";
  */
 export function getConfig(companyName) {
   const config = getCompanyConfig(companyName);
-  if (!config) throw new Error(`Company '${companyName || "(missing)"}' not found. Pass x-company-name header.`);
+  if (!config) throw new NotFoundError(`Company '${companyName || "(missing)"}' not found. Pass x-company-name header.`, "COMPANY_NOT_FOUND");
   return { ...config };
 }
 
@@ -36,15 +39,16 @@ export function listCompanies() {
     name,
     COMPANY_NAME: config.COMPANY_NAME,
     CONSULTANT_NAME: config.CONSULTANT_NAME,
+    ASSISTANT_KEY: config.ASSISTANT_KEY || null,
     BASE_URL: config.BASE_URL,
     VECTOR_INDEX: config.VECTOR_INDEX,
     R2_BUCKET_NAME: config.R2_BUCKET_NAME,
     // Whether any Cloudflare credentials are configured. Boolean only — never
     // expose the secrets themselves through the list endpoint.
     hasCredentials: CREDENTIAL_KEYS.some((k) => config[k]),
-    // Whether the Cloudflare API is usable for this company: account id +
-    // API token both set. Drives the admin sidebar's "Cloudflare" nav item.
-    hasCloudflareApi: !!(config.CLOUDFLARE_ACCOUNT_ID && config.CLOUDFLARE_API_TOKEN),
+    // Show the Cloudflare nav item only when a vector index or R2 bucket is
+    // configured — the page is useless without at least one resource.
+    hasCloudflareApi: !!(config.VECTOR_INDEX || config.R2_BUCKET_NAME),
   }));
 }
 
@@ -73,6 +77,11 @@ export async function createCompany(name, patch = {}) {
   // Validate provided keys
   const errors = [];
   for (const [key, value] of Object.entries(patch)) {
+    if (PROMPT_VARIABLE_KEYS.includes(key)) {
+      const err = validateConfigKey(key, value);
+      if (err) errors.push(err);
+      continue;
+    }
     if (typeof value === "string" && value.trim()) {
       const err = validateConfigKey(key, value);
       if (err) errors.push(err);
@@ -120,6 +129,18 @@ export function applyConfigPatch(companyConfig, patch) {
   const draft = { ...companyConfig };
   for (const [key, value] of Object.entries(patch)) {
     if (!COMPANY_KEYS.includes(key)) { errors.push(`Unknown key: ${key}`); continue; }
+    if (PROMPT_VARIABLE_KEYS.includes(key)) {
+      // PROMPT_VARIABLES is an ARRAY of {key,value} — it must not fall through
+      // to the string/number branches below, or the whole definition would be
+      // dropped without an error. Validate, then normalize so the stored shape
+      // is canonical (uppercase keys, trimmed values, deduped).
+      const err = validateConfigKey(key, value);
+      if (err) { errors.push(err); continue; }
+      const normalized = normalizePromptVariables(value);
+      if (normalized.length) draft[key] = normalized;
+      else delete draft[key]; // empty list = no variables, drop the key
+      continue;
+    }
     if (typeof value === "string" && value.trim()) {
       const err = validateConfigKey(key, value);
       if (err) { errors.push(err); continue; }
