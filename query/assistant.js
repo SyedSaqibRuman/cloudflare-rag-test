@@ -85,6 +85,7 @@ export async function resolveAssistantOverrides(companyName, opts = {}) {
       temperature: assistant.temperature != null ? Number(assistant.temperature) : null,
       maxTokens: assistant.max_tokens != null ? Number(assistant.max_tokens) : null,
       vectorIndex: null,
+      storageBucket: null,
       graphDatabase: null,
       enableGraph: Boolean(assistant.enable_graph_context),
       // Function calling support — tools array is JSON-parsed from the DB column.
@@ -99,6 +100,12 @@ export async function resolveAssistantOverrides(companyName, opts = {}) {
       const kb = await KbRepository.findById(assistant.primary_kb_id);
       if (kb) {
         overrides.vectorIndex = kb.vector_external_id || null;
+        // Chunk bucket: the primary KB's own storage binding (its bound
+        // resource's external id). When set, ask-time chunk reads come from
+        // this bucket instead of the company config R2_BUCKET_NAME — matching
+        // where ingest wrote them (ADR-012 KB-first storage). Empty → the
+        // pipeline falls back to the company config bucket.
+        overrides.storageBucket = kb.storage_external_id || null;
         // Embedding model: KB's binding → company config fallback.
         if (kb.embedding_model_provider && kb.embedding_model_id) {
           const { ModelRepository } = await import("../mysql/repositories.js");

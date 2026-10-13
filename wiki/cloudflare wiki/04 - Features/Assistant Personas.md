@@ -23,7 +23,7 @@ flowchart TD
     MY --> AR["AssistantRepository.findByKey(companyId, key)"]
     AR -->|"missing / is_active=false"| OFF
     AR --> OVR["overrides {systemPrompt, variables[], model,<br/>temperature, maxTokens, assistantName, enableGraph}"]
-    OVR --> PB["primary_kb_id → KbRepository → vector_external_id"]
+    OVR --> PB["primary_kb_id → KbRepository → vector_external_id + storage_external_id"]
     OVR --> GR["graph_resource_id → ResourceRepository → config.database_name"]
 ```
 
@@ -45,6 +45,7 @@ Best-effort everywhere: missing MySQL, unknown assistant, or any thrown error �
 | Generation model | assistant.model — executed through the gateway provider executor with the assistant's credential when non-`@cf`·non-`@cloudflare` (`execution` binding); Workers AI path for `@cf`/`@cloudflare` keys; company LLM_MODEL only as fallback when no credential is bound | LLM_MODEL |
 | temperature/max_tokens | override else 0.3/500 | 0.3/500 |
 | Retrieval index | primary KB's `vector_external_id` passed as indexName | company VECTOR_INDEX |
+| Chunk bucket (ask-time) | primary KB's `storage_external_id` passed as storageBucket → `getChunk` reads from that bucket; part of the cache-key fingerprint | company R2_BUCKET_NAME (getChunk default) |
 | Graph | enabled flag + database override | implicit if creds exist |
 
 ⚠️ Because query-time retrieval still uses Workers-AI-only embeddings/seam, a KB backed by non-CF providers ingests fine but isn't queryable by this path (architecture observation, [[Knowledge Bases]]).
@@ -53,6 +54,7 @@ Best-effort everywhere: missing MySQL, unknown assistant, or any thrown error �
 
 - Portal **Assistants page** (CRUD against `/gateway/assistants*`): binds credential, catalog model, primary KB, graph resource, `enable_graph_context`, assistant_variables ({{KEY}} injections — override the company tier), system prompt, guardrail prompt + blocked topics + blocked patterns (Prompt tab, guardrails section), temperature/max_tokens, activation toggle. The Prompt tab also shows the company's `PROMPT_VARIABLES` as copyable chips, striking through any the assistant overrides. Company-level blocked patterns live on Config → Security (Blocked Patterns card).
 - Company attach: Config page dropdown writes `ASSISTANT_KEY` (validated `^[a-z0-9-]{3,63}$`).
+- Config → **Models** tab shows an "Assistant's Knowledge Base (in use)" card when an assistant with a primary KB is selected — a read-only mirror of the primary KB's effective Vector Index, Storage (R2) Bucket, Graph Database and Embedding Model, sourced from `listKbs`. It makes clear those values (not the company-level selectors below it) are what the ask path uses; edit them on the Knowledge Bases page. The company-level selectors remain the fallback used only when no assistant is selected.
 - Switching assistants instantly alters answers because resolution happens per ask call (cache keyed accordingly).
 
 Tests: `mysql/__tests__/assistant-service.test.js`, `gateway-assistants.test.js`, `query/__tests__/assistant-modules.test.js`. Related: [[Multi-Tenancy & Company Config]].

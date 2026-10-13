@@ -25,7 +25,7 @@ const ABSOLUTE_MIN_SCORE = 0.5;
 //   4. rerankMatches — skips itself when < MIN_RERANK_MATCHES
 //   5. slice top 5 → fetch chunks → buildContext
 // --------------------------
-export async function retrieveContext(question, companyName, { indexName = null } = {}) {
+export async function retrieveContext(question, companyName, { indexName = null, storageBucket = null } = {}) {
   // ADR-012 Phase 2: when the target index belongs to a non-CF vector store
   // (Pinecone/Qdrant/Weaviate), query it through the owning KB's own adapters
   // (vector + embedding). Returns null when the index is CF-owned (or the
@@ -58,6 +58,12 @@ export async function retrieveContext(question, companyName, { indexName = null 
   matches = await rerankMatches(matches.slice(0, 10), question, companyName);
   matches = matches.slice(0, FINAL_TOP_K);
 
-  const chunks = await Promise.all(matches.map((m) => getChunk(m.metadata?.r2_key, companyName)));
+  // Chunk bucket: the assistant's primary-KB storage binding wins; otherwise
+  // getChunk's default (the company config R2_BUCKET_NAME) applies — the
+  // legacy CF path is unchanged. Passing `undefined` explicitly triggers that
+  // default; a concrete bucket name routes reads to the KB's own store.
+  const chunks = await Promise.all(
+    matches.map((m) => getChunk(m.metadata?.r2_key, companyName, storageBucket || undefined))
+  );
   return { context: buildContext(chunks), matches };
 }

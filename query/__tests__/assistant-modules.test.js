@@ -43,7 +43,7 @@ const ASSISTANT = {
   tools: null,
   assistant_variables: [],
 };
-const KB = { id: 11, vector_external_id: "kb-vector-index" };
+const KB = { id: 11, vector_external_id: "kb-vector-index", storage_external_id: "kb-storage-bucket" };
 const GRAPH_RESOURCE = { id: 22, config: { database_name: "29de2844" } };
 
 function stubRepos(overrides = {}) {
@@ -120,6 +120,7 @@ test("resolveAssistantOverrides maps the assistant into pipeline overrides", asy
       temperature: 0.2,
       maxTokens: 900,
       vectorIndex: "kb-vector-index",
+      storageBucket: "kb-storage-bucket",
       graphDatabase: "29de2844",
       enableGraph: true,
       enableFunctionCalling: false,

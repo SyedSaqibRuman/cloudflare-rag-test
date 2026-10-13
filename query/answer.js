@@ -7,6 +7,7 @@ import { rewriteFollowup, getLlmModel, generatePossibleQuestions, MAX_HISTORY } 
 import { getSystemMessage, buildResponses } from "./prompts.js";
 import { buildUserMessage } from "./context.js";
 import { retrieveGraphContext } from "./graph.js";
+import { getR2Bucket } from "../services/r2.js";
 import { createStreamTransport, createSseParser } from "./stream-contract.js";
 import { resolveAssistantOverrides, isRunnableModel, checkModelAccess } from "./assistant.js";
 import { getCompanyConfig } from "../config/index.js";
@@ -144,6 +145,10 @@ function getRetrievalBinding(companyName, assistant) {
   const embeddingModel = assistant?.embeddingModel || getEmbeddingModel(companyName);
   // Vector index: assistant's primary KB → company config fallback.
   const vectorIndex = assistant?.vectorIndex || getVectorIndex(companyName);
+  // Storage bucket: assistant's primary KB → company config fallback. Part of
+  // the fingerprint so switching a KB's chunk bucket never serves answers
+  // built from the previous bucket's chunks.
+  const storageBucket = assistant?.storageBucket || getR2Bucket(companyName) || "";
   // LLM model: assistant's model → company config fallback.
   // The fingerprint uses the model that will actually execute — including the
   // assistant's non-CF catalog model bound to its own credential.
@@ -151,7 +156,7 @@ function getRetrievalBinding(companyName, assistant) {
     assistant?.model && !isRunnableModel(assistant.model) && assistant.execution?.credentialId
       ? assistant.model
       : assistantModel(companyName, assistant);
-  return { embeddingModel, vectorIndex, llmModel: executedModel };
+  return { embeddingModel, vectorIndex, storageBucket, llmModel: executedModel };
 }
 
 /** Resolve the embedding model for cache binding. */
@@ -341,6 +346,9 @@ export async function runPipeline({
     // store (Pinecone/Qdrant/Weaviate KB binding), which retrieval.js routes
     // through the KB's own adapters (ADR-012 Phase 2).
     indexName: assistant?.vectorIndex || getVectorIndex(companyName) || null,
+    // Chunk bucket: the assistant's primary KB storage binding wins; otherwise
+    // the pipeline falls back to the company config bucket (getChunk default).
+    storageBucket: assistant?.storageBucket || null,
   });
   if (!context) return { answer: R.noContext, sources: [], matches: [], graph: null, cached: false };
 

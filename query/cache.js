@@ -19,11 +19,12 @@ const cache = new Map();
  *   - assistantKey (persona + model + KB binding)
  *   - embeddingModel (different models = different vector spaces)
  *   - vectorIndex (different indexes = different retrieval results)
+ *   - storageBucket (different buckets = different chunk source text)
  *   - llmModel (different LLMs = different answers)
  *   - question (the rewritten search query)
  *
  * When any of these changes, the cache key changes and stale answers
- * from incompatible vector spaces or LLM models are never served.
+ * from incompatible vector spaces, chunk stores, or LLM models are never served.
  *
  * @param {string} question — the rewritten search query
  * @param {string} companyName
@@ -31,6 +32,7 @@ const cache = new Map();
  * @param {object} [binding={}] — retrieval binding fingerprint
  * @param {string} [binding.embeddingModel=""] — e.g. "@cf/baai/bge-base-en-v1.5"
  * @param {string} [binding.vectorIndex=""] — e.g. "popularcert-index"
+ * @param {string} [binding.storageBucket=""] — chunk bucket the assistant's KB reads (empty → company config)
  * @param {string} [binding.llmModel=""] — e.g. "@cf/meta/llama-3.1-8b-instruct-fp8"
  * @returns {string} — MD5 hex digest
  */
@@ -40,6 +42,7 @@ export function getCacheKey(question, companyName, assistantKey = "", binding = 
     assistantKey || "",
     binding.embeddingModel || "",
     binding.vectorIndex || "",
+    binding.storageBucket || "",
     binding.llmModel || "",
     question,
   ];

@@ -86,6 +86,22 @@ describe("ADR-012 Cache Key Isolation", () => {
       assert.notEqual(key1, key2, "Different assistants must produce different cache keys");
     });
 
+    it("produces different keys when storage bucket changes", () => {
+      const base = getCacheKey("what is ISO 9001?", "popularcert", "sarah", {
+        embeddingModel: "@cf/baai/bge-base-en-v1.5",
+        vectorIndex: "popularcert-index",
+        storageBucket: "kb-a-bucket",
+        llmModel: "@cf/meta/llama-3.1-8b-instruct-fp8",
+      });
+      const changed = getCacheKey("what is ISO 9001?", "popularcert", "sarah", {
+        embeddingModel: "@cf/baai/bge-base-en-v1.5",
+        vectorIndex: "popularcert-index",
+        storageBucket: "kb-b-bucket",
+        llmModel: "@cf/meta/llama-3.1-8b-instruct-fp8",
+      });
+      assert.notEqual(base, changed, "Different chunk buckets must produce different cache keys");
+    });
+
     it("backward-compatible: works without binding parameter", () => {
       const key = getCacheKey("what is ISO 9001?", "popularcert", "sarah");
       assert.ok(key, "getCacheKey must work without binding parameter");
