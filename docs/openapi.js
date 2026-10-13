@@ -2101,13 +2101,13 @@ const openapi = {
           lastIngestion: {
             type: "object",
             nullable: true,
-            description: "Summary of the last completed ingestion run (registry + live job state).",
+            description: "Summary of the most recent ingestion run. Checkpointed onto the KB row while the run is in flight (~10s throttle) and flushed on abort/error — an interrupted run reports the partial docs/chunks it produced, not null. Null only when no run has done any work yet.",
             properties: {
               at: { type: "string", format: "date-time" },
               durationMs: { type: "integer" },
               documentsProcessed: { type: "integer" },
               documentsSkipped: { type: "integer", description: "Unchanged docs skipped by the ingestion registry (they were already indexed)." },
-              chunksCreated: { type: "integer", description: "Chunks created by the last run — 0 when all docs were skipped; not a cumulative total." },
+              chunksCreated: { type: "integer", description: "Chunks created by the last run (partial for interrupted runs) — 0 when all docs were skipped; not a cumulative total." },
               mode: { type: "string", description: "Run scope: all, kb, or a document slug." },
             },
           },

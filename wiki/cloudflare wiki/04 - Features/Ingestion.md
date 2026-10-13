@@ -26,8 +26,8 @@ flowchart TD
     SRC --> RUN["runIngestion(pure pipeline)<br/>prefix kb/&lt;kbKey&gt; · chunk_size 512"]
     LG --> RUN2["runIngestion<br/>prefix site · chunk max 1000"]
     RUN & RUN2 --> DONE["stats {processed,skipped,chunks,discovered}"]
-    DONE --> STAT["status active + setIngestionStats + audit completed + webhook"]
-    RUN -.failure.-> ERR["status error + lastError + audit failed + webhook (abort skips)"]
+    DONE --> STAT["status active + statsRecorder.finalize + audit completed + webhook"]
+    RUN -.failure.-> ERR["status error + lastError + statsRecorder.finalizePartial + audit failed + webhook (abort: partial stats only, no status flip)"]
 ```
 
 ## Pure pipeline (`ingest/pipeline.js`) stages
@@ -80,7 +80,17 @@ KB rows bind infrastructure ids: storage_resource_id → connection credentials 
 
 ## Failure, abort & notifications
 
-AbortError at any boundary unwinds cleanly (job entry removed, no status flip). Real failures flip KB status/error, persist stats=0 case, write audits, fire webhooks (HMAC-signed) — [[Logging & Audit]], [[Background Jobs]].
+AbortError at any boundary unwinds cleanly (job entry removed, no status flip). Real failures flip KB status/error, write audits, fire webhooks (HMAC-signed) — [[Logging & Audit]], [[Background Jobs]].
+
+## Last-run stats (`ingest/stats-recorder.js`)
+
+`last_ingestion_*` on the KB row (migration 014) powers the portal KB cards' **Chunks** / **Last run** cells (`GET /kbs/:key/status` → `lastIngestion`). Since 2026-10-12 these are persisted by `createIngestionStatsRecorder` **during** the run, not only on completion:
+
+- `onProgress(progress)` — throttled checkpoint (~10 s, `DEFAULT_CHECKPOINT_INTERVAL_MS`) off the pipeline's `setProgress` stream; survives a hard process kill (server restart mid-run used to leave the stats NULL forever — the 2026-10-12 propularcert-prod-kb incident: docs + vectors existed but the card showed "Chunks — / Last run never"). Snapshots with 0 processed/0 chunks (discovery phase) never stamp, so an early abort can't overwrite the previous run's numbers with zeros.
+- `finalize(stats)` — the exact final write on clean completion (replaces the old inline `setIngestionStats` call in ingest.js).
+- `finalizePartial()` — flushes the captured snapshot on abort (stop/pause) and before the D12 error recording (ordering matters: the stats write nulls `last_error`).
+
+All writes are best-effort (a stats failure never masks the ingest outcome), and legacy non-KB runs (`kbId` null) never write. Tests: `ingest/__tests__/stats-recorder.test.js`.
 
 **Source failure contract (2026-09-28, maxicert-test-kb incident):** `fetchWP` in services/wp.js used to swallow every error into `null`, which `processContent` read as "no more items" — a WP REST API that returned HTTP 200 + `Content-Type: application/json` with an **Elementor HTML body** (origin/WAF hijack) produced a "successful" 0-document run that still stamped `lastSyncAt` and kept status `active`. Source fetchers now throw `ExternalServiceError` (502; body-shape check — headers are not trusted — plus parse-error and HTTP wrapping; unknown-company `fetchWpByIds` → `ValidationError`), so D12 records status `error` + a last_error that names the site and the fix, and `lastSyncAt` is only stamped by real completions. The KB detail page shows the banner.
 

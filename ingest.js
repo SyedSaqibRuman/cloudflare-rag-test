@@ -17,6 +17,7 @@ import { resolveKbAdapters, resolveLegacyAdapters } from "./ingest/resolve.js";
 import { createGraphExtractor, createLlmEntityExtractor } from "./ingest/graph-extract.js";
 import { createSourceAdapter } from "./ingest/sources/index.js";
 import { fireIngestionWebhook } from "./ingest/webhooks.js";
+import { createIngestionStatsRecorder } from "./ingest/stats-recorder.js";
 import { fetchPost, fetchPage, fetchWpByIds } from "./services/wp.js";
 
 import { CompanyRepository, KbRepository, AuditRepository } from "./mysql/repositories.js";
@@ -39,6 +40,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
   let savedScope = null; // KB's saved scope from source_config (also caps URL discovery)
   let savedMaxUrls; // explicit source_config.maxUrls (undefined → adapter default)
   let ingestionScope = null; // effective run scope (request override wins over saved)
+  let statsRecorder = null; // checkpoints last-run stats on the KB row (see below)
 
   try {
     console.log("🔧 Initializing...");
@@ -185,7 +187,18 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
     // path's computation here.
     if (!ingestionScope) ingestionScope = resolveEffectiveScope(scope, savedScope, maxPages);
 
-    const startedAt = Date.now();
+    // Last-run stats (docs/chunks/duration) are checkpointed onto the KB row
+    // WHILE the run is in flight, not only on completion — a run that is
+    // stopped, paused, fails, or is killed by a server restart used to leave
+    // last_ingestion_* NULL, so the portal's KB cards showed "Chunks — /
+    // Last run never" even though documents and vectors existed. The final
+    // write below (finalize) still stamps the exact return stats on success.
+    statsRecorder = createIngestionStatsRecorder({
+      kbId,
+      mode: ingestionScope.scope || "all",
+      embedStats: embedStatsRef,
+    });
+
     const stats = await runIngestion({
       fetchPost: sourceAdapter.fetchPost,
       fetchPage: sourceAdapter.fetchPage,
@@ -198,29 +211,18 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
       r2Prefix,
       chunkOptions,
       scope: ingestionScope,
-      setProgress,
+      setProgress: (p) => {
+        statsRecorder.onProgress(p);
+        setProgress?.(p);
+      },
       graphAdapter,
     });
-    const durationMs = Date.now() - startedAt;
 
     if (kbId) {
       await KbRepository.setStatus(kbId, "active");
-      // Persist ingestion stats on the KB row so the status endpoint
+      // Persist the run's exact stats on the KB row so the status endpoint
       // can return them without re-querying the registry.
-      try {
-        await KbRepository.setIngestionStats(kbId, {
-          durationMs,
-          documentsProcessed: stats.processed,
-          documentsSkipped: stats.skipped,
-          chunksCreated: stats.chunks,
-          mode: ingestionScope.scope || "all",
-          // KB-bound embedding fallback visibility (may be null on the legacy path)
-          embeddingFallbacks: embedStatsRef?.fallbackBatches ?? null,
-          embeddingAdapterError: embedStatsRef?.lastError ?? null,
-        });
-      } catch {
-        /* stats persistence is best-effort */
-      }
+      await statsRecorder.finalize(stats);
       try {
         await AuditRepository.log({
           actorType: "system",
@@ -233,7 +235,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
             documentsProcessed: stats.processed,
             documentsSkipped: stats.skipped,
             chunksCreated: stats.chunks,
-            durationMs,
+            durationMs: statsRecorder.durationMs(),
           },
           reason: "ingest completion",
         });
@@ -249,7 +251,7 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
             documentsProcessed: stats.processed,
             documentsSkipped: stats.skipped,
             chunksCreated: stats.chunks,
-            durationMs,
+            durationMs: statsRecorder.durationMs(),
             mode: ingestionScope.scope || "all",
           },
           kbKey,
@@ -260,10 +262,13 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
     }
   } catch (error) {
     // Aborts own the lifecycle (stop/pause flows restore the status) — the
-    // row is left as-is and the exit is clean.
+    // row is left as-is and the exit is clean. The partial stats ARE flushed
+    // though (docs processed / chunks so far) so a stopped run still stamps
+    // the KB card's Chunks / Last run cells instead of leaving them blank.
     if (error instanceof AbortError || error.name === "AbortError") {
       console.log("🛑 Ingestion stopped by user.");
       logToFile("process.log", "🛑 Ingestion aborted by user");
+      await statsRecorder?.finalizePartial();
       return; // clean exit — do not rethrow
     }
 
@@ -272,6 +277,9 @@ export async function main({ signal, companyName, kbKey, maxPages, scope, setPro
     // not configured, unknown source_type) that previously exited silently,
     // leaving the row stuck "indexing" with no visible error anywhere.
     if (kbId) {
+      // Flush partial run stats BEFORE the error is recorded: the stats write
+      // nulls last_error (it's a "successful run" stamp), so ordering matters.
+      await statsRecorder?.finalizePartial();
       try {
         await KbRepository.setStatus(kbId, "error");
       } catch {
