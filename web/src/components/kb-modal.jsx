@@ -356,7 +356,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
     availableEmbeddingModels: [],
     unavailableEmbeddingModels: [],
   });
-  const [companyDefaults, setCompanyDefaults] = useState(null); // { VECTOR_INDEX, R2_BUCKET_NAME } | null
+  const [companyDefaults, setCompanyDefaults] = useState(null); // { VECTOR_INDEX, R2_BUCKET_NAME, BASE_URL } | null
   const [optionsError, setOptionsError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -367,6 +367,18 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
   const [advancedMode, setAdvancedMode] = useState(false);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // Selecting a source type. When the operator switches to a website (URL /
+  // Sitemap) source, prefill the Website URL from the company's BASE_URL so a
+  // KB that ingests the company's own site needs no typing. The prefill only
+  // fires when the field is empty — a URL the operator already typed (or one
+  // loaded from an existing KB row) is never overwritten.
+  const changeSourceType = (v) => {
+    set("sourceType", v);
+    if (v === "url" && !form.websiteUrl?.trim() && companyDefaults?.BASE_URL) {
+      set("websiteUrl", companyDefaults.BASE_URL);
+    }
+  };
 
   // Live mirror of the server's rest config validation (custom sources).
   const restErrors = useMemo(
@@ -507,6 +519,9 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
             setCompanyDefaults({
               VECTOR_INDEX: cfg.VECTOR_INDEX ?? cfg.STORAGE?.VECTOR_INDEX ?? "",
               R2_BUCKET_NAME: cfg.R2_BUCKET_NAME ?? cfg.STORAGE?.R2_BUCKET_NAME ?? "",
+              // Company's canonical website — prefills the KB website URL field
+              // when a URL/Sitemap source is selected (GENERAL section).
+              BASE_URL: cfg.BASE_URL ?? cfg.GENERAL?.BASE_URL ?? "",
             });
           })
           .catch(() => setCompanyDefaults(null)); // hint simply won't render
@@ -629,7 +644,10 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
       const key = r.external_resource_id || r.resource_key;
       if (seenVector.has(key)) continue;
       seenVector.add(key);
-      vectorResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
+      // Label with the Cloudflare-facing name (external_resource_id) so the
+      // dropdown reads exactly like the Cloudflare dashboard; resource_name /
+      // resource_key are the fallback for rows provisioned without one.
+      vectorResourceOpts.push({ value: String(r.id), label: `${r.external_resource_id || r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
     }
     for (const r of options.liveVectorResources || []) {
       const key = r.name || r.id;
@@ -652,7 +670,10 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
       const key = r.external_resource_id || r.resource_key;
       if (seenStorage.has(key)) continue;
       seenStorage.add(key);
-      storageResourceOpts.push({ value: String(r.id), label: `${r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
+      // Same Cloudflare-facing label rule as the Vector Store above: prefer
+      // external_resource_id so Document Storage mirrors the Cloudflare bucket
+      // name; resource_name / resource_key are the fallback.
+      storageResourceOpts.push({ value: String(r.id), label: `${r.external_resource_id || r.resource_name || r.resource_key}${r.provider_name ? ` · ${r.provider_name}` : ""}` });
     }
     for (const r of options.liveStorageResources || []) {
       const key = r.name || r.id;
@@ -830,7 +851,7 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
               </div>
             )}
 
-            <SourceTypeSelector value={form.sourceType} onChange={(v) => set("sourceType", v)} />
+            <SourceTypeSelector value={form.sourceType} onChange={changeSourceType} />
 
             {/* Scope selector for WordPress/URL */}
             {["wordpress", "url"].includes(form.sourceType) && (
@@ -1183,6 +1204,34 @@ export default function KbModal({ open, row, company, onClose, onSaved }) {
                     </div>
                   </div>
                 </div>
+                {/* Embedding model is surfaced in Basic mode too — it directly
+                    shapes retrieval quality and is the one AI choice most
+                    operators want control over. Same control as Advanced mode;
+                    the rest of the technical bindings stay behind the toggle. */}
+                <Select
+                  label="Embedding Model"
+                  options={modelOptions}
+                  value={form.embeddingModelId}
+                  onChange={(e) => set("embeddingModelId", e.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  The AI model that converts your text into searchable format. Only models you
+                  can actually call are listed — the provider must be connected on the AI Providers
+                  page.
+                </p>
+                {unavailableEmbeddingCount > 0 && (
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {unavailableEmbeddingCount} other model
+                    {unavailableEmbeddingCount === 1 ? " is" : "s are"} hidden — connect the
+                    provider on the AI Providers page to use {unavailableEmbeddingCount === 1 ? "it" : "them"}.
+                  </p>
+                )}
+                {selectedModel && (
+                  <div className="mt-2 flex gap-4 text-[11px] text-slate-500">
+                    <span>Provider: <span className="text-slate-300">{selectedModel.provider_name}</span></span>
+                    {selectedModel.dimensions && <span>Dimensions: <span className="text-slate-300">{selectedModel.dimensions}</span></span>}
+                  </div>
+                )}
               </Section>
             </>
           )}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, listProviders, getProvider, getKbOptions, listCredentials, listAssistants } from "../api";
+import { api, listProviders, getProvider, getKbOptions, listCredentials, listAssistants, listKbs } from "../api";
 import AskApiKeyCard from "./config/AskApiKeyCard.jsx";
 import BlockedPatternsCard from "./config/BlockedPatternsCard.jsx";
 import ChatPlaygroundCard from "./config/ChatPlaygroundCard.jsx";
@@ -8,7 +8,7 @@ import { Card, Button, Input, Select, Spinner, SkeletonCard, Tabs, TabPanel } fr
 import { useCompanies } from "../context";
 import { useHeaderActions } from "../components/Layout";
 import { useToast } from "../hooks";
-import { GENERAL_KEYS, EMBEDDING_DIMENSIONS } from "../models";
+import { GENERAL_KEYS, EMBEDDING_DIMENSIONS, RERANKING_MODELS } from "../models";
 
 const GENERAL_LABELS = {
   BASE_URL: "Base Website",
@@ -50,6 +50,10 @@ export default function Config() {
   // Company's gateway assistants — the selected one drives the ask API.
   const [assistants, setAssistants] = useState([]);
   const [assistantsNote, setAssistantsNote] = useState(null);
+  // Company's knowledge bases — used to mirror the selected assistant's
+  // primary-KB bindings (vector index / storage bucket / graph DB) so the
+  // Config page shows the values the ask pipeline will actually use.
+  const [kbs, setKbs] = useState([]);
   const [activeTab, setActiveTab] = useState("general");
 
   const load = async (name) => {
@@ -189,6 +193,29 @@ export default function Config() {
     };
   }, [company]);
 
+  // Company's knowledge bases — resolved alongside assistants so the Models
+  // tab can mirror the selected assistant's primary-KB bindings (vector index,
+  // storage bucket, graph DB) as a read-through of what the ask path uses.
+  // Best-effort: a missing KB list leaves the mirror hidden, never blocks the page.
+  useEffect(() => {
+    if (!company) {
+      setKbs([]);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const result = await listKbs(company);
+        if (live) setKbs(result.items ?? result ?? []);
+      } catch {
+        if (live) setKbs([]);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [company]);
+
   // Live Cloudflare rows ({ id, name, … }) → the { resource_key, resource_name }
   // shape the selectors expect, deduped against the registry rows by name.
   const mergeResources = (live, registry) => {
@@ -292,6 +319,29 @@ export default function Config() {
     }
     return opts;
   };
+  // Reranker options. The generic modelOptions("reranker", …) filter comes up
+  // empty because the reranker models are seeded under category "embedding" in
+  // the catalog, so a category match finds nothing. Source them from the
+  // backend RERANKING_MODELS allowlist (shared source of truth, re-exported via
+  // models.js) instead, prefer catalog rows for a friendly name, and always keep
+  // the company's current stored value selectable.
+  const rerankerOptions = (current) => {
+    const seen = new Set();
+    const opts = [{ value: "", label: "— Select model —" }];
+    const push = (key, name) => {
+      if (seen.has(key)) return;
+      seen.add(key);
+      opts.push({ value: key, label: name ? `${name} (${key})` : key });
+    };
+    if (current) push(current, current);
+    for (const key of RERANKING_MODELS) {
+      const row = catalogModels.find((m) => m.model_key === key);
+      push(key, row?.model_name || key);
+    }
+    return opts;
+  };
+
+
 
   // Select options for a company resource list (vector index / R2 bucket / any
   // provider): the catalog rows plus the current stored value when it isn't in
@@ -356,6 +406,26 @@ export default function Config() {
   // EMBEDDING_DIMENSIONS only auto-follows models in the built-in map.
   const embeddingUnknownDims = draft?.EMBEDDING_MODEL && !EMBEDDING_DIMENSIONS[draft.EMBEDDING_MODEL];
 
+  // -------- Assistant primary-KB mirror --------
+  // The ask pipeline does NOT read the company VECTOR_INDEX / R2_BUCKET_NAME /
+  // NEO4J_DATABASE when an assistant is selected — it uses the assistant's
+  // primary KB bindings instead (query/assistant.js). This resolves that
+  // primary KB so the Models tab can show the effective values (read-only)
+  // and demote the company-level selectors to fallbacks while it's active.
+  const selectedAssistant = assistants.find((a) => a.assistant_key === draft?.ASSISTANT_KEY) || null;
+  const primaryKb =
+    selectedAssistant?.primary_kb_id != null
+      ? kbs.find((k) => String(k.id) === String(selectedAssistant.primary_kb_id)) || null
+      : null;
+  const primaryKbMirror = primaryKb
+    ? [
+        { label: "Vector Index", value: primaryKb.vector_external_id || primaryKb.vector_resource_name || "Company default" },
+        { label: "Storage (R2) Bucket", value: primaryKb.storage_external_id || primaryKb.storage_resource_name || "Company default" },
+        { label: "Graph Database (Neo4j)", value: primaryKb.graph_resource_name || primaryKb.graph_external_id || "Company default" },
+        { label: "Embedding Model", value: primaryKb.embedding_model_name || primaryKb.embedding_model_provider || "Company default" },
+      ]
+    : null;
+
   useHeaderActions(
     <div className="flex items-center justify-end gap-2">
       {company && (
@@ -416,6 +486,25 @@ export default function Config() {
           </TabPanel>
 
           <TabPanel id="models" active={activeTab}>
+          {primaryKbMirror && (
+            <Card
+              title="Assistant's Knowledge Base (in use)"
+              subtitle={`The selected assistant '${draft.ASSISTANT_KEY}' answers from this KB — these values override the company defaults below.`}
+            >
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-3 md:grid-cols-2">
+                {primaryKbMirror.map((row) => (
+                  <div key={row.label}>
+                    <dt className="text-xs font-medium text-slate-400">{row.label}</dt>
+                    <dd className="mt-0.5 text-sm text-slate-200">{row.value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-3 text-xs text-slate-500">
+                Managed on the Knowledge Bases page — edit "{primaryKb.kb_name || primaryKb.kb_key}" there. These are
+                read-only here; the selectors below are only the fallback used when no assistant is selected.
+              </p>
+            </Card>
+          )}
           <Card
             title="Models & Provider"
             subtitle="AI provider and its models, selected from the gateway catalog"
@@ -494,7 +583,7 @@ export default function Config() {
                 />
                 <Select
                   label="Reranking Model"
-                  options={modelOptions("reranker", draft.RERANKING_MODEL ?? "")}
+                  options={rerankerOptions(draft.RERANKING_MODEL ?? "")}
                   value={draft.RERANKING_MODEL ?? ""}
                   onChange={(e) => setKey("RERANKING_MODEL", e.target.value)}
                 />
